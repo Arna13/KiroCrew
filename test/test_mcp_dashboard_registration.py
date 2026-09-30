@@ -384,6 +384,7 @@ class TestWhatThisSetGrants:
         "session_rename",
         "session_close",
         "session_revive",
+        "session_history_list",
         "session_send",
         # The fan-out verb. In the SAME granted set as `session_send` and not a
         # server of its own, because it grants no reach that one does not: it

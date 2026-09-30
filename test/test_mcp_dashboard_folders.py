@@ -1805,6 +1805,7 @@ class TestAdvertisedSet:
             "session_rename",
             "session_close",
             "session_revive",
+            "session_history_list",
             "session_send",
             "session_broadcast",
             "session_status",
