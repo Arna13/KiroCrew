@@ -208,9 +208,13 @@ whole turn — `stream` and `stream_command`, around `_claim_shared_turn` and ev
 event yield. While it is held at most one chat turn is in flight, so the frame's
 producer is unambiguous and an idle co-tenant is not consuming its queue: the
 frame it receives is discarded by its next turn's pre-turn drain, never applied.
-The backend already answers one prompt at a time on the shared stdin, so this
-removes no parallelism the process could otherwise have offered; the sharing buys
-memory (one process for N sessions), not concurrent chat turns. Second, the
+This DOES cost concurrency, and the spec states it rather than claiming
+otherwise: the process is not strictly one-turn-at-a-time — a sub-agent runs on
+its principal's process while the principal's own turn is still open (see the
+sub-agent exemption below) — so serializing the chat turns on it means a long
+turn in one chat makes the other chats on that process wait for the gate. The
+sharing buys memory (one process for N sessions) and trades wall-clock time for
+it; it does not add concurrent chat turns. Second, the
 consumer gates the cross-session STATE mutations on `owns_frame`
 (`session_handle`), so a `fanout_no_owner` frame a mid-turn consumer does see
 mutates nothing it does not own.

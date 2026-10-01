@@ -1680,6 +1680,33 @@ class SessionLifecycleService:
                         key,
                         pid,
                     )
+                    # Fail-safe reap-on-release. The skip above leaves the pid for
+                    # its holders to end -- a co-tenant chat's last lease release
+                    # kills it. But a pid held ONLY by a subagent TENANCY (no lease:
+                    # a subagent mid-turn on a process whose own session is the one
+                    # being reset) has no lease release to come, and this skip never
+                    # records that a kill was owed, so the tenant's last release has
+                    # nothing to hand back -- the process is left resident once the
+                    # subagent's turn ends. Recording the refusal here marks the live
+                    # tenancy claims owed, exactly as ``authorize_runtime_kill`` does,
+                    # so ``RuntimeTenancy.release`` hands the orphan back to the last
+                    # tenant to tear down. ``refuse_for_tenants`` marks every live
+                    # tenancy claim on the pid whether or not a lease is out; what
+                    # keeps that safe is ``release``, which hands nothing back while
+                    # ``outstanding_leases`` is non-empty -- so a lease-held pid's
+                    # marked claim still returns None on release, and only a pid with
+                    # no lease (a subagent-only survivor) is reaped. A pid the
+                    # registry names no tenant on marks nothing.
+                    if pid and platform_compat.pid_exists(pid):
+                        try:
+                            RUNTIME_TENANCY.refuse_for_tenants(pid)
+                        except Exception:
+                            logger.debug(
+                                "Reset %s: recording the tenancy reap debt for PID %d failed",
+                                key,
+                                pid,
+                                exc_info=True,
+                            )
                 elif platform_compat.pid_exists(pid):
                     logger.warning("Reset %s: PID %d survived shutdown, force-killing", key, pid)
                     try:

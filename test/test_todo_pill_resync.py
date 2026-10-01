@@ -1209,6 +1209,13 @@ async def test_a_clear_frame_on_a_turn_that_did_not_type_clear_leaves_the_pill(
         real_broadcast(kind, payload, *a, **k),
     )[1]
     provider = (await state.sessions.get_or_create())[0]
+    # A fanned ownerless clear only reaches a peer on a chat-SHARED runtime. The
+    # runner gates the ownerless-clear skip on ``is_shared_chat_runtime(client)``
+    # (the ``_shared_runtime`` flag) so the default (non-sharing) path stays
+    # byte-identical to base -- a runtime lease does NOT separate the two, since
+    # the unshared path takes one at registration too. This shared-runtime
+    # scenario must therefore present a shared provider for the guard to engage.
+    provider._shared_runtime = True
 
     async def stream(message, *args, **kwargs):
         sent.append(message)
