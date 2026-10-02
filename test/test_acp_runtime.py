@@ -31,7 +31,7 @@ import sys
 import time
 import weakref
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import pytest
 from spawn_test_helpers import strip_spawn_shim
@@ -366,7 +366,11 @@ async def test_derived_worker_identity_keeps_freshness_and_readiness(
             agent_name="kirocrew-worker",
         )
         wire.runtime._kas_custom_agents.assert_awaited_once_with(
-            "kirocrew-worker", member_dispatch=False, crew_panel=False, session_key=key
+            "kirocrew-worker",
+            member_dispatch=False,
+            crew_panel=False,
+            session_key=key,
+            session_work_dir=ANY,
         )
         if revoked:
             wire.status("connected", extra_servers=("kirocrew-work",))
@@ -502,6 +506,7 @@ async def test_kas_readiness_delays_prompt_until_active_managed_tools(
             member_dispatch=False,
             crew_panel=False,
             session_key="subagent:readiness-worker",
+            session_work_dir=ANY,
         )
         # Two pre-mode snapshots must be consumed without satisfying this activation.
         for _ in range(3 if pre_ready else 1):
@@ -6747,7 +6752,14 @@ class TestRuntimeMemberDispatchDisabled:
         rt, _, _ = _make_runtime()
         seen: list[bool] = []
 
-        async def _capture(_agent, *, member_dispatch=False, crew_panel=False, session_key=""):
+        async def _capture(
+            _agent,
+            *,
+            member_dispatch=False,
+            crew_panel=False,
+            session_key="",
+            session_work_dir=None,
+        ):
             seen.append(member_dispatch)
             return SessionExtras(custom_agents=None, derived_spec_snapshot=None)
 
@@ -7017,7 +7029,9 @@ class TestAcpRuntimeLoadSession:
                 return {"modes": {"currentModeId": "kirocrew"}, "models": []}
             return {}
 
-        async def _fake_agents(agent, *, member_dispatch=False, crew_panel=False, session_key=""):
+        async def _fake_agents(
+            agent, *, member_dispatch=False, crew_panel=False, session_key="", session_work_dir=None
+        ):
             from kiro_crew.acp.harness import SessionExtras
 
             return SessionExtras(custom_agents=[{"id": agent, "prompt": "p", "tools": []}])
@@ -7064,7 +7078,9 @@ class TestAcpRuntimeLoadSession:
                 return {"modes": {"currentModeId": "kirocrew"}, "models": []}
             return {}
 
-        async def _fake_agents(agent, *, member_dispatch=False, crew_panel=False, session_key=""):
+        async def _fake_agents(
+            agent, *, member_dispatch=False, crew_panel=False, session_key="", session_work_dir=None
+        ):
             from kiro_crew.acp.harness import SessionExtras
 
             return SessionExtras(custom_agents=[{"id": agent, "prompt": "p", "tools": []}])
@@ -7121,7 +7137,9 @@ class TestAcpRuntimeLoadSession:
                 return {"sessionId": "sid-kas-new"}
             return {}
 
-        async def _fake_agents(agent, *, member_dispatch=False, crew_panel=False, session_key=""):
+        async def _fake_agents(
+            agent, *, member_dispatch=False, crew_panel=False, session_key="", session_work_dir=None
+        ):
             from kiro_crew.acp.harness import SessionExtras
 
             return SessionExtras(
@@ -7187,7 +7205,9 @@ class TestAcpRuntimeLoadSession:
                 return {"modes": {"currentModeId": "kirocrew"}, "models": []}
             return {}
 
-        async def _fake_agents(agent, *, member_dispatch=False, crew_panel=False, session_key=""):
+        async def _fake_agents(
+            agent, *, member_dispatch=False, crew_panel=False, session_key="", session_work_dir=None
+        ):
             from kiro_crew.acp.harness import SessionExtras
 
             return SessionExtras(custom_agents=[{"id": agent, "prompt": "p", "tools": []}])
@@ -7222,7 +7242,9 @@ class TestAcpRuntimeLoadSession:
                 return {"modes": {"currentModeId": "kirocrew"}, "models": []}
             return {}
 
-        async def _fake_agents(agent, *, member_dispatch=False, crew_panel=False, session_key=""):
+        async def _fake_agents(
+            agent, *, member_dispatch=False, crew_panel=False, session_key="", session_work_dir=None
+        ):
             from kiro_crew.acp.harness import SessionExtras
 
             calls.append(agent)
