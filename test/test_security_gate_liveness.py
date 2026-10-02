@@ -262,7 +262,15 @@ def _url_payload_command(n: int) -> str:
 #: MCP server) parses a large hosts file in the call instead of refusing as
 #: pending with no retry coming. One branch, reusing ``atomic_write.on_event_loop``,
 #: and the docstring and comment naming it; the on-loop path is unchanged.
-_PACKAGE_LINE_BUDGET = 28_872
+#:
+#: Raised again, from 28,872, for ``_deny_pattern_passes``: ``is_denied``'s
+#: whole-string and per-segment passes moved, unchanged, into one helper so that
+#: ``is_denied_synthesized_target(..., segments=True)`` can run them over the
+#: operator's own rules for a shell title kiro-cli cut short -- a rule anchored to
+#: one chained command of that title would otherwise stop firing. No new rule, no new
+#: matching logic and no floor change: the growth is the helper's signature, the flag
+#: and its docstring.
+_PACKAGE_LINE_BUDGET = 28_906
 
 #: Ceiling on any ONE file in the package. This is what the bound is really for --
 #: a package total says nothing about a single file growing back into a second
