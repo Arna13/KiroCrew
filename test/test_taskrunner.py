@@ -1101,6 +1101,68 @@ class TestBuildStepPrompt:
         assert "✅ 1. Done" in prompt
 
 
+class TestRetryAgentPersistBeforePublish:
+    """The retry agent is persisted before the retry is acknowledged.
+
+    ``retry_from_task(agent=...)`` must assign ``run.agent`` BEFORE the awaited
+    ``_apersist_runs()`` snapshot, so a restart before the next snapshot restores
+    the run on its new agent, not its old one (persist-before-you-publish). On a
+    persist failure the assignment rolls back with the rest of the run state.
+    """
+
+    @staticmethod
+    def _runner_with_run(agent: str) -> "tuple[TaskRunner, TaskRun]":
+        sessions = _make_mock_sessions()
+        runner = TaskRunner(sessions=sessions, auto_test=False)
+        run = TaskRun(spec_path="/tmp/t.md", spec_content="spec", status="failed", agent=agent)
+        run.tasks = [Step(index=1, title="A", description="a", status=StepStatus.FAILED)]
+        runner._require_workflow_ready = MagicMock()  # type: ignore[method-assign]
+        runner._resolve_task = MagicMock(return_value=run)  # type: ignore[method-assign]
+        runner._reserve_start = AsyncMock()  # type: ignore[method-assign]
+        runner._bound_history_key = AsyncMock(return_value="hk")  # type: ignore[method-assign]
+        runner._release_start = MagicMock()  # type: ignore[method-assign]
+        # The background retry does real work; cut it short at its first guard so
+        # the test isolates the acknowledged-snapshot path before it.
+        runner._workflow_rebind = AsyncMock()  # type: ignore[method-assign]
+        runner._ensure_resumable_workspace = AsyncMock(  # type: ignore[method-assign]
+            return_value=False
+        )
+        return runner, run
+
+    @pytest.mark.asyncio
+    async def test_retry_agent_is_assigned_before_the_persist(self) -> None:
+        runner, run = self._runner_with_run("old")
+        agent_at_persist: list[str] = []
+
+        async def _capture_persist() -> None:
+            agent_at_persist.append(run.agent)
+
+        runner._apersist_runs = _capture_persist  # type: ignore[method-assign]
+        task_id = await runner.retry_from_task(run.task_id, from_task=1, agent="new")
+        bg = runner._tasks.get(task_id)
+        if bg is not None:
+            await asyncio.gather(bg, return_exceptions=True)
+
+        # The snapshot that acknowledges the retry saw the NEW agent, not "old".
+        assert agent_at_persist and agent_at_persist[0] == "new"
+        assert run.agent == "new"
+
+    @pytest.mark.asyncio
+    async def test_a_persist_failure_rolls_the_agent_back(self) -> None:
+        runner, run = self._runner_with_run("old")
+
+        async def _fail_persist() -> None:
+            raise RuntimeError("persist worker drained")
+
+        runner._apersist_runs = _fail_persist  # type: ignore[method-assign]
+        with pytest.raises(RuntimeError):
+            await runner.retry_from_task(run.task_id, from_task=1, agent="new")
+
+        # The failed persist restored the run on its original agent and status.
+        assert run.agent == "old"
+        assert run.status == "failed"
+
+
 # ── Status ──
 
 

@@ -102,7 +102,11 @@ from kiro_crew.messaging.link import (
     split_namespaced_channel_id,
 )
 from kiro_crew.messaging.renderer import display_safe
-from kiro_crew.notifications.attribution import MAX_PRODUCER_KEYS, producer_session_keys
+from kiro_crew.notifications.attribution import (
+    MAX_PRODUCER_KEYS,
+    producer_session_keys,
+    system_origin,
+)
 from kiro_crew.notifications.bridge import BridgeDispatcher
 from kiro_crew.notifications.bus import (
     NotificationBus,
@@ -256,6 +260,7 @@ _BRIDGE_AUTH_IDENTITY_KEYS = frozenset(
         "producer_session",
         "producer_agent",
         "producer_agent_required",
+        "producer_agent_unresolved",
         "producer_system",
     }
 )
@@ -7722,7 +7727,13 @@ class DashboardState:
             # The log alone is not enough: an empty library with no word on
             # screen reads as data loss. The bell feed is where the user looks.
             for warning in self._knowledge_store.warnings:
-                self.notify("agent", "Knowledge library was reset", warning, url="/knowledge")
+                self.notify(
+                    "agent",
+                    "Knowledge library was reset",
+                    warning,
+                    meta=system_origin(),
+                    url="/knowledge",
+                )
         return self._knowledge_store
 
     def enable_yolo(self, *, from_config: bool = False) -> None:
@@ -8149,16 +8160,40 @@ class DashboardState:
         names does not end the lookup: a subagent completion names its child's agent
         AND its parent session, and that parent's agent is judged as well. Added-only,
         so it can only tighten.
+
+        When attribution is REQUIRED (``producer_agent_required``), the completeness
+        signal ``producer_agent_unresolved`` is also recomputed here from this
+        persisted pass and OVERWRITES the producer-supplied value. The producing site
+        can only count the producers it could resolve at emit time: a subagent/task-run
+        completion names its child AND its originating chat, but on a restart the parent
+        session's agent is unknown at the site, so the site reports ``"0"`` after
+        counting the child alone. Trusting that count would let the note egress on the
+        child's profile and skip the parent agent's own channel denial -- the exact gap
+        the completeness rule exists to close. Recomputing per producer key here, after
+        the parent has had its persisted lookup, marks the note incomplete when any
+        required producer resolved no agent at all.
         """
         from kiro_crew.dashboard.handlers._shared import _session_agent_names
 
         found: list[str] = []
+        unresolved = 0
         for key in _producer_keys(note):
             try:
-                found.extend(_session_agent_names(self, key, persisted=True))
+                names = _session_agent_names(self, key, persisted=True)
             except Exception:  # noqa: BLE001 - an unresolvable key adds nothing
                 logger.debug("persisted producer lookup failed for a note", exc_info=True)
+                names = []
+            if names:
+                found.extend(names)
+            else:
+                unresolved += 1
         _merge_identity_values(note, "producer_agent", found)
+        if note.get("producer_agent_required"):
+            # Overwrite, never trust, the site's count: it was computed before the
+            # parent could be resolved. A producer key that resolved no agent in this
+            # persisted pass is an unresolved required producer, so the bridge denies
+            # the note rather than attribute it on a subagent-only match.
+            note["producer_agent_unresolved"] = str(unresolved)
 
     def _schedule_bridge_after_persist(
         self,

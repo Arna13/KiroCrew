@@ -195,8 +195,6 @@ src/kiro_crew/eval/bench/scorers.py
 src/kiro_crew/eval/runner.py
 src/kiro_crew/eval/scenario.py
 src/kiro_crew/frontend.py
-src/kiro_crew/gateway_shutdown_budget.py
-src/kiro_crew/image_artifacts.py
 src/kiro_crew/imaging.py
 src/kiro_crew/knowledge/agent_fetch.py
 src/kiro_crew/knowledge/agent_source.py
@@ -882,6 +880,5 @@ test/test_workflows_store.py
 test/test_workspace_absolute_paths.py
 test/test_write_secret_file.py
 test/test_ws_and_plan_memory_fixes.py
-test/test_ws_event_scoping.py
 test/test_xdist_host_budget.py
 test/windows_sim.py

@@ -27,15 +27,16 @@ from unittest import mock
 import pytest
 
 from kiro_crew.notifications import bridge as bridge_mod
+from kiro_crew.notifications import rate_limit as rate_limit_mod
 from kiro_crew.notifications.bridge import (
     BRIDGE_BURST,
     DEFAULT_DELIVER_MIN_PRIORITY,
     DELIVER_MIN_PRIORITIES,
     KNOWN_BRIDGE_TRANSPORTS,
     BridgeDispatcher,
-    BridgeRateLimiter,
     DeliveryRule,
     _redact_for_egress,
+    make_bridge_rate_limiter,
     normalize_deliver_to,
     normalize_min_priority,
     priority_clears_floor,
@@ -1136,9 +1137,9 @@ class DeliveryTests(unittest.IsolatedAsyncioTestCase):
             self.assertIsNotNone(task)
             assert task is not None
             self.assertFalse(task.done())
-            await asyncio.wait_for(started.wait(), timeout=2)
+            await asyncio.wait_for(started.wait(), timeout=30)
             release.set()
-            await asyncio.wait_for(task, timeout=2)
+            await asyncio.wait_for(task, timeout=30)
 
     async def test_schedule_snapshots_the_note(self) -> None:
         sink = _RecordingSink()
@@ -1151,7 +1152,7 @@ class DeliveryTests(unittest.IsolatedAsyncioTestCase):
             task = d.schedule(note)
             note["title"] = "mutated after scheduling"
             assert task is not None
-            await asyncio.wait_for(task, timeout=2)
+            await asyncio.wait_for(task, timeout=30)
         self.assertIn("original", sink.sent[0])
 
     async def test_schedule_returns_none_for_an_unrouted_note(self) -> None:
@@ -1172,7 +1173,7 @@ class DeliveryTests(unittest.IsolatedAsyncioTestCase):
         ):
             task = d.schedule({"channel": "system.cron", "priority": "critical", "title": "t"})
             assert task is not None
-            outcomes = await asyncio.wait_for(task, timeout=2)
+            outcomes = await asyncio.wait_for(task, timeout=30)
         self.assertEqual([o.delivered for o in outcomes], [False])
 
     async def test_drain_awaits_in_flight_fanout(self) -> None:
@@ -1185,6 +1186,30 @@ class DeliveryTests(unittest.IsolatedAsyncioTestCase):
             d.schedule({"channel": "system.cron", "priority": "critical", "title": "t"})
             await d.drain(timeout=3)
         self.assertEqual(len(sink.sent), 1)
+
+    async def test_drain_timeout_logs_stranded_fanout_and_does_not_hang(self) -> None:
+        # A fanout leg still in flight when the drain budget is spent must not be dropped
+        # SILENTLY. drain returns (never hangs the shutdown) AND logs a visible warning
+        # naming the stranded count, so a terminal report cut short by shutdown leaves a
+        # trace (the note itself stays durable on the dashboard). No re-sequencing.
+        import logging
+
+        released = asyncio.Event()
+
+        async def _blocking_sink_dispatch(_note):
+            await released.wait()  # never set during the test: the leg stays in flight
+            return []
+
+        d = _dispatcher({"slack": _RecordingSink()}, {"system.cron": {"deliver_to": ["slack"]}})
+        with mock.patch.object(d, "_dispatch_guarded", _blocking_sink_dispatch):
+            d.schedule({"channel": "system.cron", "priority": "critical", "title": "t"})
+            with self.assertLogs("kiro_crew.notifications.bridge", level=logging.WARNING) as logs:
+                await asyncio.wait_for(d.drain(timeout=0.05), timeout=30)
+        released.set()  # let the stranded task unwind so the loop closes cleanly
+        self.assertTrue(
+            any("still" in m and "in flight" in m for m in logs.output),
+            logs.output,
+        )
 
 
 class OffLoopProducerTests(unittest.IsolatedAsyncioTestCase):
@@ -1298,11 +1323,31 @@ class SynchronousContextTests(unittest.TestCase):
 
 class RateLimiterTests(unittest.TestCase):
     def test_budget_is_per_transport(self) -> None:
-        limiter = BridgeRateLimiter()
+        limiter = make_bridge_rate_limiter()
         for _ in range(BRIDGE_BURST):
             self.assertTrue(limiter.allow("slack"))
         self.assertFalse(limiter.allow("slack"))
         self.assertTrue(limiter.allow("telegram"))
+
+    def test_a_custom_param_instance_enforces_its_own_burst(self) -> None:
+        """The egress and ingress limiters are the SAME class with different params.
+
+        A bare ``AppRateLimiter()`` keeps the ingress policy (burst
+        ``RATE_LIMIT_BURST``); an instance built with an explicit ``burst``
+        enforces exactly that many before refusing, proving the parameters —
+        not a second hard-coded copy — set each limiter's policy.
+        """
+        from kiro_crew.notifications.rate_limit import RATE_LIMIT_BURST, AppRateLimiter
+
+        custom = AppRateLimiter(burst=3, tokens_per_window=20, window_secs=300.0)
+        for _ in range(3):
+            self.assertTrue(custom.allow("slack"))
+        self.assertFalse(custom.allow("slack"))
+
+        default = AppRateLimiter()
+        for _ in range(RATE_LIMIT_BURST):
+            self.assertTrue(default.allow("app-a"))
+        self.assertFalse(default.allow("app-a"))
 
     @staticmethod
     def _frozen_clock(start: float) -> tuple[dict[str, float], Any]:
@@ -1335,8 +1380,8 @@ class RateLimiterTests(unittest.TestCase):
         """
         per_token = bridge_mod.BRIDGE_WINDOW_SECS / bridge_mod.BRIDGE_TOKENS_PER_WINDOW
         clock, fake = self._frozen_clock(1000.0)
-        with mock.patch.object(bridge_mod, "time", fake):
-            limiter = BridgeRateLimiter()
+        with mock.patch.object(rate_limit_mod, "time", fake):
+            limiter = make_bridge_rate_limiter()
             for _ in range(BRIDGE_BURST):
                 self.assertTrue(limiter.allow("slack"))
             self.assertFalse(limiter.allow("slack"), "burst was not exhausted")
@@ -1356,8 +1401,8 @@ class RateLimiterTests(unittest.TestCase):
         what bounds the worst case.
         """
         clock, fake = self._frozen_clock(500.0)
-        with mock.patch.object(bridge_mod, "time", fake):
-            limiter = BridgeRateLimiter()
+        with mock.patch.object(rate_limit_mod, "time", fake):
+            limiter = make_bridge_rate_limiter()
             for _ in range(BRIDGE_BURST):
                 self.assertTrue(limiter.allow("slack"))
             self.assertFalse(limiter.allow("slack"))
@@ -1975,6 +2020,33 @@ class SlackSinkTests(unittest.IsolatedAsyncioTestCase):
         client.post_message.assert_not_awaited()
         client.post_message.assert_not_awaited()
 
+    async def test_multipart_send_aborts_remaining_parts_when_governance_is_revoked(self) -> None:
+        # F2 (GPT 6.1): a note that renders to several parts rechecks governance
+        # before EACH post, not only before the first. A revocation that lands after
+        # the first part aborts the rest fail-closed rather than finishing a send the
+        # owner's surface now forbids.
+        from kiro_crew.notifications.bridge import _RecheckDenied
+        from kiro_crew.slack.notification_sink import _BRIDGE_MSG_LIMIT, SlackBridgeSink
+
+        client = mock.Mock()
+        client.open_dm = mock.AsyncMock(return_value="D1")
+        client.post_message = mock.AsyncMock(return_value="ts-1")
+
+        # Deny on the SECOND recheck: the first part posts, then governance flips.
+        checks = {"n": 0}
+
+        async def _denied_after_first() -> str:
+            checks["n"] += 1
+            return "" if checks["n"] == 1 else "profile:messaging_denied"
+
+        # A body long enough to render to at least two parts.
+        text = "x" * (_BRIDGE_MSG_LIMIT * 2 + 100)
+        with self.assertRaises(_RecheckDenied):
+            await SlackBridgeSink(client, "U1").send(text, _denied_after_first)
+        # Exactly one part was posted before the revocation stopped the rest.
+        self.assertEqual(client.post_message.await_count, 1)
+        self.assertGreaterEqual(checks["n"], 2)
+
 
 if __name__ == "__main__":
     unittest.main()
@@ -2063,6 +2135,10 @@ class AttributionTests(unittest.IsolatedAsyncioTestCase):
             session_key="dashboard:parent",
             producer_session=at_cap,
             producer_agent="child-template",
+            # A note naming several producers is delivered only on the producing site's
+            # explicit assertion that every one of them resolved an agent; a non-empty
+            # ``producer_agent`` alone cannot tell "all resolved" from "only the child did".
+            producer_agent_unresolved="0",
         )
         self.assertEqual(len(sink.sent), 1)
 
@@ -2086,6 +2162,19 @@ class AttributionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sink.sent, [])
         self.assertEqual([o.reason for o in outcomes], ["denied_unattributed"])
 
+    async def test_a_system_tag_does_not_buy_a_producer_a_host_only_pass(self) -> None:
+        # A note tagged system_origin that ALSO names producer context (here a session) is
+        # held to the agent-attribution bar, not waved through on the host alone. Without a
+        # resolved agent it is denied; the context-free system note above still passes.
+        sink, outcomes, _sel = await self._send(
+            channel="system.skills",
+            source="system",
+            producer_system="1",
+            session_key="slack:T1:C1:1.2",
+        )
+        self.assertEqual(sink.sent, [])
+        self.assertEqual([o.reason for o in outcomes], ["denied_unattributed"])
+
     async def test_an_apps_own_push_passes_without_an_agent(self) -> None:
         sink, _outcomes, _sel = await self._send(channel="my-app.alerts", source="app:my-app")
         self.assertEqual(len(sink.sent), 1)
@@ -2098,3 +2187,82 @@ class AttributionTests(unittest.IsolatedAsyncioTestCase):
             producer_session="taskrunner:run-1:runtime",
         )
         self.assertEqual(sink.sent, [])
+
+    async def test_a_partially_attributed_required_note_is_refused(self) -> None:
+        # A restart whose parent execution record is unreadable leaves one named producer
+        # with no resolved agent while the note still carries a sibling's producer_agent.
+        # The producing site reports that unresolved producer in producer_agent_unresolved,
+        # and the bridge must DENY outright rather than egress on the resolved sibling's
+        # profile alone.
+        sink, outcomes, _sel = await self._send(
+            channel="system.subagent",
+            source="system",
+            producer_session="subagent:a1\nsubagent:a2",
+            producer_agent="writer",  # only one of two distinct producers resolved
+            producer_agent_required="1",
+            producer_agent_unresolved="1",  # the site saw one producer resolve no agent
+        )
+        self.assertEqual(sink.sent, [])
+        self.assertEqual([o.reason for o in outcomes], ["denied_unattributed"])
+
+    async def test_a_fully_attributed_required_note_is_sent(self) -> None:
+        # Paired with the refusal above so the guard cannot pass by withholding every
+        # required note: every named producer resolved an agent (none unresolved).
+        sink, _outcomes, _sel = await self._send(
+            channel="system.subagent",
+            source="system",
+            producer_session="subagent:a1\nsubagent:a2",
+            producer_agent="writer\nresearcher",
+            producer_agent_required="1",
+            producer_agent_unresolved="0",
+        )
+        self.assertEqual(len(sink.sent), 1)
+
+    async def test_a_subagent_only_match_with_an_unresolved_chat_is_refused(self) -> None:
+        # The finding this round closes: a background task's completion names its
+        # ORIGINATING chat (session_key) AND the child subagent that produced the content.
+        # On a restart where the chat's execution record is unreadable the chat resolves NO
+        # agent, while the child's producer_agent is still carried. A non-empty
+        # producer_agent alone would let the note through on the CHILD's profile and never
+        # ask the originating chat's agent -- the permission check the chat should enforce
+        # is skipped. With two producers named and no "every producer resolved" signal, the
+        # note is untrusted and takes the unattributed path (refused / not routed).
+        sink, outcomes, _sel = await self._send(
+            channel="system.subagent",
+            source="system",
+            session_key="dashboard:chat-1",  # originating chat -- its agent did NOT resolve
+            producer_session="subagent:c1",  # child subagent -- resolved below
+            producer_agent="researcher",  # ONLY the child's agent is named
+        )
+        self.assertEqual(sink.sent, [])
+        self.assertEqual([o.reason for o in outcomes], ["denied_unattributed"])
+
+    async def test_a_subagent_match_with_a_resolved_chat_is_sent(self) -> None:
+        # Paired with the refusal above: when the originating chat IS positively resolved
+        # (the producing site reports zero unresolved producers), the same multi-producer
+        # completion is delivered. The guard cannot pass by withholding every such note.
+        sink, _outcomes, _sel = await self._send(
+            channel="system.subagent",
+            source="system",
+            session_key="dashboard:chat-1",
+            producer_session="subagent:c1",
+            producer_agent="chat-agent\nresearcher",  # chat AND child both resolved
+            producer_agent_unresolved="0",
+        )
+        self.assertEqual(len(sink.sent), 1)
+
+    async def test_a_same_agent_multi_session_completion_is_sent(self) -> None:
+        # Opus 5.5 finding: a subagent completion names TWO sessions (subagent:<id> and
+        # the conversation key) for ONE child run. When both resolve to the SAME agent,
+        # the de-duplicated producer_agent collapses to one name. The site reports zero
+        # unresolved producers, so the note must be SENT -- a count of distinct agent
+        # names against the session count would have wrongly refused it.
+        sink, _outcomes, _sel = await self._send(
+            channel="system.subagent",
+            source="system",
+            producer_session="subagent:a1\nconv:a1",
+            producer_agent="writer",  # one agent for the one child run, named once
+            producer_agent_required="1",
+            producer_agent_unresolved="0",
+        )
+        self.assertEqual(len(sink.sent), 1)

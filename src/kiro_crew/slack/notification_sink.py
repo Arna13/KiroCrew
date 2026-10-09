@@ -49,23 +49,25 @@ class SlackBridgeSink:
 
         Opening the DM is a real round-trip to Slack, so governance that was
         true when the bridge vetted this leg can go stale while it runs. The
-        ``recheck`` is therefore re-run AFTER the DM resolves and immediately
-        before the first post: a denial that landed during the open aborts the
-        send fail-closed (``_RecheckDenied``) rather than posting a note the
-        owner's surface now forbids. The window between this check and the
-        request landing at Slack is irreducible, but it is now bounded by a
-        single post rather than by the whole DM-open.
+        ``recheck`` is therefore re-run after the DM resolves and immediately
+        before EACH post: a note that renders to several parts posts them in
+        sequence, and a denial that lands between two posts aborts the remaining
+        parts fail-closed (``_RecheckDenied``) rather than finishing a send the
+        owner's surface now forbids. The window between a given part's check and
+        that part's request landing at Slack is irreducible, but it is bounded by
+        a single post, and a revocation can suppress every part after the one in
+        flight.
         """
         channel = await open_dm_with_retry(
             self._client, self._owner_id, context="Notification bridge"
         )
         if not channel:
             raise RuntimeError("could not open owner DM")
-        denial = await recheck()
-        if denial:
-            raise _RecheckDenied(denial)
         message_id = ""
         for part in render_for_slack(text, limit=_BRIDGE_MSG_LIMIT):
+            denial = await recheck()
+            if denial:
+                raise _RecheckDenied(denial)
             message_id = await self._client.post_message(channel, part, None) or ""
         return str(message_id)
 

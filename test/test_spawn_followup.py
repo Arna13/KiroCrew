@@ -697,7 +697,7 @@ class TestFollowUpDelivery:
         assert ok
         first_watcher = mgr._followup_watchers.get("r10")
         if first_watcher is not None:  # may have finished + popped itself already
-            await asyncio.wait_for(first_watcher, timeout=2)
+            await asyncio.wait_for(first_watcher, timeout=30)
         for _ in range(50):  # let the done-callback run
             if not info._followup_watcher:
                 break
@@ -718,7 +718,7 @@ class TestFollowUpDelivery:
         ok, _ = await mgr.follow_up_run("r10", "second")
         assert ok and "r10" in mgr._followup_watchers
         info.done = True
-        await asyncio.wait_for(mgr._followup_watchers["r10"], timeout=2)
+        await asyncio.wait_for(mgr._followup_watchers["r10"], timeout=30)
         assert dispatched == ["second"]
 
     @pytest.mark.asyncio

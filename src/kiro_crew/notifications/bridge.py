@@ -33,14 +33,14 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import time
 from collections.abc import Awaitable, Callable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Protocol
 
 from kiro_crew import sel as _sel
 from kiro_crew.messaging.display_safety import redact_for_display as _redact_for_display
 from kiro_crew.messaging.display_safety import strip_ansi as _strip_ansi
+from kiro_crew.notifications.rate_limit import AppRateLimiter
 from kiro_crew.platform import governance_profiles as _governance
 from kiro_crew.platform.governance_profiles import HOST_SESSION_KEY
 from kiro_crew.security import exfil as _exfil
@@ -93,7 +93,6 @@ BRIDGE_ORIGIN = "notification-bridge"
 BRIDGE_TOKENS_PER_WINDOW = 20
 BRIDGE_WINDOW_SECS = 300.0
 BRIDGE_BURST = 5
-_BRIDGE_REFILL_RATE = BRIDGE_TOKENS_PER_WINDOW / BRIDGE_WINDOW_SECS
 
 # The bus sets ``source`` from the verified app token as ``app:<name>``, and a
 # request body cannot override it. That makes it the one producer identity on a
@@ -178,31 +177,19 @@ class BridgeOutcome:
     message_id: str = ""
 
 
-@dataclass
-class _Bucket:
-    tokens: float = float(BRIDGE_BURST)
-    last_refill: float = field(default_factory=time.monotonic)
+def make_bridge_rate_limiter() -> AppRateLimiter:
+    """The egress per-transport limiter: one :class:`AppRateLimiter` instance with
+    the bridge's coarser budget (burst 5, 20 per 5 min), keyed by transport id.
 
-
-class BridgeRateLimiter:
-    """Token bucket per transport id. Event-loop use, like the ingress one."""
-
-    def __init__(self) -> None:
-        self._buckets: dict[str, _Bucket] = {}
-
-    def allow(self, transport: str) -> bool:
-        now = time.monotonic()
-        bucket = self._buckets.get(transport)
-        if bucket is None:
-            bucket = _Bucket(last_refill=now)
-            self._buckets[transport] = bucket
-        elapsed = now - bucket.last_refill
-        bucket.tokens = min(float(BRIDGE_BURST), bucket.tokens + elapsed * _BRIDGE_REFILL_RATE)
-        bucket.last_refill = now
-        if bucket.tokens >= 1.0:
-            bucket.tokens -= 1.0
-            return True
-        return False
+    One algorithm, two policies: the ingress per-app limiter and this egress
+    per-transport limiter are the SAME :class:`AppRateLimiter` class instantiated
+    with different parameters, not two token-bucket copies that can drift.
+    """
+    return AppRateLimiter(
+        burst=BRIDGE_BURST,
+        tokens_per_window=BRIDGE_TOKENS_PER_WINDOW,
+        window_secs=BRIDGE_WINDOW_SECS,
+    )
 
 
 def normalize_deliver_to(value: Any) -> tuple[str, ...]:
@@ -464,7 +451,7 @@ class BridgeDispatcher:
         sink_resolver: Callable[[str], BridgeSink | None],
         settings_reader: Callable[[str], Mapping[str, Any]],
         loop_provider: Callable[[], asyncio.AbstractEventLoop | None] | None = None,
-        rate_limiter: BridgeRateLimiter | None = None,
+        rate_limiter: AppRateLimiter | None = None,
         host_session_key: str = HOST_SESSION_KEY,
         origin_provider: Callable[[], str] | None = None,
         routing_leaf_fit: Callable[[], bool] | None = None,
@@ -473,7 +460,7 @@ class BridgeDispatcher:
         self._resolve_sink = sink_resolver
         self._read_settings = settings_reader
         self._resolve_loop = loop_provider
-        self._limiter = rate_limiter or BridgeRateLimiter()
+        self._limiter = rate_limiter or make_bridge_rate_limiter()
         self._host_session_key = host_session_key
         # Whether the file the routes are read from is in a shape the sandbox can mask
         # (a regular file with one name). An unfit leaf means a sandboxed process may have
@@ -600,6 +587,19 @@ class BridgeDispatcher:
                 return
             remaining = deadline - loop.time()
             if remaining <= 0:
+                # Fail-safe: the drain budget is spent and fanout is still in flight.
+                # These notes are already durable on the dashboard (``schedule`` is gated
+                # on the persist future), so they are not lost -- but returning silently
+                # here would leave a terminal report that never reached chat with no
+                # trace at all. Make the
+                # strand VISIBLE instead: one WARNING naming how many legs did not finish,
+                # so an operator can see a shutdown cut delivery short. No re-sequencing.
+                logger.warning(
+                    "Notification bridge drain timed out with %d fanout task(s) still "
+                    "in flight; those chat deliveries did not complete before shutdown "
+                    "(the notes remain on the dashboard).",
+                    len(pending),
+                )
                 return
             await asyncio.wait(pending, timeout=remaining)
 
@@ -827,22 +827,101 @@ class BridgeDispatcher:
             # judged on each of them too.
             return f"note names more than {MAX_PRODUCER_KEYS} producer sessions"
         system = note.get("source") == "system" and note.get(SYSTEM_ORIGIN_KEY) == "1"
-        if system or self._producing_app(note):
-            # A system note, or an app's own push: its producer is named (the app is
-            # judged under its own profile below), and any session it also names
-            # is still asked as an added subject.
+        # The system tag is a pass on the HOST profile alone, but ONLY for a note that
+        # names no producer context at all -- a truly context-free host event (a config
+        # reload, a resource-pressure alert, a restart-crash dump). A producer that ALSO
+        # carries a session, app or agent yet tags itself system -- a route arm, a subagent
+        # completion, a skill-candidate hook, a legacy-orphan digest -- is NOT context-free.
+        # Fail-safe rule: a system-tagged note that names ANY producer context is held to
+        # the SAME attribution bar as an agent-produced note below; the tag does not grant
+        # a producer a host-only pass.
+        #
+        # The one exception is ``job_id`` on a genuinely system-tagged note: a script or
+        # command cron runs NO agent, so its result is honestly system-produced and names
+        # no agent to resolve. Its ``job_id`` is still applied as the ``cron:<id>`` subject
+        # in ``_vet`` (so the job's own governance binds), but on a system note it is a vet
+        # subject, not an agent claim -- otherwise the note is refused as "agent-produced
+        # with no agent" and a script/command cron result could never route. An AGENT cron
+        # does not tag itself system, so it keeps the full attribution bar below.
+        job_is_agent_claim = bool(self._note_values(note, "job_id")) and not system
+        has_context = bool(
+            self._claimed_session(note)
+            or self._note_values(note, "producer_session")
+            or self._note_values(note, "producer_app")
+            or self._note_values(note, "producer_agent")
+            or self._note_values(note, "task_id")
+            or job_is_agent_claim
+            or note.get("producer_agent_required")
+        )
+        if system and not has_context:
+            # Context-free host event, or a system-tagged script/command cron whose only
+            # context is its ``cron:<id>`` vet subject: the tag is honest.
+            return ""
+        if self._producing_app(note) and not has_context:
+            # An app's own push with no further context: the app is judged under its
+            # own profile below; nothing else to attribute.
             return ""
         agent_claims = bool(
             self._claimed_session(note)
             or self._note_values(note, "producer_session")
             or self._note_values(note, "task_id")
-            or self._note_values(note, "job_id")
+            or job_is_agent_claim
             or note.get("producer_agent_required")
         )
         if agent_claims:
             if self._note_values(note, "producer_agent"):
+                # Fail-safe: every producer the note names must have resolved an agent,
+                # not merely SOME producer. A completion names its ORIGINATING chat (its
+                # ``session_key``) AND the child subagent that produced the content; on a
+                # restart where the chat's execution record is unreadable the chat's agent
+                # stays unresolved while the note still carries the CHILD's
+                # ``producer_agent``. A non-empty check alone would then let the note
+                # through on the child's profile and skip the originating chat's agent
+                # entirely -- the exact gap this rule exists to close. Attribution is
+                # trusted ONLY when the originating chat is positively resolved; a
+                # subagent-only match is untrusted and takes the unattributed path (the
+                # permission check applies / the note is not routed to a chat transport).
+                #
+                # The producing SITE knows the per-producer resolution (it looked each one
+                # up), so it reports how many producers resolved NO agent in
+                # ``producer_agent_unresolved``: ``"0"`` is a positive assertion that every
+                # named producer resolved. This is sound where a de-duplicated agent count
+                # is not -- a subagent completion names two sessions (``subagent:<id>`` and
+                # the conversation key) for ONE child run that resolves one agent (zero
+                # unresolved, so it passes), while an orphan digest whose parent record is
+                # unreadable reports a positive count and is refused even though a sibling
+                # orphan resolved several agent names.
+                #
+                # When the note names MORE THAN ONE distinct producer session, the
+                # completeness signal is MANDATORY: a non-empty ``producer_agent`` cannot
+                # distinguish "every producer resolved" from "only the child did", so a
+                # multi-producer note without an explicit ``producer_agent_unresolved ==
+                # "0"`` is refused. A single-producer note is attributed by its one
+                # resolved agent, which IS that producer's agent, so it needs no count.
+                unresolved_raw = note.get("producer_agent_unresolved")
+                if unresolved_raw is not None and str(unresolved_raw).strip() != "":
+                    try:
+                        unresolved = int(unresolved_raw)
+                    except (TypeError, ValueError):
+                        # A malformed count cannot establish completeness: refuse.
+                        return "producer agent unresolved for a required producer"
+                    if unresolved > 0:
+                        return "producer agent unresolved for a required producer"
+                    return ""
+                from kiro_crew.notifications.attribution import producer_session_keys
+
+                if len(producer_session_keys(note)) > 1:
+                    # Several producers named but no completeness signal: the resolved
+                    # agent could be any one of them, so the originating chat may be the
+                    # unresolved one. Refuse rather than egress on a subagent-only match.
+                    return "producer agent unresolved for a multi-producer note"
                 return ""
             return "producer agent unresolved for an agent-produced note"
+        if self._producing_app(note) or self._note_values(note, "producer_app"):
+            # No agent-claim, but the note names its producing app (an app's own push,
+            # or a system-tagged producer carrying a server-set ``producer_app``). The
+            # app subject is vetted in ``_vet``, so this is attributed.
+            return ""
         return "note names no producer and is not tagged system-originated"
 
     def _vet(self, transport: str, note: Mapping[str, Any]) -> str:
@@ -1030,7 +1109,7 @@ __all__ = [
     "KNOWN_BRIDGE_TRANSPORTS",
     "BridgeDispatcher",
     "BridgeOutcome",
-    "BridgeRateLimiter",
+    "make_bridge_rate_limiter",
     "BridgeSink",
     "DeliveryRule",
     "normalize_deliver_to",

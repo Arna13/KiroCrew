@@ -2500,6 +2500,7 @@ class TaskRunner:
                 run.finished_at,
                 run.started_at,
                 run.last_task_time,
+                run.agent,
             )
             previous_tasks = [
                 (task, task.status, task.error, task.result, task.attempts)
@@ -2516,14 +2517,24 @@ class TaskRunner:
                 run.error = ""
                 run.finished_at = 0.0
                 run.started_at = run.last_task_time = time.time()
+                # Assign the retry's agent BEFORE the persist: the snapshot must
+                # record the acknowledged selection, so a restart before the next
+                # snapshot restores the run on its new agent, not its old one
+                # (persist-before-you-publish). Rolled back below with the rest.
+                run.agent = agent
                 await self._apersist_runs()
             except BaseException:
                 # Persistence drains its worker even on repeated cancellation.
                 # Restore in place: callers may retain the Project/Task objects.
                 # Restore live state until a later snapshot succeeds.
-                run.status, run.error, run.finished_at, run.started_at, run.last_task_time = (
-                    previous_run
-                )
+                (
+                    run.status,
+                    run.error,
+                    run.finished_at,
+                    run.started_at,
+                    run.last_task_time,
+                    run.agent,
+                ) = previous_run
                 for task, status, error, result, attempts in previous_tasks:
                     task.status, task.error, task.result, task.attempts = (
                         status,
@@ -2532,8 +2543,9 @@ class TaskRunner:
                         attempts,
                     )
                 raise
+            # ``run.agent`` is assigned before the persist above so the snapshot
+            # records it; only the runner's own ``self._agent`` field remains to set.
             self._agent = agent
-            run.agent = agent
         except BaseException:
             self._release_start(task_id)
             raise

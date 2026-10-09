@@ -255,11 +255,39 @@ def _record_pending_stamp(pending: bytes) -> None:
     ones already recorded, so nothing becomes authorized that was not before except
     the payload held in memory; a file a sandbox planted stays unmatched. Raises
     ``OSError`` before anything is published when it cannot be written.
+
+    Bounding to ``_MAX_STAMP_DIGESTS`` keeps the newest digests, but recency alone is
+    not enough: a save that fails to publish (a locked file) leaves the file unchanged
+    yet still records its candidate digest, so a run of such failures would slide the
+    digest of the file ACTUALLY on disk out of the kept window and the next load would
+    strip every route from a file this gateway did write. So the on-disk file's own
+    digest is pinned when it is already recorded (an unrecorded one is a file this
+    module did not write and must stay unmatched), and the bound then drops the oldest
+    OTHER digests -- never that pin, never the pending payload.
     """
-    # The newest digests are last; keep those, since one of them covers the file now.
-    digests = _recorded_digests()[-(_MAX_STAMP_DIGESTS - 1) :]
+    recorded = _recorded_digests()
     new = hashlib.sha256(pending).hexdigest()
-    _write_stamp_digests([d for d in digests if d != new] + [new])
+    # The digest of the bytes on disk now, kept only when it is already authorized, so
+    # a failed candidate's digest can be evicted but the committed file's never is.
+    current = _current_file_digest()
+    pinned = current if current in recorded else None
+    # Newest-last; keep the pin and the pending payload, fill the remaining slots with
+    # the most recent other digests, oldest dropped first.
+    keep = [d for d in recorded if d not in (new, pinned)][-(_MAX_STAMP_DIGESTS - 2) :]
+    digests = ([pinned] if pinned is not None else []) + keep + [new]
+    _write_stamp_digests(digests[-_MAX_STAMP_DIGESTS:])
+
+
+def _current_file_digest() -> str | None:
+    """sha256 of the settings file on disk now, or ``None`` when it cannot be read.
+
+    Pins the committed file's digest across the pending-stamp bound so a run of
+    failed saves cannot evict it (see :func:`_record_pending_stamp`).
+    """
+    try:
+        return hashlib.sha256(_settings_path().read_bytes()).hexdigest()
+    except OSError:
+        return None
 
 
 def _record_write_stamp(published: bytes) -> None:
@@ -366,6 +394,26 @@ def _read_stored() -> dict[str, dict[str, Any]]:
         # defaults (everything unmuted, producer priorities honored).
         logger.warning("Failed to load %s; using defaults", path, exc_info=True)
     return {}
+
+
+def _has_real_settings_file(path) -> bool:
+    """True when *path* holds a REAL settings document, not the sandbox stub.
+
+    The sandbox pre-creates the file as a bare ``{}`` (an empty mask ceiling with
+    no ``channel_settings`` key); every :meth:`update` / :meth:`_payload` write, by
+    contrast, produces a ``{"channel_settings": {...}}`` document. So the presence
+    of a top-level ``channel_settings`` key is what tells a user's real settings
+    from the precreate stub.
+
+    Fail-safe: a file that exists but cannot be read or parsed is reported as REAL,
+    so :meth:`install_imported` never overwrites a settings file it merely failed to
+    read -- the never-overwrite contract must hold on an unreadable file too.
+    """
+    try:
+        data = json.loads(path.read_bytes().decode("utf-8"))
+    except Exception:
+        return True
+    return isinstance(data, dict) and isinstance(data.get("channel_settings"), dict)
 
 
 def _seeded(settings: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
@@ -740,10 +788,20 @@ class ChannelSettings:
         lock :meth:`update` writes under, so an update that creates the file
         first wins; persisted before memory is committed, exactly as
         :meth:`update` does. Returns whether the file was written.
+
+        The sandbox pre-creates ``notification_settings.json`` as a bare ``{}``
+        stub (an empty mask ceiling, no ``channel_settings`` key) on an install
+        that has spawned an agent, so a plain ``lexists`` would read that stub as
+        "already has settings" and skip the import on every such install -- losing
+        the archive's mutes, priorities and routes. A file that holds only the
+        precreate stub is therefore treated as absent: the never-overwrite
+        contract protects a REAL settings file (one that carries a
+        ``channel_settings`` key, which every :meth:`update` / :meth:`_payload`
+        write produces), not the sandbox stub.
         """
         with _lock:
             path = _settings_path()
-            if os.path.lexists(path):
+            if os.path.lexists(path) and _has_real_settings_file(path):
                 return False
             candidate = {channel: dict(entry) for channel, entry in incoming.items()}
             # Every write keeps a system.monitor key ({} when unset), as update()

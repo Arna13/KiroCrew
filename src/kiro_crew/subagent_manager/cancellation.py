@@ -1806,8 +1806,15 @@ class CancellationCoordinator(ManagerComponent):
                         # completion from the next start's recovery permanently -- the exact
                         # loss the straggler path below guards against. Clear it and confirm
                         # the folder is visible again, mirroring that path (GPT 6.1 F2).
+                        # ``clear_tombstone`` returns False for two opposite states -- a
+                        # folder that never carried a tombstone (recoverable) and one whose
+                        # tombstone survived the unlink (lost) -- so the recoverability log
+                        # line is chosen from ``orphan_recovery_can_see`` ALONE, which asks
+                        # the one question that matters: is the folder visible to the next
+                        # start's reconciliation (Opus 5.5).
                         try:
-                            if clear_tombstone(info.id) and orphan_recovery_can_see(info.id):
+                            clear_tombstone(info.id)
+                            if orphan_recovery_can_see(info.id):
                                 logger.warning(
                                     "cancel_all: %s abandoned mid-teardown -- tombstone "
                                     "cleared and re-admitted to orphan recovery for the "
@@ -1923,7 +1930,8 @@ class CancellationCoordinator(ManagerComponent):
                         continue
                     info._shutdown_outcome_abandoned = True
                     try:
-                        if clear_tombstone(info.id) and orphan_recovery_can_see(info.id):
+                        clear_tombstone(info.id)
+                        if orphan_recovery_can_see(info.id):
                             logger.warning(
                                 "cancel_all: %s's completion was not delivered -- "
                                 "re-admitted to orphan recovery for the next start",

@@ -1028,16 +1028,16 @@ class TestTheCarryForwardReadIsNeverOnTheLoop:
                         " an _impl method resolves 'asyncio' only"
                     )
                     checked += 1
-        # Seven offloads live in _impl methods. In _report_terminal_impl: the
-        # delivery path's mark and the leaked delivery's mark. In the drained
-        # queue: its delivered mark and the batch settlement. In _notify_orphan_impl:
-        # the delivered-notice tombstone. In _reconcile_orphans_impl: the DEFERRED
-        # tombstone written after the digest DM confirms delivery for a digest-pending
-        # orphan -- this branch routes the reconcile notice through the chat-transport
-        # bridge and defers that one write to the post-scan digest, in place of main's
-        # single inline reconcile write; the net count is unchanged. All run off the
-        # loop because each reads any existing tombstone and the call site is a
-        # coroutine on the loop.
+        # Seven offloads live in _impl methods. In _report_terminal_impl: the delivery
+        # path's mark and the leaked delivery's mark. In monitoring.py: the digest-hold
+        # tombstone and the notify-orphan tombstone (the reconcile delivered-case write is
+        # routed through the module-local _tombstone_unless_present helper, which is not a
+        # writer the probe counts). In the drained queue (settle_queued_delivery_impl): its
+        # delivered mark, its reconcile-settlement tombstone, and the batch settlement.
+        # Orphan-DM tombstone timing follows main's existing contract (the delivered-only
+        # deferred-tombstone variant is tracked as a deferred finding, not implemented
+        # here). Each is off the loop because it writes a file (and some read any existing
+        # tombstone) while the call site is a coroutine on the loop.
         assert checked == 7, f"expected 7 _impl offloads, found {checked}"
 
     def test_the_source_reads_do_not_depend_on_the_working_directory(self, tmp_path, monkeypatch):
