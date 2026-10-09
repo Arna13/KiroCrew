@@ -256,7 +256,34 @@ def _url_payload_command(n: int) -> str:
 #: data-consumer exemption. The branch grows a ``(?<!^-)`` guard and its comment states
 #: which terminal ``e`` is the command. Every execute construct it read before is still
 #: read; no other pattern moved.
-_PACKAGE_LINE_BUDGET = 28_864
+#:
+#: Raised again for the recursive-force ``rm`` deletion floor in the ``rm_floor.py``
+#: sibling module: an argv-structural gate that reads the ``rm`` command's own argv
+#: (flags in any position/spelling, the ``$HOME``/``~``/glob targets, brace-expanded
+#: flags and operands), a UNION with the two catalog regexes kept LIVE as a
+#: fail-closed deny-net. It carries the GPT 6.1 over-refusal fixes to the floor: a
+#: piped/compound substitution body and a multi-operand producer body left
+#: unresolved, a read-only ``git`` search's arguments read as data, a case-variant
+#: home sibling kept distinct on a case-sensitive filesystem, and a bounded
+#: parameter-expansion rejoin. It also keeps a command-substitution ``)`` from
+#: ending the ``rm`` argv (so a trailing target after ``$(…)`` is still classified)
+#: and classifies each command line of a multi-line ``-c`` payload on its own. Home
+#: equality lowercases both sides (a home path with an uppercase letter still
+#: denies), the ``${`` boundary scan stops rescanning past an unclosed run, a
+#: length-changing lowercase still neutralizes a non-``HOME`` variable, an
+#: index-only ``git rm --cached`` and a redirect source/target are not floor rm
+#: targets. It also carries two further fixes: all heredocs declared on one line
+#: are consumed in order (a second ``<<`` body is data, not a command), and a
+#: literal-home operand with a glued control operator (``…; ls`` / ``|cat`` /
+#: ``( … )``) still denies, and a heredoc fed to an executing shell
+#: (``bash <<'EOF'``) is classified as a script so a ``rm -fr ~`` body still denies.
+#:
+#: Rebased onto main: the budget is the package's measured total, carrying both
+#: main's growth (the sed ``e``-branch guard above) and this module. It is the sum
+#: of main's security files plus ``rm_floor.py`` and the two GPT 6.1 fail-open fixes
+#: in it (a brace-aware program-word helper, ``r{m,}`` -> ``rm``, and the ``{`` entry
+#: machinery pre-check, plus the one-or-more-star home tail). No new file.
+_PACKAGE_LINE_BUDGET = 32_947
 
 #: Ceiling on any ONE file in the package. This is what the bound is really for --
 #: a package total says nothing about a single file growing back into a second
