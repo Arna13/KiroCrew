@@ -354,9 +354,7 @@ def _read_approved_grants(name: str) -> dict[str, list[str]] | None:
         return {family: [] for family in STAGED_GRANT_FAMILIES}
 
 
-def _effective_approved_grants(
-    name: str, meta: InstalledApp | None
-) -> dict[str, list[str]] | None:
+def _effective_approved_grants(name: str, meta: InstalledApp | None) -> dict[str, list[str]] | None:
     """*name*'s approved set as *meta* (its install record) qualifies it.
 
     A missing file approves what the manifest declares (``None``) only for a
@@ -2810,9 +2808,7 @@ def enable_app(
             error_code="session_approval_consent_required",
         )
 
-    current_grants = (
-        _effective_approved_grants(name, meta) if grants_consent is not None else None
-    )
+    current_grants = _effective_approved_grants(name, meta) if grants_consent is not None else None
     approve_grants = grants_consent is not None and current_grants is not None
     if meta.enabled and not approve_grants:
         return AppResult(ok=True, name=name, message=f"{name} is already enabled")
@@ -3342,9 +3338,7 @@ def register_external_app(
                 resources=f"name={name!r}",
                 error=cron_grant_error,
             )
-            return AppResult(
-                ok=False, name=name, error=f"invalid manifest: {cron_grant_error}"
-            )
+            return AppResult(ok=False, name=name, error=f"invalid manifest: {cron_grant_error}")
 
     # Self-registration is routine (self-managed apps re-register on every
     # launch) and the app authors its own manifest, so this path can widen the
@@ -3365,9 +3359,7 @@ def register_external_app(
     # Same holding back as ``update_app`` for added api/events entries. A first
     # registration approves what it declares: there is no earlier approval to
     # widen, as with an install.
-    new_permissions = (
-        manifest_data.get("permissions") if isinstance(manifest_data, dict) else None
-    )
+    new_permissions = manifest_data.get("permissions") if isinstance(manifest_data, dict) else None
     prior_grants = _effective_approved_grants(name, existing) if existing else None
     prior_grants_present = _approved_grants_path(name).is_file() if existing else False
     approved_grants: dict[str, list[str]] | None
