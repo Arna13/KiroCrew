@@ -924,6 +924,7 @@ def test_the_member_grants_extend_the_conductor_grants_in_order() -> None:
         "@kirocrew-panel/dashboard_fields",
         "@kirocrew-panel/dashboard_types",
         "@kirocrew-panel/dashboard_write",
+        "@kirocrew-panel/dashboard_save",
         "@kirocrew-panel/dashboard_templates",
         "@kirocrew-panel/dashboard_preview",
         "@kirocrew-panel/dashboard_apply",
