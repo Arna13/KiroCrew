@@ -10168,30 +10168,35 @@ def reset_backend() -> None:
 _SANDBOX_MODE_ALIASES = {"auto": "standard"}
 
 
-def credential_mask_applies(mode: str) -> bool:
-    """Whether :func:`wrap_argv` would actually APPLY ``extra_hidden_dirs`` for *mode*.
+def credential_mask_state(mode: str) -> str:
+    """Three-state answer to :func:`credential_mask_applies`'s question for *mode*.
 
-    Exactly two outcomes hand back an UNWRAPPED child, dropping the mask: the ``off``
-    tier, and a host with no backend where unsandboxed exec is opted in and no
-    governance floor mandates a sandbox (the ``return argv, None`` after
-    ``_warn_no_isolation``). Every other path either wraps the argv -- ``namespace``
-    and ``sandbox-exec`` both thread ``extra_hidden_dirs`` through -- or REFUSES the
-    spawn outright with :class:`SandboxUnavailableError`, and a refusal needs no guard
-    because nothing starts.
+    Returns one of:
 
-    Note this predicate is STRICTER than that inventory on one path: with no
-    backend it never consults the unsandboxed-exec opt-in, so the opted-in host
-    answers False rather than tracking that mutable value. See the branch below.
+    * ``"applies"`` -- :func:`wrap_argv` would thread ``extra_hidden_dirs`` through the
+      backend it selects (or refuse the spawn outright, which also needs no guard).
+    * ``"absent"`` -- a DEFINITE no: the ``off`` tier, a process already inside a Crew
+      sandbox, or a successful probe that found no backend. The host genuinely carries
+      no mask and a caller may rely on that being settled.
+    * ``"indeterminate"`` -- the backend probe could not conclude (a transient or
+      deferred failure: :func:`detect_backend` returned ``"none"`` WITHOUT caching it,
+      so the next spawn re-probes). We cannot yet tell ``applies`` from ``absent``.
 
-    This lives here, beside those branches, so a caller whose security argument
-    depends on the mask cannot drift from them: a future branch that skips the mask
-    is a change to this function, not a silent hole in some other module's copy of
-    the reasoning.
+    The split exists because the two negatives are not equivalent to a security caller:
+    collapsing ``indeterminate`` into "the mask does not apply" lets a refusal that
+    depends on the mask fail OPEN during ordinary startup probe pressure. A caller whose
+    safety rests on the mask refuses on ``indeterminate`` (fail-safe); only ``applies``
+    and ``absent`` are settled answers. :func:`credential_mask_applies` keeps its old
+    two-valued contract by mapping both negatives to ``False``, so no existing caller
+    changes.
+
+    No caching, no re-check machinery: this reads the same preflight signals
+    :func:`credential_mask_applies` already reads and classifies them.
     """
     floor = _governance_sandbox_floor()
     effective = _clamp_sandbox_mode_to_floor(mode, floor)
     if effective == "off":
-        return False
+        return "absent"
     # Already inside a Kiro Crew sandbox: a nested re-wrap is impossible by design,
     # wrap_argv passes the argv through (at most an env scrub) and never reaches a
     # backend that could apply the mask. The OUTER sandbox confines the child, but it
@@ -10199,10 +10204,22 @@ def credential_mask_applies(mode: str) -> bool:
     # ~/.ssh and ~/.kube readable for kiro-cli's sake -- so it is NOT a substitute for
     # an adapter-specific credential mask.
     if _inside_kirocrew_sandbox() and _macos_sandbox_state() is not False:
-        return False
+        return "absent"
     if detect_backend(config_mode=effective) != "none":
-        return True
-    # backend == "none": FAIL CLOSED, reading NO policy value to decide it.
+        return "applies"
+    # backend == "none": either a DEFINITE no, or a probe that could not conclude.
+    #
+    # detect_backend returns "none" in two distinct cases. A successful probe that
+    # found no backend CACHES ``_backend = "none"`` -- that is a settled ``absent``.
+    # A TRANSIENT or deferred probe failure (on the event loop, or two failed
+    # off-loop attempts) returns "none" WITHOUT caching, recording the transient
+    # token in ``_last_unshare_failure`` so the next spawn re-probes -- that is
+    # ``indeterminate``, and a mask-dependent refusal must NOT treat it as settled.
+    if _backend != "none":
+        transient, _reason, _remedy = _last_unshare_failure or (False, "", "")
+        if transient:
+            return "indeterminate"
+    # Settled no backend: FAIL CLOSED, reading NO policy value to decide it.
     #
     # Nothing on a host without a backend can carry ``extra_hidden_dirs``, so the
     # only question was whether the spawn would be refused instead -- and every
@@ -10220,7 +10237,31 @@ def credential_mask_applies(mode: str) -> bool:
     # raises -- so this changes which layer reports it, not whether it works. Only an
     # ENFORCED adapter reaches here at all: ``enforce_sandbox_floor`` returns early
     # for every harness this core does not enforce, so no first-class path changes.
-    return False
+    return "absent"
+
+
+def credential_mask_applies(mode: str) -> bool:
+    """Whether :func:`wrap_argv` would actually APPLY ``extra_hidden_dirs`` for *mode*.
+
+    Exactly two outcomes hand back an UNWRAPPED child, dropping the mask: the ``off``
+    tier, and a host with no backend where unsandboxed exec is opted in and no
+    governance floor mandates a sandbox (the ``return argv, None`` after
+    ``_warn_no_isolation``). Every other path either wraps the argv -- ``namespace``
+    and ``sandbox-exec`` both thread ``extra_hidden_dirs`` through -- or REFUSES the
+    spawn outright with :class:`SandboxUnavailableError`, and a refusal needs no guard
+    because nothing starts.
+
+    Note this predicate is STRICTER than that inventory on one path: with no
+    backend it never consults the unsandboxed-exec opt-in, so the opted-in host
+    answers False rather than tracking that mutable value.
+
+    Two-valued by contract, over the three-valued :func:`credential_mask_state`: both
+    the settled ``absent`` and the unsettled ``indeterminate`` map to ``False`` here,
+    exactly as this returned before the split, so every existing caller is unchanged. A
+    caller that must fail SAFE on an inconclusive probe reads
+    :func:`credential_mask_state` directly and refuses on ``indeterminate``.
+    """
+    return credential_mask_state(mode) == "applies"
 
 
 def spawn_delegates_masking() -> bool:
