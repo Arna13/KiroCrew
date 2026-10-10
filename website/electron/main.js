@@ -403,9 +403,7 @@ const shellBundleWatch = createShellBundleWatch({
   isQuitting: () => isQuitting,
   isUpdating: () => gateway.isInstallingUpdate(),
   log: glog,
-  onPruned: () => {
-    void promptRestartForPrunedBundle({ dialog, requestQuit, log: glog });
-  },
+  onPruned: () => promptRestartForPrunedBundle({ dialog, requestQuit, log: glog }),
 });
 const gateway = createGatewaySupervisor({
   app,
