@@ -289,6 +289,27 @@ class SlackClientOps(ABC):
         """
         return []
 
+    async def fetch_channel_history(
+        self, channel: str, limit: int = 20, oldest: str | None = None
+    ) -> list[dict]:
+        """Fetch recent messages from a channel/DM timeline (newest first).
+
+        Returns a list of message dicts with 'user'/'bot_id', 'text', 'ts'.
+        Default returns empty list — subclasses override to hit Slack.
+        """
+        return []
+
+    async def fetch_thread_history(
+        self, channel: str, thread_ts: str, limit: int = 20, oldest: str | None = None
+    ) -> list[dict]:
+        """Fetch a thread's replies, surfacing errors (newest kept).
+
+        Like fetch_channel_history but for one thread: does NOT swallow
+        SlackApiError, pages to the end so the newest replies are not dropped,
+        and honours *oldest*. Default returns empty list — subclasses override.
+        """
+        return []
+
     async def conversations_list(self) -> list[dict]:
         """List channels the bot can see. Each dict has at least ``id`` and ``name``.
 
@@ -300,6 +321,10 @@ class SlackClientOps(ABC):
     async def download_file(self, url: str, dest: str) -> None:
         """Download a Slack-hosted file to a local path."""
         raise NotImplementedError
+
+
+#: Most conversations.replies pages fetch_thread_history reads (200 replies each).
+_THREAD_HISTORY_MAX_PAGES = 50
 
 
 class RealSlackClient(SlackClientOps):
@@ -984,6 +1009,67 @@ class RealSlackClient(SlackClientOps):
         except (SlackClientError, aiohttp.ClientError, asyncio.TimeoutError):
             logger.debug("fetch_thread_replies failed for %s/%s", channel, thread_ts, exc_info=True)
         return []
+
+    async def fetch_channel_history(
+        self, channel: str, limit: int = 20, oldest: str | None = None
+    ) -> list[dict]:
+        """Fetch recent channel/DM messages via conversations.history (newest first).
+
+        Does NOT swallow SlackApiError: the caller (api_slack_history) needs to
+        surface ``missing_scope`` / ``channel_not_found`` to the user, exactly as
+        api_slack_profile does. Network and timeout errors raise too, so a caller
+        polling for a reply never reads a blip as "no reply yet". *oldest* is
+        inclusive: a message at exactly that ts is returned.
+        """
+        kwargs: dict[str, Any] = {"channel": channel, "limit": limit}
+        if oldest:
+            kwargs["oldest"] = oldest
+            kwargs["inclusive"] = True
+        self._inject_team(channel, kwargs)
+        resp = await self._web.conversations_history(**kwargs)
+        data: dict = resp.data if hasattr(resp, "data") else dict(resp)  # type: ignore[assignment,call-overload]
+        return data.get("messages", [])
+
+    async def fetch_thread_history(
+        self, channel: str, thread_ts: str, limit: int = 20, oldest: str | None = None
+    ) -> list[dict]:
+        """Fetch a thread's replies via conversations.replies, surfacing errors.
+
+        Unlike ``fetch_thread_replies`` (which swallows ``SlackClientError`` and
+        returns ``[]`` for the Slack-import path), this does NOT swallow
+        ``SlackApiError``: the caller (``api_slack_history``) must surface
+        ``missing_scope`` / ``not_in_channel`` / ``channel_not_found`` instead of
+        reporting a silent empty read. conversations.replies is oldest-first, so
+        it pages to the end and keeps the newest ``limit`` messages — otherwise a
+        thread with more than ``limit`` replies would drop the latest ones (e.g.
+        an approval). *oldest* bounds the range (inclusive). Network and timeout
+        errors raise too, so they are never read as an empty thread.
+        """
+        collected: list[dict] = []
+        cursor: str | None = None
+        # Bound the paging so a very long thread cannot loop unboundedly. Past
+        # the cap the newest replies are still unread, so the read raises
+        # rather than return older replies as if they were the newest.
+        for _ in range(_THREAD_HISTORY_MAX_PAGES):
+            kwargs: dict[str, Any] = {"channel": channel, "ts": thread_ts, "limit": 200}
+            if oldest:
+                kwargs["oldest"] = oldest
+                kwargs["inclusive"] = True
+            if cursor:
+                kwargs["cursor"] = cursor
+            self._inject_team(channel, kwargs)
+            resp = await self._web.conversations_replies(**kwargs)
+            data: dict = resp.data if hasattr(resp, "data") else dict(resp)  # type: ignore[assignment,call-overload]
+            collected.extend(data.get("messages", []))
+            cursor = (data.get("response_metadata", {}) or {}).get("next_cursor") or None
+            if not cursor:
+                break
+        else:
+            raise RuntimeError(
+                f"thread {thread_ts} has more than {_THREAD_HISTORY_MAX_PAGES} pages of replies"
+            )
+        # Oldest-first collected; keep the newest `limit`.
+        return collected[-limit:] if limit and len(collected) > limit else collected
 
     async def conversations_list(self) -> list[dict]:
         """Fetch all public + private channels the bot is a member of.

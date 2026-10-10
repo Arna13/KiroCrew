@@ -19,7 +19,11 @@ if "kiro_crew.slack.handler" not in sys.modules:
     _stub.is_tracked_channel = lambda cid: False  # type: ignore[attr-defined]
     sys.modules["kiro_crew.slack.handler"] = _stub
 
-from kiro_crew.dashboard.handlers import api_send_message, api_slack_profile  # noqa: E402
+from kiro_crew.dashboard.handlers import (  # noqa: E402
+    api_send_message,
+    api_slack_history,
+    api_slack_profile,
+)
 from kiro_crew.messaging.link import ChannelLink  # noqa: E402
 from kiro_crew.telegram.client import TELEGRAM_MAX_TEXT  # noqa: E402
 from kiro_crew.validation import CHANNEL_ID_RE, CHANNEL_MAX_LEN  # noqa: E402
@@ -29,6 +33,7 @@ def _make_app(state) -> web.Application:
     app = web.Application()
     app.router.add_post("/api/send-message", api_send_message)
     app.router.add_post("/api/slack-profile", api_slack_profile)
+    app.router.add_post("/api/slack-history", api_slack_history)
     app["state"] = state
     return app
 
@@ -1749,3 +1754,387 @@ class TestSendMessageToolChannelType:
             out = _call_tool({"text": "hi", "channel_type": "telegram"})
             assert out.startswith("Error:")
             assert "telegram" in out
+
+
+class TestSlackHistory:
+    @pytest.mark.asyncio
+    async def test_happy_path_timeline(self, mock_sel):
+        """Reading a channel returns messages with redacted text, bot msgs dropped."""
+        slack = MagicMock()
+        slack.fetch_channel_history = AsyncMock(
+            return_value=[
+                {"user": "U0123ABC456", "text": "price B2727875", "ts": "200.0"},
+                {"bot_id": "B999", "text": "notification", "ts": "199.0"},
+                {"user": "U0123ABC456", "text": "older reply", "ts": "198.0"},
+            ]
+        )
+        state = _mock_state(slack_client=slack)
+        app = _make_app(state)
+
+        async with TestClient(TestServer(app)) as client:
+            with patch("kiro_crew.slack.handler.is_tracked_channel", return_value=True):
+                resp = await client.post("/api/slack-history", json={"channel": "C0123ABC456"})
+            assert resp.status == 200
+            data = await resp.json()
+            msgs = data["messages"]
+            # Bot message filtered out; two human messages remain, newest first.
+            assert [m["ts"] for m in msgs] == ["200.0", "198.0"]
+            assert msgs[0]["text"] == "price B2727875"
+
+    @pytest.mark.asyncio
+    async def test_thread_path(self, mock_sel):
+        """thread_ts routes to fetch_thread_history (error-surfacing, newest kept)."""
+        slack = MagicMock()
+        slack.fetch_thread_history = AsyncMock(
+            return_value=[{"user": "U0123ABC456", "text": "APPROVE", "ts": "300.0"}]
+        )
+        state = _mock_state(slack_client=slack)
+        app = _make_app(state)
+
+        async with TestClient(TestServer(app)) as client:
+            with patch("kiro_crew.slack.handler.is_tracked_channel", return_value=True):
+                resp = await client.post(
+                    "/api/slack-history",
+                    json={"channel": "C0123ABC456", "thread_ts": "111.222"},
+                )
+            assert resp.status == 200
+            slack.fetch_thread_history.assert_awaited_once()
+            data = await resp.json()
+            assert data["messages"][0]["text"] == "APPROVE"
+
+    @pytest.mark.asyncio
+    async def test_untracked_channel_returns_403(self, mock_sel):
+        """Deny-by-default: a channel outside the tracked allowlist is 403, no read."""
+        slack = MagicMock()
+        slack.fetch_channel_history = AsyncMock(return_value=[])
+        state = _mock_state(slack_client=slack)
+        app = _make_app(state)
+        async with TestClient(TestServer(app)) as client:
+            # Module-level stub is_tracked_channel returns False, so no patch needed.
+            resp = await client.post("/api/slack-history", json={"channel": "C0123ABC456"})
+            assert resp.status == 403
+            data = await resp.json()
+            assert "not in tracked channels" in data["error"]
+        slack.fetch_channel_history.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_missing_channel_returns_400(self, mock_sel):
+        state = _mock_state(slack_client=MagicMock())
+        app = _make_app(state)
+        async with TestClient(TestServer(app)) as client:
+            resp = await client.post("/api/slack-history", json={})
+            assert resp.status == 400
+
+    @pytest.mark.asyncio
+    async def test_invalid_channel_format_returns_400(self, mock_sel):
+        state = _mock_state(slack_client=MagicMock())
+        app = _make_app(state)
+        async with TestClient(TestServer(app)) as client:
+            resp = await client.post("/api/slack-history", json={"channel": "not-a-channel"})
+            assert resp.status == 400
+
+    @pytest.mark.asyncio
+    async def test_slack_not_connected_returns_503(self, mock_sel):
+        state = _mock_state(slack_client=None)
+        app = _make_app(state)
+        async with TestClient(TestServer(app)) as client:
+            with patch("kiro_crew.slack.handler.is_tracked_channel", return_value=True):
+                resp = await client.post("/api/slack-history", json={"channel": "C0123ABC456"})
+            assert resp.status == 503
+
+    @pytest.mark.asyncio
+    async def test_missing_scope_returns_403(self, mock_sel):
+        from slack_sdk.errors import SlackApiError
+
+        slack = MagicMock()
+        slack.fetch_channel_history = AsyncMock(
+            side_effect=SlackApiError(
+                "missing_scope", {"error": "missing_scope", "needed": "channels:history"}
+            )
+        )
+        state = _mock_state(slack_client=slack)
+        app = _make_app(state)
+        async with TestClient(TestServer(app)) as client:
+            with patch("kiro_crew.slack.handler.is_tracked_channel", return_value=True):
+                resp = await client.post("/api/slack-history", json={"channel": "C0123ABC456"})
+            assert resp.status == 403
+
+    @pytest.mark.asyncio
+    async def test_thread_missing_scope_surfaces_403(self, mock_sel):
+        """Thread errors surface (not swallowed as 200 []): missing_scope -> 403."""
+        from slack_sdk.errors import SlackApiError
+
+        slack = MagicMock()
+        slack.fetch_thread_history = AsyncMock(
+            side_effect=SlackApiError(
+                "missing_scope", {"error": "missing_scope", "needed": "channels:history"}
+            )
+        )
+        state = _mock_state(slack_client=slack)
+        app = _make_app(state)
+        async with TestClient(TestServer(app)) as client:
+            with patch("kiro_crew.slack.handler.is_tracked_channel", return_value=True):
+                resp = await client.post(
+                    "/api/slack-history",
+                    json={"channel": "C0123ABC456", "thread_ts": "111.222"},
+                )
+            assert resp.status == 403
+
+
+class TestReadSlackHistoryMcpTool:
+    def test_schema_and_handler_registered(self):
+        """The read_slack_history tool has both a schema and a handler."""
+        from kiro_crew.mcp_tools import messaging as m
+
+        names = {s["name"] for s in m.schemas()}
+        assert "read_slack_history" in names
+        assert "read_slack_history" in m.HANDLERS
+
+    def test_handler_redacts_and_validates(self):
+        """Handler forwards validated args and returns text (for a dashboard caller)."""
+        from unittest.mock import patch as _patch
+
+        from kiro_crew.mcp_tools import messaging as m
+
+        with (
+            _patch.object(
+                m.mcp_core, "require_strict_session_key", return_value=("dashboard:s1", None)
+            ),
+            _patch.object(m.mcp_core, "_deny_channel_agent_messaging", return_value=None),
+        ):
+            with _patch.object(
+                m.mcp_core,
+                "_post",
+                return_value={"messages": [{"user": "U1", "text": "hi", "ts": "1.0"}]},
+            ):
+                out = m.read_slack_history("read_slack_history", {"channel": "C0123ABC456"})
+                assert "hi" in out
+
+    def test_a_channel_agent_caller_is_refused_before_any_post(self):
+        """Containment holds at MCP dispatch: a channel-bound caller never reaches _post."""
+        from unittest.mock import patch as _patch
+
+        from kiro_crew.mcp_tools import messaging as m
+
+        with (
+            _patch.object(
+                m.mcp_core,
+                "require_strict_session_key",
+                return_value=("channel:C0123ABC456:agent", None),
+            ),
+            _patch.object(
+                m.mcp_core,
+                "_deny_channel_agent_messaging",
+                return_value="Error: read_slack_history is not available to a channel agent.",
+            ),
+            _patch.object(m.mcp_core, "_post") as _post,
+        ):
+            out = m.read_slack_history("read_slack_history", {"channel": "C0123ABC456"})
+            assert out.startswith("Error:")
+            _post.assert_not_called()
+
+    def test_an_unverifiable_caller_is_refused(self):
+        """No strict session key → refused before any read."""
+        from unittest.mock import patch as _patch
+
+        from kiro_crew.mcp_tools import messaging as m
+
+        with (
+            _patch.object(
+                m.mcp_core,
+                "require_strict_session_key",
+                return_value=("", "Error: cannot verify caller identity"),
+            ),
+            _patch.object(m.mcp_core, "_post") as _post,
+        ):
+            out = m.read_slack_history("read_slack_history", {"channel": "C0123ABC456"})
+            assert out.startswith("Error:")
+            _post.assert_not_called()
+
+
+class TestReadSlackHistorySchema:
+    """The registered schema, not the handler, refuses bad arguments."""
+
+    @pytest.mark.parametrize(
+        "args",
+        [
+            {},
+            {"channel": "bad"},
+            {"channel": "C0123ABC456", "thread_ts": "nope"},
+            {"channel": "C0123ABC456", "oldest": "nope"},
+            {"channel": "C0123ABC456", "limit": 101},
+        ],
+    )
+    def test_schema_refuses_bad_args(self, args):
+        from kiro_crew import mcp_core
+        from kiro_crew.validation import ValidationError
+
+        with pytest.raises(ValidationError):
+            mcp_core._validate_args("read_slack_history", args)
+
+
+def _bare_real_client(web):
+    from kiro_crew.slack.client import RealSlackClient
+
+    client = RealSlackClient.__new__(RealSlackClient)
+    client._web = web
+    return client
+
+
+class TestRealSlackClientHistory:
+    """RealSlackClient.fetch_thread_history / fetch_channel_history against a fake _web."""
+
+    @pytest.mark.asyncio
+    async def test_thread_paging_keeps_newest_replies(self):
+        web = MagicMock()
+        web.conversations_replies = AsyncMock(
+            side_effect=[
+                {
+                    "messages": [{"ts": "1.0"}, {"ts": "2.0"}, {"ts": "3.0"}],
+                    "response_metadata": {"next_cursor": "page2"},
+                },
+                {"messages": [{"ts": "4.0"}, {"ts": "5.0"}], "response_metadata": {}},
+            ]
+        )
+        client = _bare_real_client(web)
+        out = await client.fetch_thread_history("C0123ABC456", "1.0", limit=2)
+        assert [m["ts"] for m in out] == ["4.0", "5.0"]
+        assert web.conversations_replies.await_count == 2
+        assert web.conversations_replies.await_args_list[1].kwargs["cursor"] == "page2"
+
+    @pytest.mark.asyncio
+    async def test_thread_past_the_paging_cap_raises(self):
+        """A cursor left after the last allowed page is an error, not older replies."""
+        from kiro_crew.slack import client as client_mod
+
+        web = MagicMock()
+        web.conversations_replies = AsyncMock(
+            return_value={
+                "messages": [{"ts": "1.0"}],
+                "response_metadata": {"next_cursor": "more"},
+            }
+        )
+        client = _bare_real_client(web)
+        with pytest.raises(RuntimeError):
+            await client.fetch_thread_history("C0123ABC456", "1.0")
+        assert web.conversations_replies.await_count == client_mod._THREAD_HISTORY_MAX_PAGES
+
+    @pytest.mark.asyncio
+    async def test_thread_slack_api_error_propagates(self):
+        from slack_sdk.errors import SlackApiError
+
+        web = MagicMock()
+        web.conversations_replies = AsyncMock(
+            side_effect=SlackApiError("not_in_channel", {"error": "not_in_channel"})
+        )
+        client = _bare_real_client(web)
+        with pytest.raises(SlackApiError):
+            await client.fetch_thread_history("C0123ABC456", "1.0")
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("method", ["conversations_history", "conversations_replies"])
+    async def test_network_errors_raise_not_empty(self, method):
+
+        web = MagicMock()
+        setattr(web, method, AsyncMock(side_effect=TimeoutError()))
+        client = _bare_real_client(web)
+        with pytest.raises(TimeoutError):
+            if method == "conversations_history":
+                await client.fetch_channel_history("C0123ABC456")
+            else:
+                await client.fetch_thread_history("C0123ABC456", "1.0")
+
+    @pytest.mark.asyncio
+    async def test_oldest_is_sent_inclusive(self):
+        web = MagicMock()
+        web.conversations_history = AsyncMock(return_value={"messages": []})
+        web.conversations_replies = AsyncMock(
+            return_value={"messages": [], "response_metadata": {}}
+        )
+        client = _bare_real_client(web)
+        await client.fetch_channel_history("C0123ABC456", oldest="5.0")
+        await client.fetch_thread_history("C0123ABC456", "1.0", oldest="5.0")
+        for mock in (web.conversations_history, web.conversations_replies):
+            kwargs = mock.await_args.kwargs
+            assert kwargs["oldest"] == "5.0"
+            assert kwargs["inclusive"] is True
+
+
+class TestSlackHistoryDirectRequestShape:
+    """The route checks its own body: the MCP schema does not run on a direct POST."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "body",
+        [
+            "null",
+            "[]",
+            '{"channel": "C0123ABC456", "include_bot": "false"}',
+            '{"channel": "C0123ABC456", "thread_ts": "nope"}',
+            '{"channel": "C0123ABC456", "oldest": "nope"}',
+        ],
+    )
+    async def test_a_malformed_body_is_a_400_not_a_read(self, mock_sel, body):
+        slack = MagicMock()
+        slack.fetch_channel_history = AsyncMock(return_value=[])
+        slack.fetch_thread_history = AsyncMock(return_value=[])
+        state = _mock_state(slack_client=slack)
+        app = _make_app(state)
+        async with TestClient(TestServer(app)) as client:
+            with patch("kiro_crew.slack.handler.is_tracked_channel", return_value=True):
+                resp = await client.post(
+                    "/api/slack-history",
+                    data=body,
+                    headers={"Content-Type": "application/json"},
+                )
+            assert resp.status == 400
+        slack.fetch_channel_history.assert_not_awaited()
+        slack.fetch_thread_history.assert_not_awaited()
+
+
+class TestSlackHistoryAdmitted:
+    @pytest.mark.asyncio
+    async def test_only_an_admitted_sender_is_marked_admitted(self, mock_sel):
+        """A tracked-channel member the inbound gate would not admit is not 'admitted'."""
+        slack = MagicMock()
+        slack.fetch_channel_history = AsyncMock(
+            return_value=[
+                {"user": "U0OWNER0001", "text": "approved", "ts": "2.0"},
+                {"user": "U0OTHER0002", "text": "approved", "ts": "1.0"},
+            ]
+        )
+        state = _mock_state(slack_client=slack)
+        app = _make_app(state)
+        async with TestClient(TestServer(app)) as client:
+            with (
+                patch("kiro_crew.slack.handler.is_tracked_channel", return_value=True),
+                patch(
+                    "kiro_crew.slack.handler.is_allowed_user",
+                    side_effect=lambda uid: uid == "U0OWNER0001",
+                ),
+            ):
+                resp = await client.post("/api/slack-history", json={"channel": "C0123ABC456"})
+            assert resp.status == 200
+            msgs = (await resp.json())["messages"]
+        assert [(m["user"], m["admitted"]) for m in msgs] == [
+            ("U0OWNER0001", True),
+            ("U0OTHER0002", False),
+        ]
+
+
+class TestSlackHistoryNetworkError:
+    @pytest.mark.asyncio
+    async def test_network_error_returns_502(self, mock_sel):
+        """A network blip is a 502, not a 200 with no messages."""
+        from kiro_crew.slack.client import RealSlackClient
+
+        web = MagicMock()
+        web.conversations_history = AsyncMock(side_effect=TimeoutError())
+        slack = RealSlackClient.__new__(RealSlackClient)
+        slack._web = web
+        state = _mock_state(slack_client=slack)
+        app = _make_app(state)
+        async with TestClient(TestServer(app)) as client:
+            with patch("kiro_crew.slack.handler.is_tracked_channel", return_value=True):
+                resp = await client.post("/api/slack-history", json={"channel": "C0123ABC456"})
+            assert resp.status == 502

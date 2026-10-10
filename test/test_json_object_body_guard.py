@@ -185,6 +185,9 @@ _CAP_REGISTER: dict[str, tuple[str, str]] = {
         "<default>",
         _BOUNDED_BY_DEFAULT,
     ),
+    # A history read is a channel id, two Slack ts values, a limit and a flag,
+    # so the shared default ceiling is far above any legitimate body.
+    "handlers/messaging.py::api_slack_history": ("<default>", _BOUNDED_CONTROL_FIELDS),
     "handlers/notifications_push.py::api_push_notification": (
         "<default>",
         _BOUNDED_BY_DEFAULT,
