@@ -8588,12 +8588,33 @@ async def api_chat_slot_project(request: web.Request) -> web.Response:
                     },
                     status=409,
                 )
-            slot._pending_reset_history_key = session_key
-            # Speculatively re-create the session rooted at the new project so the
-            # cwd change is paid during think-time. The eager task consumes the
-            # deferred reset itself, but only when no turn is running — the
-            # same killpg constraint that deferred the reset applies to it.
+            # Determine whether a start that captured the OLD cwd is already
+            # in flight BEFORE scheduling the replacement eager spawn, because
+            # that scheduling cancels any prior eager task and roots a new one
+            # at the NEW project. A start carries the old cwd only when:
+            #   * a session is already registered under the key, or
+            #   * a turn is in flight (running, or its admission reserved) whose
+            #     own get_or_create captured slot.project BEFORE this change and
+            #     will register a session rooted at the old cwd — a window
+            #     get_provider cannot see, because nothing enters the session
+            #     map until provider.start() returns.
+            arm_reset = state.sessions.get_provider(session_key) is not None or slot.running
+            # Speculatively re-create the session rooted at the NEW project so the
+            # cwd change is paid during think-time. This cancels any prior eager
+            # task and the fresh one roots at the new project, so a newly
+            # scheduled spawn never carries the old cwd — it must NOT by itself
+            # arm the reset, or the first turn's correctly rooted session is torn
+            # down at turn end for nothing (the exact waste this guard avoids,
+            # where the teardown costs a full tool_search replay). The eager task
+            # consumes the deferred reset itself, but only when no turn is
+            # running — the same killpg constraint that deferred the reset
+            # applies to it.
             schedule_eager_spawn(state, slot, start_priority=owner_start_priority(request))
+            # _consume_pending_reset only spends the flag on a real teardown, so
+            # an arm that races a cold start stays queued for the next consume
+            # rather than clobbering a correct session.
+            if arm_reset:
+                slot._pending_reset_history_key = session_key
     state.push_slots_update()
     return web.json_response({"ok": True, "project": project})
 
