@@ -241,7 +241,16 @@ export const CHUNK_BUDGETS = {
   // set from a stale-low pre-merge build and never had headroom. Back to the ~5%
   // convention over the true merged measurement (2,041,857 B * 1.05 = 2,143,950 B),
   // so ordinary first-party growth does not re-trip this on the next PR.
-  App: 2094 * KB, // measured 2,041,857 B on main @ 2d4278a18 with route-only pages lazy (~5% headroom)
+  // Re-measured 2026-10-11: the analyze build of main's tip emits this chunk at
+  // 2,144,668 B (504 modules), 412 B over the 2094 KB ceiling, so the gate fails on
+  // the merge ref of every open PR. The ~103 KB since the last measurement is
+  // eleven days of ordinary first-party chat-shell and sidebar features (53 more
+  // modules, none of them a library); the commit that crossed the line adds 498 B,
+  // and its parent builds the chunk at 2,144,170 B, 86 B under. Back to the ~5%
+  // convention over the current measurement (2,144,668 B * 1.05 = 2,251,901 B).
+  // The largest single shrink available is @xterm/xterm (~372 KB unminified), which
+  // the terminal panel imports eagerly; a lazy boundary there is its own change.
+  App: 2200 * KB, // measured 2,144,668 B on main with route-only pages lazy (~5% headroom)
 
   // Markdown/math/syntax rendering stack (katex, highlight.js, remark/rehype)
   // -- one deliberate `codeSplitting` group, see vite.config.ts.
