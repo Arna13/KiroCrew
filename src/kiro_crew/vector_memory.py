@@ -1997,14 +1997,20 @@ class VectorMemoryStore:
 
     def _eligible_rows(self, rows, kind: str) -> list:
         blocked = self._ineligible_ids()
-        if not blocked:
-            return list(rows)
-        return [
-            row
-            for row in rows
-            if record_meta.record_id_for(kind, row["id"] if kind == "episode" else row["key"])
-            not in blocked
-        ]
+        kept = []
+        for row in rows:
+            identity = record_meta.record_identity_or_none(
+                kind, row["id"] if kind == "episode" else row["key"]
+            )
+            # A legacy row with no identity carries no metadata and cannot be
+            # ranked: recall_evidence drops its non-string id and the payload
+            # builder then reads row["id"]. Drop it here (both when blocked is
+            # empty and when it is not) so it never reaches ranking; the row
+            # stays visible in the read-only list and on disk, untouched.
+            if identity is None or identity in blocked:
+                continue
+            kept.append(row)
+        return kept
 
     def _record_mutation(
         self,
