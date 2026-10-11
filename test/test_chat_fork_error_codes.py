@@ -75,7 +75,7 @@ def test_the_ratchet_can_actually_fail() -> None:
     sites in that module rather than here.
     """
     coded = [f for f in _findings() if f.bucket == "compliant"]
-    assert len(coded) == 25, f"scanner reached {len(coded)} coded sites, expected 25"
+    assert len(coded) == 26, f"scanner reached {len(coded)} coded sites, expected 26"
     assert all(f.code_value for f in coded)
 
 

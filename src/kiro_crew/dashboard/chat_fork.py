@@ -31,6 +31,7 @@ from kiro_crew.dashboard.chat_utils import (
 )
 from kiro_crew.dashboard.handlers.memory import _store_unavailable_response
 from kiro_crew.dashboard.handlers.source_providers import is_owner_dashboard_request
+from kiro_crew.dashboard.relay_archive import is_relay_archive
 from kiro_crew.dashboard.slot_ownership import deny_app_slot_access
 from kiro_crew.dashboard.state import (
     MAX_LIVE_SLOTS,
@@ -166,6 +167,43 @@ async def resolve_fork_source(
     which is the shape every refusal in this module has; callers that are not
     HTTP handlers translate it (``session_control.fork_session``).
     """
+    # A relay archive -- a slot bound to a peer crew (``executor == "remote"``)
+    # -- is READ-ONLY: there is no relay to run its turns on, and every send /
+    # turn-restarting path refuses it (see ``relay_archive``). Forking must
+    # refuse it too: ``fork_slot`` builds the child with ``get_or_create_slot``,
+    # which does not carry ``executor`` / ``instance_id`` / ``remote_slot``, so
+    # the child would be born LOCAL and runnable -- and then run the peer crew's
+    # agent on THIS machine, failing with ``agent "<peer default>" not found``
+    # because that agent is not configured here. Refuse the fork for the same
+    # reason the run paths do, with the same code, so the user is told to open
+    # the crew's own session instead. Earliest check and fail closed: a
+    # half-written binding is an archive too (``is_relay_archive`` keys on
+    # ``executor`` alone), and must never be laundered into a local run through
+    # a copy.
+    if is_relay_archive(slot):
+        sel().log_api_access(
+            caller=audit_caller,
+            operation=audit_operation,
+            outcome="denied",
+            source="dashboard",
+            resources=f"slot={slot.key},executor={getattr(slot, 'executor', '')!r}",
+            error="source slot is a read-only relay archive",
+        )
+        # Literal body (not ``RELAY_ARCHIVE_ERROR`` / ``RELAY_ARCHIVE_CODE``): the
+        # error-code contract scanner reads only a string-literal ``code``, and
+        # every refusal in this module is a literal for that reason. The literals
+        # mirror ``relay_archive`` and ``test_relay_archive`` asserts they match
+        # ``RELAY_ARCHIVE_CODE`` so the two cannot drift apart.
+        return web.json_response(
+            {
+                "error": (
+                    "this chat ran on a remote crew and is read-only now; "
+                    "open the crew's own session to keep going"
+                ),
+                "code": "relay_archive_read_only",
+            },
+            status=409,
+        )
     # The child inherits the parent's mode, so the parent's value is what the
     # slot constructor validates against ``VALID_MEMORY_MODES``. The API checks
     # the field on the way in, but rehydration copies the transcript header's
