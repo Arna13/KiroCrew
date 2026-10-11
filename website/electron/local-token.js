@@ -190,37 +190,150 @@ function listenerSecretPath(home, port, bindAddress, path) {
   return path.join(home, "run", `gateway-${port}-${encodeBindAddress(bindAddress)}.secret`);
 }
 
+/** Group-write and other-write permission bits. */
+const GROUP_OTHER_WRITE = 0o022;
+/** The sticky bit: only an entry's owner (or root) may rename or unlink it. */
+const STICKY = 0o1000;
+
+/**
+ * Name of the gateway's unix socket for `port`, identical to the writer's
+ * (`dashboard_socket_name`): `dashboard-<port>.sock` directly in the data home.
+ *
+ * @param {string} port
+ * @returns {string}
+ */
+function dashboardSocketName(port) {
+  return `dashboard-${port}.sock`;
+}
+
+/**
+ * The gateway's unix socket for `target`, when the filesystem itself proves that
+ * only this user can have created it; otherwise `null`.
+ *
+ * TCP loopback authenticates nobody: a port is held by whoever bound it last, so
+ * every check made before a TCP send is a snapshot the listener can change after.
+ * A socket entry is different. Creating, replacing or renaming it needs write
+ * permission on the directory that holds it, and that is a standing property of
+ * the directory rather than a moment's observation. So the proof is:
+ *
+ *   - the data home is a directory owned by this uid with no group/other write;
+ *   - every ancestor is owned by this uid or root, and is not group/other
+ *     writable unless sticky (a sticky directory lets nobody else move an entry
+ *     this uid or root owns, and the entry below is checked to be one);
+ *   - the entry is a socket owned by this uid.
+ *
+ * Then no other uid can have put that socket there or can swap it before the
+ * connect, which closes the window against every principal the secret excludes.
+ * A process running as this same uid is not one of them: it can already read the
+ * secret file.
+ *
+ * The walk runs over the home's REAL path and the returned path is built from it,
+ * so a symlink in the configured path cannot redirect the dial after the check.
+ *
+ * Any failure -- Windows, no uid source, a missing socket (an older gateway, or a
+ * path too long for the socket address), an fs call that throws, a permission
+ * that fails the rule -- answers `null`, and the caller keeps today's TCP path
+ * with all of its checks.
+ *
+ * @returns {string | null}
+ */
+function ownedSocketPath({ target, home, path, fs, isWindows, getuid }) {
+  if (isWindows || typeof getuid !== "function") return null;
+  try {
+    const uid = getuid();
+    if (typeof uid !== "number") return null;
+    const realHome = fs.realpathSync(home);
+    const homeStat = fs.statSync(realHome);
+    if (!homeStat.isDirectory() || homeStat.uid !== uid) return null;
+    if (homeStat.mode & GROUP_OTHER_WRITE) return null;
+    let dir = realHome;
+    for (;;) {
+      const parent = path.dirname(dir);
+      if (parent === dir) break;
+      const parentStat = fs.statSync(parent);
+      if (parentStat.uid !== uid && parentStat.uid !== 0) return null;
+      if ((parentStat.mode & GROUP_OTHER_WRITE) && !(parentStat.mode & STICKY)) return null;
+      dir = parent;
+    }
+    const socketPath = path.join(realHome, dashboardSocketName(target.port));
+    const socketStat = fs.lstatSync(socketPath);
+    if (!socketStat.isSocket() || socketStat.uid !== uid) return null;
+    return socketPath;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Every credential published for `target.port` in this home, for the socket
+ * transport.
+ *
+ * On the socket the recipient is established by `ownedSocketPath`, so the
+ * per-family coverage that `listenerSecretsFor` demands of a TCP dial answers a
+ * question this transport does not ask. Every candidate names a listener this
+ * home's gateway bound on this port; a stale one from a crashed generation is
+ * refused by the live gateway and the walk moves on.
+ *
+ * @returns {string[]} secrets to try in order (possibly empty)
+ */
+function socketSecretsFor({ target, home, path, fs }) {
+  const secrets = [];
+  for (const binds of Object.values(LOOPBACK_FAMILY_BINDS)) {
+    for (const bindAddress of binds) {
+      let secret = "";
+      try {
+        secret = fs
+          .readFileSync(listenerSecretPath(home, target.port, bindAddress, path), "utf8")
+          .trim();
+      } catch {
+        // A missing/unreadable entry contributes no candidate.
+      }
+      if (secret && !secrets.includes(secret)) secrets.push(secret);
+    }
+  }
+  return secrets;
+}
+
 /**
  * Ask the gateway at `dialedOrigin` to exchange the local secret for a token.
  *
  * `dialedOrigin` is the origin exactly as the caller's configured URL spells it --
- * usually `http://localhost:<port>`. Sending a secret there is safe only because
- * the caller checked first that this gateway holds every loopback family that host
- * can reach (`listenerSecretsFor`); this function performs no check of its own and
- * must not be called without that one.
+ * usually `http://localhost:<port>`. With `socketPath` the request travels over
+ * that unix socket instead, and the origin only supplies the request's Host. A
+ * secret may go out only after the caller's check for the transport in use:
+ * `ownedSocketPath` for the socket, and for TCP the coverage test
+ * (`listenerSecretsFor`) plus the caller's listener confirmation. This function
+ * performs no check of its own and must not be called without them.
+ *
+ * @returns {Promise<{token: string, answered: boolean}>} `answered` is false when
+ *   no HTTP response arrived at all (refused connect, timeout).
  */
-async function requestLocalToken(http, dialedOrigin, secret) {
-  if (!dialedOrigin) return "";
+async function requestLocalToken(http, dialedOrigin, secret, socketPath = null) {
+  if (!dialedOrigin) return { token: "", answered: false };
+  const options = { headers: { "X-Local-Secret": secret }, timeout: 5000 };
+  if (socketPath) options.socketPath = socketPath;
   return new Promise((resolve) => {
     const req = http.get(
       `${dialedOrigin}/api/token/local`,
-      { headers: { "X-Local-Secret": secret }, timeout: 5000 },
+      options,
       (res) => {
         if (res.statusCode !== 200) {
           res.resume();
-          resolve("");
+          resolve({ token: "", answered: true });
           return;
         }
         let data = "";
-        res.on("error", () => resolve(""));
+        res.on("error", () => resolve({ token: "", answered: true }));
         res.on("data", (chunk) => { data += chunk; });
         res.on("end", () => {
-          try { resolve(JSON.parse(data).token || ""); } catch { resolve(""); }
+          let token = "";
+          try { token = JSON.parse(data).token || ""; } catch { token = ""; }
+          resolve({ token, answered: true });
         });
       },
     );
-    req.on("error", () => resolve(""));
-    req.on("timeout", () => { req.destroy(); resolve(""); });
+    req.on("error", () => resolve({ token: "", answered: false }));
+    req.on("timeout", () => { req.destroy(); resolve({ token: "", answered: false }); });
   });
 }
 
@@ -263,13 +376,51 @@ async function requestLocalToken(http, dialedOrigin, secret) {
  * storage on the origin, so handing callers a rewritten one splits the settings
  * of every window addressed with it away from the dashboard's own.
  *
+ * The socket comes first. When `ownedSocketPath` proves the gateway's unix socket
+ * can only have been created by this user, the secret goes over it and no TCP
+ * listener is involved at all. When the socket is unavailable, or nothing answers
+ * on it, the mint falls back to TCP with every TCP check intact; a gateway that
+ * answers on the socket and refuses every candidate is the same gateway TCP would
+ * reach, so a refusal there is final.
+ *
+ * @param {object} deps
+ * @param {boolean} [deps.isWindows] no socket transport on Windows
+ * @param {() => number} [deps.getuid] this process's uid; without it the socket
+ *        is never used
+ * @param {() => Promise<boolean>} [deps.confirmTcpListener] the caller's own
+ *        proof that the TCP listener is its gateway, awaited before any secret
+ *        is read for a TCP send; `false` refuses the TCP branch
  * @returns {Promise<string>} the minted token, or `""` for a miss and for every
  *   refusal alike, so a caller treats an absent credential as one case.
  */
-async function mintLocalToken({ backendUrl, resolveHome, path, fs, http }) {
+async function mintLocalToken({
+  backendUrl,
+  resolveHome,
+  path,
+  fs,
+  http,
+  isWindows = false,
+  getuid = null,
+  confirmTcpListener = null,
+}) {
   const target = dialTarget(backendUrl);
   if (!target) return "";
-  const secrets = listenerSecretsFor({ target, home: resolveHome(), path, fs });
+  const home = resolveHome();
+
+  const socketPath = ownedSocketPath({ target, home, path, fs, isWindows, getuid });
+  if (socketPath) {
+    let answered = false;
+    for (const secret of socketSecretsFor({ target, home, path, fs })) {
+      const result = await requestLocalToken(http, target.origin, secret, socketPath);
+      if (result.token) return result.token;
+      if (!result.answered) break;
+      answered = true;
+    }
+    if (answered) return "";
+  }
+
+  if (confirmTcpListener && !(await confirmTcpListener())) return "";
+  const secrets = listenerSecretsFor({ target, home, path, fs });
   // `null` is a REFUSAL, not a miss: some family this host resolves to has no
   // sidecar, so the gateway does not demonstrably hold every listener the name
   // can reach, and a co-resident could be holding one of them. Sending nothing
@@ -279,7 +430,7 @@ async function mintLocalToken({ backendUrl, resolveHome, path, fs, http }) {
     // `target.origin` is the URL's OWN origin, never rewritten -- that is why
     // the document's storage, and every comparison against the configured
     // string, stay where they are.
-    const token = await requestLocalToken(http, target.origin, secret);
+    const { token } = await requestLocalToken(http, target.origin, secret);
     if (token) return token;
   }
   return "";
@@ -291,6 +442,9 @@ module.exports = {
   listenerSecretPath,
   dialTarget,
   listenerSecretsFor,
+  ownedSocketPath,
+  socketSecretsFor,
+  dashboardSocketName,
   AMBIGUOUS_LOOPBACK_NAMES,
   LOOPBACK_FAMILY_BINDS,
 };

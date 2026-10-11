@@ -376,6 +376,7 @@ function createGatewaySupervisor({
     sendStatus,
     snapshotGatewayPortPids,
     getGatewayProcess: () => gatewayProcess,
+    getuid: typeof processObj.getuid === "function" ? () => processObj.getuid() : null,
   });
   const { promptRemoteCrew } = createRemoteCrewPrompt({ BrowserWindow, nativeTheme, isWindows: IS_WIN });
 

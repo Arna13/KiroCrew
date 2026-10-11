@@ -2,11 +2,17 @@
 
 const assert = require("node:assert/strict");
 const { EventEmitter } = require("node:events");
+const nodeFs = require("node:fs");
+const nodeHttp = require("node:http");
+const nodeOs = require("node:os");
 const path = require("node:path");
 const { describe, it } = require("node:test");
 const {
   mintLocalToken,
   listenerSecretPath,
+  ownedSocketPath,
+  dashboardSocketName,
+  dialTarget,
 } = require("../local-token");
 
 // Keys are built with path.join, matching how mintLocalToken composes the
@@ -361,5 +367,333 @@ describe("listenerSecretPath", () => {
       listenerSecretPath(CANONICAL_HOME, "5476", "127.0.0.1", path),
       listenerSecretPath(CANONICAL_HOME, "5476", "__1", path),
     );
+  });
+});
+
+const OWN_UID = 501;
+const OTHER_UID = 777;
+const SOCKET_HOME = path.resolve(path.sep, "users", "me", ".kiro", "crew");
+
+/** A stat result for a directory or a socket. */
+function dirStat(uid, mode) {
+  return { isDirectory: () => true, isSocket: () => false, uid, mode };
+}
+
+/**
+ * An fs over a POSIX-shaped tree: `home` and its socket are this user's, every
+ * other ancestor is root's and 0755 unless `dirs` says otherwise.
+ */
+function fakeTree({
+  home = SOCKET_HOME,
+  homeStat = dirStat(OWN_UID, 0o40700),
+  dirs = new Map(),
+  socket = { uid: OWN_UID, isSocket: true },
+  port = "5476",
+  files = new Map(),
+  realpath = (p) => p,
+  reads = [],
+} = {}) {
+  const socketPath = path.join(realpath(home), dashboardSocketName(port));
+  return {
+    realpathSync: (p) => realpath(p),
+    statSync(p) {
+      if (p === realpath(home)) return homeStat;
+      if (dirs.has(p)) return dirs.get(p);
+      return dirStat(0, 0o40755);
+    },
+    lstatSync(p) {
+      if (p === socketPath && socket) {
+        return { isDirectory: () => false, isSocket: () => socket.isSocket, uid: socket.uid, mode: 0o140600 };
+      }
+      const error = new Error(`ENOENT: ${p}`);
+      error.code = "ENOENT";
+      throw error;
+    },
+    readFileSync(p) {
+      reads.push(p);
+      if (!files.has(p)) {
+        const error = new Error(`ENOENT: ${p}`);
+        error.code = "ENOENT";
+        throw error;
+      }
+      return files.get(p);
+    },
+  };
+}
+
+/**
+ * An http that records every send with its transport. `onSocket`/`onTcp` decide
+ * the outcome: a status code, or "refused" for a connect error.
+ */
+function fakeHttpByTransport({ onSocket = 200, onTcp = 200, token = "minted-token", sends = [] }) {
+  return {
+    get(url, options, callback) {
+      const request = new EventEmitter();
+      request.destroy = () => {};
+      const transport = options.socketPath ? "socket" : "tcp";
+      sends.push({ transport, url, socketPath: options.socketPath, secret: options.headers["X-Local-Secret"] });
+      const outcome = transport === "socket" ? onSocket : onTcp;
+      queueMicrotask(() => {
+        if (outcome === "refused") {
+          request.emit("error", new Error("ECONNREFUSED"));
+          return;
+        }
+        const response = new EventEmitter();
+        response.statusCode = outcome;
+        response.resume = () => {};
+        callback(response);
+        if (outcome === 200) {
+          response.emit("data", JSON.stringify({ token }));
+          response.emit("end");
+        }
+      });
+      return request;
+    },
+  };
+}
+
+function v4Secret(home, value = "v4-secret") {
+  return [listenerSecretPath(home, "5476", "127.0.0.1", path), value];
+}
+
+describe("mintLocalToken over the gateway's unix socket", () => {
+  it("sends over the socket and asks nothing of the TCP listener", async () => {
+    const sends = [];
+    let confirmed = 0;
+    const token = await mintLocalToken({
+      backendUrl: "http://localhost:5476",
+      resolveHome: () => SOCKET_HOME,
+      path,
+      // Only the v4 entry exists, so a TCP dial of `localhost` would be refused
+      // for want of v6 coverage; the socket does not depend on that coverage.
+      fs: fakeTree({ files: new Map([v4Secret(SOCKET_HOME)]) }),
+      http: fakeHttpByTransport({ sends }),
+      getuid: () => OWN_UID,
+      confirmTcpListener: async () => { confirmed += 1; return true; },
+    });
+
+    assert.equal(token, "minted-token");
+    assert.equal(confirmed, 0, "no TCP listener question on the socket");
+    assert.deepEqual(sends, [{
+      transport: "socket",
+      url: "http://localhost:5476/api/token/local",
+      socketPath: path.join(SOCKET_HOME, "dashboard-5476.sock"),
+      secret: "v4-secret",
+    }]);
+  });
+
+  it("dials the socket under the home's real path, not through a symlink", async () => {
+    const realHome = path.resolve(path.sep, "data", "crew");
+    const sends = [];
+    await mintLocalToken({
+      backendUrl: "http://127.0.0.1:5476",
+      resolveHome: () => SOCKET_HOME,
+      path,
+      fs: fakeTree({
+        realpath: (p) => (p === SOCKET_HOME ? realHome : p),
+        files: new Map([v4Secret(SOCKET_HOME)]),
+      }),
+      http: fakeHttpByTransport({ sends }),
+      getuid: () => OWN_UID,
+    });
+
+    assert.equal(sends[0].socketPath, path.join(realHome, "dashboard-5476.sock"));
+  });
+
+  it("accepts a sticky world-writable ancestor such as /tmp", () => {
+    const parent = path.dirname(SOCKET_HOME);
+    const fs = fakeTree({ dirs: new Map([[parent, dirStat(0, 0o41777)]]) });
+    assert.equal(
+      ownedSocketPath({ target: dialTarget("http://localhost:5476"), home: SOCKET_HOME, path, fs, getuid: () => OWN_UID }),
+      path.join(SOCKET_HOME, "dashboard-5476.sock"),
+    );
+  });
+
+  const parent = path.dirname(SOCKET_HOME);
+  const refusals = [
+    ["Windows", { isWindows: true }],
+    ["no uid source", { getuid: null }],
+    ["a group-writable home", { tree: { homeStat: dirStat(OWN_UID, 0o40770) } }],
+    ["an other-writable home", { tree: { homeStat: dirStat(OWN_UID, 0o40702) } }],
+    ["a home owned by another uid", { tree: { homeStat: dirStat(OTHER_UID, 0o40700) } }],
+    ["a world-writable ancestor without the sticky bit", { tree: { dirs: new Map([[parent, dirStat(0, 0o40777)]]) } }],
+    ["an ancestor owned by another uid", { tree: { dirs: new Map([[parent, dirStat(OTHER_UID, 0o40755)]]) } }],
+    ["a socket owned by another uid", { tree: { socket: { uid: OTHER_UID, isSocket: true } } }],
+    ["a regular file where the socket belongs", { tree: { socket: { uid: OWN_UID, isSocket: false } } }],
+    ["no socket at all", { tree: { socket: null } }],
+  ];
+  for (const [label, { tree = {}, isWindows = false, getuid = () => OWN_UID }] of refusals) {
+    it(`keeps the TCP path, with its listener check, for ${label}`, async () => {
+      const sends = [];
+      let confirmed = 0;
+      const token = await mintLocalToken({
+        backendUrl: "http://127.0.0.1:5476",
+        resolveHome: () => SOCKET_HOME,
+        path,
+        fs: fakeTree({ ...tree, files: new Map([v4Secret(SOCKET_HOME)]) }),
+        http: fakeHttpByTransport({ sends }),
+        isWindows,
+        getuid,
+        confirmTcpListener: async () => { confirmed += 1; return true; },
+      });
+
+      assert.equal(token, "minted-token");
+      assert.equal(confirmed, 1, "the TCP listener is confirmed first");
+      assert.deepEqual(sends.map((s) => s.transport), ["tcp"]);
+    });
+  }
+
+  it("falls back to TCP when nothing answers on the socket", async () => {
+    const sends = [];
+    let confirmed = 0;
+    const token = await mintLocalToken({
+      backendUrl: "http://127.0.0.1:5476",
+      resolveHome: () => SOCKET_HOME,
+      path,
+      fs: fakeTree({ files: new Map([v4Secret(SOCKET_HOME)]) }),
+      http: fakeHttpByTransport({ onSocket: "refused", sends }),
+      getuid: () => OWN_UID,
+      confirmTcpListener: async () => { confirmed += 1; return true; },
+    });
+
+    assert.equal(token, "minted-token");
+    assert.equal(confirmed, 1);
+    assert.deepEqual(sends.map((s) => s.transport), ["socket", "tcp"]);
+  });
+
+  it("takes a refusal on the socket as final", async () => {
+    const sends = [];
+    let confirmed = 0;
+    const token = await mintLocalToken({
+      backendUrl: "http://127.0.0.1:5476",
+      resolveHome: () => SOCKET_HOME,
+      path,
+      fs: fakeTree({ files: new Map([v4Secret(SOCKET_HOME)]) }),
+      http: fakeHttpByTransport({ onSocket: 403, sends }),
+      getuid: () => OWN_UID,
+      confirmTcpListener: async () => { confirmed += 1; return true; },
+    });
+
+    assert.equal(token, "");
+    assert.equal(confirmed, 0);
+    assert.deepEqual(sends.map((s) => s.transport), ["socket"]);
+  });
+
+  it("walks every published candidate on the socket before giving up", async () => {
+    const sends = [];
+    let call = 0;
+    const http = {
+      get(url, options, callback) {
+        const request = new EventEmitter();
+        request.destroy = () => {};
+        sends.push(options.headers["X-Local-Secret"]);
+        const statusCode = call++ === 0 ? 403 : 200;
+        queueMicrotask(() => {
+          const response = new EventEmitter();
+          response.statusCode = statusCode;
+          response.resume = () => {};
+          callback(response);
+          if (statusCode === 200) {
+            response.emit("data", JSON.stringify({ token: "live-token" }));
+            response.emit("end");
+          }
+        });
+        return request;
+      },
+    };
+    const token = await mintLocalToken({
+      backendUrl: "http://127.0.0.1:5476",
+      resolveHome: () => SOCKET_HOME,
+      path,
+      fs: fakeTree({
+        files: new Map([
+          v4Secret(SOCKET_HOME, "stale-secret"),
+          [listenerSecretPath(SOCKET_HOME, "5476", "::1", path), "live-secret"],
+        ]),
+      }),
+      http,
+      getuid: () => OWN_UID,
+    });
+
+    assert.equal(token, "live-token");
+    assert.deepEqual(sends, ["stale-secret", "live-secret"]);
+  });
+
+  it("reads no secret and sends nothing on TCP when the listener is not confirmed", async () => {
+    const sends = [];
+    const reads = [];
+    const token = await mintLocalToken({
+      backendUrl: "http://127.0.0.1:5476",
+      resolveHome: () => SOCKET_HOME,
+      path,
+      fs: fakeTree({ socket: null, files: new Map([v4Secret(SOCKET_HOME)]), reads }),
+      http: fakeHttpByTransport({ sends }),
+      getuid: () => OWN_UID,
+      confirmTcpListener: async () => false,
+    });
+
+    assert.equal(token, "");
+    assert.deepEqual(sends, []);
+    assert.deepEqual(reads, []);
+  });
+
+  it("has one send site, and only this module sends the secret", () => {
+    // Every send goes through `requestLocalToken`, whose callers are the socket
+    // branch (after `ownedSocketPath`) and the TCP branch (after the listener
+    // confirmation and the coverage test). A second literal would be a send that
+    // bypasses both.
+    const electronDir = path.join(__dirname, "..");
+    const source = nodeFs.readFileSync(path.join(electronDir, "local-token.js"), "utf8");
+    assert.equal(source.match(/"X-Local-Secret"/g).length, 1);
+    const tokenSources = nodeFs.readFileSync(
+      path.join(electronDir, "runtime", "gateway", "token-sources.js"),
+      "utf8",
+    );
+    assert.doesNotMatch(tokenSources, /["']X-Local-Secret["']/);
+  });
+
+  it("mints over a real unix socket in an owner-only home", { skip: process.platform === "win32" }, async (t) => {
+    const base = nodeFs.mkdtempSync(path.join(nodeOs.tmpdir(), "kc-sock-"));
+    t.after(() => nodeFs.rmSync(base, { recursive: true, force: true }));
+    const home = path.join(base, "crew");
+    nodeFs.mkdirSync(path.join(home, "run"), { recursive: true, mode: 0o700 });
+    nodeFs.chmodSync(home, 0o700);
+    nodeFs.chmodSync(base, 0o700);
+    nodeFs.writeFileSync(listenerSecretPath(home, "5476", "127.0.0.1", path), "real-secret\n", { mode: 0o600 });
+    const target = dialTarget("http://localhost:5476");
+    const socketPath = path.join(nodeFs.realpathSync(home), dashboardSocketName("5476"));
+
+    const seen = [];
+    const server = nodeHttp.createServer((req, res) => {
+      seen.push({ url: req.url, secret: req.headers["x-local-secret"], host: req.headers.host });
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ token: "socket-token" }));
+    });
+    await new Promise((resolve) => server.listen(socketPath, resolve));
+    t.after(() => new Promise((resolve) => server.close(resolve)));
+
+    const proven = ownedSocketPath({ target, home, path, fs: nodeFs, getuid: () => process.getuid() });
+    if (!proven) {
+      t.skip("this host's temp directory ancestry is not owner-protected");
+      return;
+    }
+    const token = await mintLocalToken({
+      backendUrl: "http://localhost:5476",
+      resolveHome: () => home,
+      path,
+      fs: nodeFs,
+      http: nodeHttp,
+      getuid: () => process.getuid(),
+      confirmTcpListener: async () => { throw new Error("TCP must not be consulted"); },
+    });
+
+    assert.equal(token, "socket-token");
+    assert.deepEqual(seen, [{ url: "/api/token/local", secret: "real-secret", host: "localhost:5476" }]);
+  });
+});
+
+describe("dashboardSocketName", () => {
+  it("matches the name the gateway binds", () => {
+    assert.equal(dashboardSocketName("5476"), "dashboard-5476.sock");
   });
 });

@@ -18,13 +18,17 @@ const { resolveHome } = require("../../home-dir");
  * `.local_secret`, or fetched over SSH from the crew configured for a port.
  *
  * The local mint is the security-sensitive half. It sends the machine's
- * secret, so it runs only for a gateway this process spawned, that is still
- * alive, and that the kernel names as the port's listener; everything else
- * falls through to the SSH path and then to the token prompt.
+ * secret, so it runs only for a gateway this process spawned and that is still
+ * alive, and only over a transport that proves the recipient: the gateway's
+ * unix socket in an owner-only data home, or a TCP port the kernel names as
+ * that child's listener. Everything else falls through to the SSH path and then
+ * to the token prompt.
  *
  * @param {object} deps
  * @param {() => object|null} deps.getGatewayProcess  the supervisor's current
  *        child, re-read at every site because it changes across awaits.
+ * @param {(() => number)|null} [deps.getuid]  this process's uid; without it the
+ *        mint never uses the unix socket.
  */
 function createTokenSources({
   store,
@@ -39,6 +43,7 @@ function createTokenSources({
   sendStatus,
   snapshotGatewayPortPids,
   getGatewayProcess,
+  getuid = null,
 }) {
   function fetchRemoteToken(tokenPort) {
     const config = getRemoteHostConfig(store, tokenPort || PORT);
@@ -95,12 +100,13 @@ function createTokenSources({
   /**
    * Mint a dashboard token for `targetBackendUrl`.
    *
-   * The token is delivered to the URL it was minted for, unchanged: the mint only
-   * produces one after confirming this gateway holds every loopback family that
-   * URL's host resolves to (`listenerSecretsFor`), so the host as written can
-   * reach no other listener. Every refusal below answers with the same empty
-   * string a miss produces, so a refusal and an absent credential are one case
-   * for the caller.
+   * The token is delivered to the URL it was minted for, unchanged. Over TCP the
+   * mint only produces one after confirming this gateway holds every loopback
+   * family that URL's host resolves to (`listenerSecretsFor`), so the host as
+   * written can reach no other listener; over the gateway's unix socket the
+   * socket entry itself identifies the recipient (`ownedSocketPath`). Every
+   * refusal below answers with the same empty string a miss produces, so a
+   * refusal and an absent credential are one case for the caller.
    *
    * @returns {Promise<string>}
    */
@@ -163,20 +169,28 @@ function createTokenSources({
     // reconnect answers `/api/status` exactly as the gateway would, `waitForBackend`
     // accepts it, and the secret would go to the far end of the tunnel.
     //
-    // The kernel's own pid-to-port mapping settles it, and that is the whole
-    // reason to use it here: a pid cannot be presented the way a command line can,
-    // so this is not the argv0 judgement #13826 is about -- `snapshotGatewayPortPids`
-    // returns raw pids and `isKirocrewCommand` is not involved. The gateway binds
-    // in the process we spawned (`web.TCPSite` in the dashboard server, no fork),
-    // so our child's own pid is the one the kernel reports for this port.
+    // The mint settles that per transport. On the gateway's unix socket the
+    // filesystem proves who created the entry (`ownedSocketPath`), so no listener
+    // question arises. On TCP the kernel's own pid-to-port mapping settles it, and
+    // that is the whole reason to use it here: a pid cannot be presented the way a
+    // command line can, so this is not a judgement on what `ps` reports --
+    // `snapshotGatewayPortPids` returns raw pids and `isKirocrewCommand` is not
+    // involved. The gateway binds in the process we spawned (`web.TCPSite` in the
+    // dashboard server, no fork), so our child's own pid is the one the kernel
+    // reports for this port.
     //
     // A null snapshot is "could not establish", whether the probe cannot run or
     // nothing is listening, and both refuse: the port is confirmed ours or the
     // secret stays put.
-    const holders = await snapshotGatewayPortPids(mintPort);
-    if (!holders || !holders.includes(getGatewayProcess().pid)) {
-      glog(`not minting a local token for :${mintPort}: the kernel does not name our gateway (pid ${getGatewayProcess().pid}) as its listener`);
-      return "";
+    async function confirmTcpListener() {
+      const holders = await snapshotGatewayPortPids(mintPort);
+      // Re-read after the await: the child can exit while the probe runs.
+      const child = getGatewayProcess();
+      if (!holders || !child || child.exitCode !== null || !holders.includes(child.pid)) {
+        glog(`not minting a local token for :${mintPort}: the kernel does not name our gateway (pid ${child ? child.pid : "none"}) as its listener`);
+        return false;
+      }
+      return true;
     }
     // Re-resolve the home at call time so a KIROCREW_HOME change after Electron
     // starts is honored. The mint dials the configured loopback origin exactly
@@ -187,6 +201,9 @@ function createTokenSources({
       path,
       fs,
       http,
+      isWindows,
+      getuid,
+      confirmTcpListener,
     });
   }
 
