@@ -35,3 +35,15 @@ the first patch is 2. The recording uses exactly that, which also demonstrates t
 check accepting a consecutive patch under the host's own numbering. An earlier take
 started the island at 0; it looked identical and recorded a sequence the product does not
 send, so it was replaced.
+
+
+## Re-recorded against the fold's real row shape
+
+An earlier take built each board row as `slot_key` / `on_cycle` / `entries`. The
+`worktree` fold emits `board` / `cycle` / `items`, so the reference page read three keys
+that do not exist, and every row of a copied page would have shown "a board" with a count
+of zero and no cycle flag. The page is fixed and these captures use the renderer's own key
+names, so what is on screen is what the product produces.
+
+A test now pins this: the row keys are read out of `_worktree_render`'s own source and
+every `board.<key>` the page reads must be one of them.
