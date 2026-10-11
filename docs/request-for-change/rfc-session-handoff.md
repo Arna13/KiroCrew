@@ -206,6 +206,14 @@ The tree edge moves in the same write. The sidebar is how a person sees who
 reports to whom, so a handoff that changed reach without moving the drawing would
 leave the picture lying. Using one write for both means they cannot disagree.
 
+The owner's dashboard calls this same route. An owner acting from the UI is not a
+fenced caller, so the first box in the flow reads an owner authorization instead
+of the manager check, and every step after it is identical — same lock, same
+re-check, same record, same field write. The alternative, expressing an
+owner-initiated move as an adopt followed by a handoff, writes two entries for
+one action and leaves the window between them to reason about. One route, one
+entry per move, two ways in at the front door.
+
 ### What a handoff does not widen
 
 A new manager gets send, read, stop, close, adopt and release on the session it
@@ -220,6 +228,17 @@ received. It does not get:
   goes through `work_report`, which is a different surface with a different
   shape, and the reason is unchanged by this proposal: a conductor reads
   structured status, not messages arriving in its own transcript.
+- **An armed patrol loop.** A handoff moves reporting reach, not running
+  automation. The giver's loop is left running and no loop is armed for the
+  receiver. A receiver that wants to watch its new report arms its own, exactly
+  as it would for a session it created itself.
+
+That last one is the line the whole section is drawn along, so it is worth saying
+plainly: a handoff changes who may act, and nothing about what is already acting.
+Arming a loop on the receiver's behalf would start work the receiver never asked
+for, and stopping the giver's would stop work the giver is still accountable for
+until it reports the handoff. Leaving both alone is the only option that needs no
+guess about intent.
 
 Keeping `_created_by` immutable is what makes those three statements true without
 a second mechanism. The origin facts stay on the origin field; only
@@ -251,6 +270,21 @@ any caller who happens to be walking; it has to resolve to the specific session
 above the gap and nobody else. Stated as a rule: a caller passes when it is on
 the target's `_manager` chain, and a closed hop is skipped only so the walk can
 continue upward past it — never so the walk can start somewhere else.
+
+### When a session is released
+
+`release_target` detaches a session in the tree, and once `_manager` exists it
+has to answer a second question: who manages the session it just let go. It
+reverts `_manager` to `_created_by`. The session stands alone in the drawing and
+its creator is responsible for it again, which is the state it was minted in, so
+release undoes a handoff the same way it undoes an adoption.
+
+The other reading — clear `_manager` so the session has no manager at all — is
+closer to what the word release says, and it produces a session that no fenced
+caller matches, reachable only from an unfenced owner tab. That is the orphan
+this document exists to remove, so release reverses a handoff rather than
+creating one. Every session always has a manager: its current one, or failing
+that the session that made it.
 
 ## How this is built in stages
 
@@ -330,25 +364,3 @@ gateway that is recording the session tree, which is already true of
 `adopt_target` — it refuses with a dedicated code when the crew log is off or the
 target's log cannot be named. Handoff inherits that refusal rather than inventing
 a weaker one.
-
-## Appendix C: open questions
-
-**Should the owner's UI handoff be the same verb?** The rule says the current
-manager or the owner may start a handoff. The owner acting from the dashboard is
-not a fenced caller at all, so the authorization half is trivially satisfied; the
-question is whether the UI calls the same route with an owner-shaped
-authorization, or whether an owner-initiated move is better expressed as adopt
-plus handoff. Reading the code does not settle this, because no owner-facing
-reach control exists on this surface today to copy.
-
-**What a handoff should do to an armed patrol loop.** A manager watching a worker
-has its own loop. Whether the giver's loop should be stopped, the receiver's
-armed, or neither — leaving it to the receiver to arm its own — is a product
-choice about how much a handoff should do on the caller's behalf, and the stages
-above deliberately do not pick one.
-
-**Whether release should clear `_manager` or restore the creator.** `release_target`
-today detaches a session in the tree. Once `_manager` exists, release has two
-defensible meanings: the session stands alone with no manager, or it reverts to
-its creator. The second keeps every session reachable by somebody; the first is
-closer to what release says.
