@@ -4203,6 +4203,11 @@ Called by ``FolderWatcher.scan_source`` when it refuses such a row, which is
                                  if isinstance(raw_source, str) else None)
                 key = _bundle_state_text(f"{table}.{key_col}", row.get(key_col))
                 if not key:
+                    # An empty or non-text key names no document a caller could look for,
+                    # so this skip stays silent -- the one unowned-arrival path with no
+                    # account entry. A withheld entry is keyed on the document key, and
+                    # there is none here to report; the same reasoning keeps a non-text
+                    # ``source_id`` silent above.
                     continue
                 group = _bundle_item_group(row.get("item_ids"))
                 if target_source is None:
@@ -4270,8 +4275,20 @@ Called by ``FolderWatcher.scan_source`` when it refuses such a row, which is
                     # row would either restate the base or claim local content.
                     continue
                 # An id another document already owns is never taken, and the base is not
-                # "another document" -- it is the row being extended.
+                # "another document" -- it is the row being extended. The whole row is
+                # refused rather than partially owned, so the items this import wrote for
+                # it arrive unowned; name them, as every other unowned-arrival path does,
+                # since nothing else reports this one. The id another row claims is never
+                # blocked (the store's own writer produces it when a reassigned item
+                # leaves one row naming an item its new owner's row never names), so the
+                # count would otherwise read whole while the content arrived owned by
+                # nothing.
                 if set(arriving) & (claimed_ids - set(base)):
+                    stranded = sorted(set(group) & inserted_items)
+                    if stranded:
+                        dropped.append({"reason": "ownership_row_item_claimed_elsewhere",
+                                        "table": table, "source_id": target_source,
+                                        "key": key, "items": ",".join(stranded)})
                     continue
                 # The ids were inserted by this import, so they exist -- but under the
                 # source the ITEM named, which is not necessarily the one this row names.
@@ -4289,6 +4306,17 @@ Called by ``FolderWatcher.scan_source`` when it refuses such a row, which is
                             f"AND id IN ({placeholders})",
                             (target_source, *chunk)).fetchall())
                 if held != set(arriving):
+                    # One id this import wrote landed under the source the ITEM named, not
+                    # the one this row names, which makes the row an inconsistent
+                    # statement about ownership rather than a partial one, so the whole
+                    # row is refused. The items it named that this import wrote still
+                    # arrive -- owned by nothing -- so name them, as the neighbouring
+                    # refusals do; nothing else reports this one.
+                    stranded = sorted(set(group) & inserted_items)
+                    if stranded:
+                        dropped.append({"reason": "ownership_row_item_source_mismatch",
+                                        "table": table, "source_id": target_source,
+                                        "key": key, "items": ",".join(stranded)})
                     continue
                 if merging:
                     # Extend the live row's group and touch nothing else. Its hash, name
