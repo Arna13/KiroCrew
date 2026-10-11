@@ -657,6 +657,38 @@ describe('ChatEmbed follow-up options', () => {
     expect(input.value).toBe('')
   })
 
+  // #18013: a single-select `[OPTION:]` pick REPLACES the previous one rather than
+  // joining it, matching the main chat and chat pane. ChatEmbed used to join
+  // because it drove useComposerDraft without the offer's select mode.
+  it('a single-select [OPTION:] pick replaces the previous pick', async () => {
+    mockGet.mockResolvedValue({
+      messages: [{ role: 'assistant', content: 'Pick one. [OPTION: Go | Go All | Cancel]' }],
+      running: false,
+      title: '',
+    })
+    await act(async () => {
+      renderWithProviders(<ChatEmbed slotKey="slot-1" />)
+    })
+    await act(async () => {
+      vi.advanceTimersByTime(100)
+    })
+    const input = screen.getByLabelText('Chat message') as HTMLInputElement
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Go' }))
+      vi.advanceTimersByTime(250)
+    })
+    expect(input.value).toBe('Go')
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+      vi.advanceTimersByTime(250)
+    })
+    // Replaced, not joined: NOT "Go, Cancel".
+    expect(input.value).toBe('Cancel')
+    expect(mockPost).not.toHaveBeenCalledWith('/api/chat', expect.anything())
+  })
+
 })
 
 describe('ChatEmbed approvals', () => {

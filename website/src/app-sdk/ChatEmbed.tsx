@@ -198,7 +198,7 @@ function ChatEmbed({
    *  after the answer settles" and "a later user message clears them" behave identically
    *  here too — an agent's follow-up choices should never be silently dropped just
    *  because the surface embedding them is thinner. */
-  const { followUpOptions } = useMemo(
+  const { followUpOptions, followUpMulti, followUpSourceKey } = useMemo(
     () => deriveFollowUpOptions(messages, running),
     [messages, running]
   )
@@ -207,7 +207,7 @@ function ChatEmbed({
    *  see useComposerDraft's own docs. Picking a follow-up option edits the draft
    *  (matching every other surface) instead of sending immediately. */
   const { draft, setDraft, textareaRef, picked, toggleOption, composition, submitOnEnter } =
-    useComposerDraft({ followUpOptions, maxHeight: composerMaxHeight })
+    useComposerDraft({ followUpOptions, multi: followUpMulti, sourceKey: followUpSourceKey, maxHeight: composerMaxHeight })
 
   // startAtBottom follow is owned by the virtualizer behind ChatMessageList.
   // Non-startAtBottom embeds keep the message-arrival smooth scroll: it fires

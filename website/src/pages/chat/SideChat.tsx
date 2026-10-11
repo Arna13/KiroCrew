@@ -201,7 +201,7 @@ export default function SideChat({ slot }: { slot: string }) {
 
   /** Derived from the same helper the main chat uses, so "options only after the answer
    *  settles" and "a later user message clears them" behave identically. */
-  const { followUpOptions } = useMemo(
+  const { followUpOptions, followUpMulti, followUpSourceKey } = useMemo(
     () => deriveFollowUpOptions(transcript, isStreaming),
     [transcript, isStreaming]
   )
@@ -231,7 +231,7 @@ export default function SideChat({ slot }: { slot: string }) {
   // remount restores both, and neither outlives the page), are expanded at
   // send, and clear with the text.
   const onPasteBlocksChange = useCallback((next: PasteBlock[]) => { writeSideChatPastes(slot, next) }, [slot])
-  const composer = useComposerDraft({ followUpOptions, maxBytes: MAX_QUESTION_BYTES, maxHeight: MAX_INPUT_H, draft: storedDraft, onDraftChange })
+  const composer = useComposerDraft({ followUpOptions, multi: followUpMulti, sourceKey: followUpSourceKey, maxBytes: MAX_QUESTION_BYTES, maxHeight: MAX_INPUT_H, draft: storedDraft, onDraftChange })
   const {
     draft, setDraft,
     picked: pickedOptions, toggleOption, mergeIntoDraft, exceedsByteLimit,
