@@ -211,6 +211,17 @@ answers `not_bound`, and it cannot tell an early call from a broken one. A bound
 item with no seed is visible in your own `work_ledger_read` and you seed it next
 cycle; an unbound running worker is neither visible nor recoverable.
 
+**You create every worker you manage.** Control over a session follows the
+session that created it, so the session that should manage a worker must be the
+one that creates it; do not create workers for another conductor. Every
+agent-created session is ownership-fenced to its creator: `session_send`,
+`session_read_message`, `session_adopt` and `session_close` from any other
+session answer `not_creator`, and `session_adopt` does not lift that fence — it
+writes a sidebar edge only. So a worker you create for a second conductor to run
+is a worker that conductor can never reach, and the item looks stalled with a
+live session behind it. When an item's work belongs under another conductor,
+dispatch that conductor onto the item and let it create its own workers.
+
 #### Which agent
 
 | the item | `agent` |

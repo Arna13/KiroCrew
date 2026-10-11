@@ -4938,6 +4938,14 @@ gets `not_bound` and cannot tell an early call from a broken one. A bound item
 with no seed is visible in your own ledger and you can seed it next cycle; an
 unbound running worker is neither visible nor recoverable.
 
+**You create every worker you manage.** Control over a session follows the
+session that created it, so the session that should manage a worker must be the
+one that creates it; do not create workers for another conductor. A worker
+created on someone else's behalf answers `not_creator` to that conductor's
+send, read, adopt and close, and nothing afterwards transfers it. When the work
+belongs under another conductor, dispatch that conductor onto the item and let
+it create its own workers.
+
 ### Which agent
 
 | the item | `agent` |
