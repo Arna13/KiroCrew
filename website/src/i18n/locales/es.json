@@ -10037,6 +10037,13 @@
       "dismiss": "Descartar",
       "read_failed_title": "No se pudieron comprobar las versiones de tus tripulaciones remotas tras esta actualización",
       "unread": "Aún no hay versión de {{names}}, así que también podrían estar desactualizadas."
+    },
+    "kiroSignInNotice": {
+      "sign_in_expired": "Inicio de sesión en Kiro caducado",
+      "open_sign_in": "Volver a iniciar sesión en Configuración",
+      "expired_detail": "Los agentes no pueden ejecutarse hasta que vuelvas a iniciar sesión. El inicio de sesión guardado caducó y no se puede renovar.",
+      "refused_title": "Kiro rechazó renovar tu inicio de sesión",
+      "refused_detail": "Los agentes dejarán de ejecutarse cuando caduque este inicio de sesión. Vuelve a iniciar sesión para que sigan ejecutándose."
     }
   },
   "hooks": {

@@ -9905,6 +9905,13 @@
       "dismiss": "Schließen",
       "read_failed_title": "Die Versionen deiner Remote-Crews konnten nach diesem Update nicht geprüft werden",
       "unread": "Von {{names}} liegt noch keine Version vor, sie könnten also ebenfalls veraltet sein."
+    },
+    "kiroSignInNotice": {
+      "sign_in_expired": "Kiro-Anmeldung abgelaufen",
+      "open_sign_in": "In den Einstellungen erneut anmelden",
+      "expired_detail": "Agenten können erst wieder laufen, wenn du dich erneut anmeldest. Die gespeicherte Anmeldung ist abgelaufen und kann nicht erneuert werden.",
+      "refused_title": "Kiro hat die Erneuerung deiner Anmeldung abgelehnt",
+      "refused_detail": "Agenten hören auf zu laufen, sobald diese Anmeldung abläuft. Melde dich erneut an, damit sie weiterlaufen."
     }
   },
   "hooks": {

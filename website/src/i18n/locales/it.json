@@ -10037,6 +10037,13 @@
       "dismiss": "Ignora",
       "read_failed_title": "Impossibile verificare le versioni dei tuoi equipaggi remoti dopo questo aggiornamento",
       "unread": "Nessuna versione ancora da {{names}}, quindi potrebbero essere anch'essi non aggiornati."
+    },
+    "kiroSignInNotice": {
+      "sign_in_expired": "Accesso a Kiro scaduto",
+      "open_sign_in": "Accedi di nuovo nelle Impostazioni",
+      "expired_detail": "Gli agenti non possono essere eseguiti finché non accedi di nuovo. L’accesso salvato è scaduto e non può essere rinnovato.",
+      "refused_title": "Kiro ha rifiutato di rinnovare il tuo accesso",
+      "refused_detail": "Gli agenti si fermeranno alla scadenza di questo accesso. Accedi di nuovo perché continuino a funzionare."
     }
   },
   "hooks": {

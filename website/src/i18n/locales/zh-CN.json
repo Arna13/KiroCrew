@@ -9773,6 +9773,13 @@
       "dismiss": "关闭",
       "read_failed_title": "此次更新后无法检查远程团队的版本",
       "unread": "尚未收到 {{names}} 的版本，因此它们也可能已落后。"
+    },
+    "kiroSignInNotice": {
+      "sign_in_expired": "Kiro 登录已失效",
+      "open_sign_in": "在设置中重新登录",
+      "expired_detail": "重新登录之前，agent 无法运行。已保存的登录已失效，且无法续期。",
+      "refused_title": "Kiro 拒绝续期你的登录",
+      "refused_detail": "此登录失效后，agent 将停止运行。请重新登录，让它们继续运行。"
     }
   },
   "hooks": {

@@ -9773,6 +9773,13 @@
       "dismiss": "닫기",
       "read_failed_title": "이번 업데이트 후 원격 크루의 버전을 확인할 수 없습니다",
       "unread": "{{names}}에서 아직 버전 정보가 없으므로 이들도 뒤처져 있을 수 있습니다."
+    },
+    "kiroSignInNotice": {
+      "sign_in_expired": "Kiro 로그인이 만료됨",
+      "open_sign_in": "설정에서 다시 로그인",
+      "expired_detail": "다시 로그인할 때까지 에이전트를 실행할 수 없습니다. 저장된 로그인이 만료되어 갱신할 수 없습니다.",
+      "refused_title": "Kiro가 로그인 갱신을 거부했습니다",
+      "refused_detail": "이 로그인이 만료되면 에이전트가 멈춥니다. 계속 실행하려면 다시 로그인하세요."
     }
   },
   "hooks": {

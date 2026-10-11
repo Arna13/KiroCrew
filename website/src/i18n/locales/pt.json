@@ -10037,6 +10037,13 @@
       "dismiss": "Dispensar",
       "read_failed_title": "Não foi possível verificar as versões das suas equipes remotas após esta atualização",
       "unread": "Ainda não há versão de {{names}}, então elas também podem estar desatualizadas."
+    },
+    "kiroSignInNotice": {
+      "sign_in_expired": "Login do Kiro expirado",
+      "open_sign_in": "Entrar novamente nas Configurações",
+      "expired_detail": "Os agentes não podem ser executados até você entrar novamente. O login salvo expirou e não pode ser renovado.",
+      "refused_title": "O Kiro recusou renovar seu login",
+      "refused_detail": "Os agentes param de ser executados quando este login expirar. Entre novamente para mantê-los em execução."
     }
   },
   "hooks": {

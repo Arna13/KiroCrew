@@ -10037,6 +10037,13 @@
       "dismiss": "Ignorer",
       "read_failed_title": "Impossible de vérifier les versions de tes équipages distants après cette mise à jour",
       "unread": "Pas encore de version de {{names}}, ils sont donc peut-être aussi en retard."
+    },
+    "kiroSignInNotice": {
+      "sign_in_expired": "Connexion Kiro expirée",
+      "open_sign_in": "Se reconnecter dans les Paramètres",
+      "expired_detail": "Les agents ne peuvent pas s’exécuter tant que tu ne te reconnectes pas. La connexion enregistrée a expiré et ne peut pas être renouvelée.",
+      "refused_title": "Kiro a refusé de renouveler ta connexion",
+      "refused_detail": "Les agents s’arrêteront quand cette connexion expirera. Reconnecte-toi pour qu’ils continuent."
     }
   },
   "hooks": {
