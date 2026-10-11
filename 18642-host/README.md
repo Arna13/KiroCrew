@@ -27,3 +27,11 @@ outside, so a shot taken without that check would ship as evidence for nothing.
 The recording's own assertion is the point of it: the capture fails unless the row count
 rises across the push (5 → 6). A video of a page that redrew nothing would otherwise look
 the same.
+
+## The version sequence in the recording is the real one
+
+`LivePage._full_read` mints a version for every full read, so a first paint carries 1 and
+the first patch is 2. The recording uses exactly that, which also demonstrates the gap
+check accepting a consecutive patch under the host's own numbering. An earlier take
+started the island at 0; it looked identical and recorded a sequence the product does not
+send, so it was replaced.
