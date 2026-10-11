@@ -1365,7 +1365,11 @@ async def _publish_home_tab(orch: GatewayOrchestrator, user_id: str) -> None:
                 lines = []
                 for j in jobs[:15]:
                     status = "✅" if j.enabled else "⏸️"
-                    sched = format_schedule(j.schedule, tz_name=_tz)
+                    # Each job carries its own timezone; honour it first and
+                    # fall back to the configured/viewer zone only when the job
+                    # has none, matching the scheduler and the other cron
+                    # display surfaces.
+                    sched = format_schedule(j.schedule, tz_name=getattr(j, "timezone", "") or _tz)
                     raw = f"{status} *{j.name}* — `{sched}`"
                     lines.append(redact_credentials(redact_exfiltration_urls(raw)[0])[0])
                 if len(jobs) > 15:
