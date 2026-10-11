@@ -44,6 +44,29 @@ class TestAllocate:
             assert stat.S_IMODE(os.stat(path).st_mode) == 0o700
             assert stat.S_IMODE(os.stat(tmp_root).st_mode) == 0o700
 
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX mode bits")
+    def test_owner_marker_is_owner_only_under_a_lax_umask(self, tmp_root: Path) -> None:
+        # The ``.owner`` marker is a FILE inside the ``0o700`` allocation, and
+        # the directory's mode does not cover the files in it. A umask-based
+        # create leaves the marker ``0o644`` under a ``022`` umask -- group and
+        # world readable -- which the owner-only sweep then reports. Both the
+        # provisional write (allocation) and the pid update (record_owner) must
+        # land the marker ``0o600`` regardless of the inherited umask.
+        previous = os.umask(0o022)
+        try:
+            path = bt.allocate_backend_tmp(DIGEST)
+            marker = path / bt.OWNER_FILENAME
+            assert stat.S_IMODE(marker.stat().st_mode) == 0o600, oct(
+                stat.S_IMODE(marker.stat().st_mode)
+            )
+            bt.record_owner(path, 424242)
+            assert marker.read_text() == "424242"
+            assert stat.S_IMODE(marker.stat().st_mode) == 0o600, oct(
+                stat.S_IMODE(marker.stat().st_mode)
+            )
+        finally:
+            os.umask(previous)
+
     def test_allocation_applies_platform_dacl_lockdown(self, tmp_root: Path, monkeypatch) -> None:
         # ``mode=0o700`` is a POSIX-bits no-op on Windows: under a permissive
         # custom data home the dir would inherit a readable DACL, exposing

@@ -79,7 +79,11 @@ def allocate_backend_tmp(pool_digest: str) -> Path:
     path.mkdir(mode=0o700)
     platform_compat.restrict_dir_to_owner(path)
     try:
-        (path / OWNER_FILENAME).write_text(str(os.getpid()), encoding="utf-8")
+        # ``mode=0o600``: the marker lives inside the ``0o700`` allocation but
+        # is itself a file the owner-only policy sweeps, so a umask-based create
+        # (``0o644`` under a ``022`` umask) leaves it group/world readable. The
+        # directory's mode does not cover the files inside it.
+        atomic_write(path / OWNER_FILENAME, str(os.getpid()), mode=0o600)
     except OSError:
         shutil.rmtree(path, ignore_errors=True)
         raise
@@ -203,7 +207,7 @@ def record_owner(path: Path, pid: int) -> None:
         )
         return
     try:
-        atomic_write(marker, str(pid))
+        atomic_write(marker, str(pid), mode=0o600)
     except OSError:
         # Fail-open: the sweep never deletes an UNOWNED dir, so a failed write
         # leaves one that is kept, not reclaimed -- but only once the
