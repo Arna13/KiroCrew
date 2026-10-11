@@ -115,6 +115,7 @@ import { useTerminalPoppedOut, focusPopout as focusTerminalPopout } from './util
 import MigrationCheck from './components/MigrationCheck'
 import CrashReportNotice from './components/CrashReportNotice'
 import RemoteUpdateOffer from './components/RemoteUpdateOffer'
+import KiroSignInNoticeFallback from './components/KiroSignInNoticeFallback'
 import { ImportSessionOutcomeNotice } from './components/ImportSessionItem'
 import BuiltinAppRoute from './apps/BuiltinAppRoute'
 import { getBuiltinIcon } from './apps/builtinIcons'
@@ -2813,8 +2814,12 @@ export default function App() {
           <CrashReportNotice />
           {/* Route-independent for the same reason: a lapsed Kiro sign-in
               stops every KAS agent, whatever page is open. It hides itself
-              off KAS, while the sign-in works, and on the page with the card. */}
-          <ErrorBoundary scope="kiro-sign-in-notice" fallback={null}>
+              off KAS, while the sign-in works, and on the page with the card.
+              A notice that fails to load or render says so, with the hand-off. */}
+          <ErrorBoundary
+            scope="kiro-sign-in-notice"
+            fallback={error => <KiroSignInNoticeFallback error={error} />}
+          >
             <Suspense fallback={null}>
               <KiroSignInNotice />
             </Suspense>
