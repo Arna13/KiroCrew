@@ -107,6 +107,10 @@ def test_session_send_stamps_the_sending_slot(tmp_path):
     assert entry_meta[sc.ADMISSION_PROVENANCE_META_KEY] == {
         "sender": caller.key,
         "fenced": False,
+        # The manager-line switch as the admission saw it. The drain re-asserts the
+        # policy that admitted the entry and reads no config of its own, so the policy
+        # travels with the entry.
+        "chain": False,
     }
     # The stamp rides ALONGSIDE the containment snapshot; it never displaces it,
     # because that snapshot is the drain's authorization input.
@@ -219,6 +223,7 @@ def test_requeued_steer_notifies_its_sender(tmp_path):
     assert requeued[sc.ADMISSION_PROVENANCE_META_KEY] == {
         "sender": caller.key,
         "fenced": False,
+        "chain": False,
     }, "the requeue keeps what the drain re-checks, not only where to report"
 
     _link(target)
@@ -339,7 +344,11 @@ def test_send_origin_meta_omits_an_empty_key(tmp_path):
     for fenced in (False, True):
         assert sc.send_origin_meta(state, "chat-7", manager_fenced=fenced) == {
             sc.SEND_ORIGIN_META_KEY: {"slot": "chat-7", "tab": caller._tab_id},
-            sc.ADMISSION_PROVENANCE_META_KEY: {"sender": "chat-7", "fenced": fenced},
+            sc.ADMISSION_PROVENANCE_META_KEY: {
+                "sender": "chat-7",
+                "fenced": fenced,
+                "chain": False,
+            },
         }
 
 
@@ -361,7 +370,11 @@ def test_send_origin_meta_omits_a_key_with_no_tab_identity(tmp_path):
     for key in ("chat-never-existed", "chat-9"):
         meta = sc.send_origin_meta(state, key, manager_fenced=True)
         assert sc.SEND_ORIGIN_META_KEY not in meta, key
-        assert meta[sc.ADMISSION_PROVENANCE_META_KEY] == {"sender": key, "fenced": True}
+        assert meta[sc.ADMISSION_PROVENANCE_META_KEY] == {
+            "sender": key,
+            "fenced": True,
+            "chain": False,
+        }
 
 
 def test_the_stamp_carries_both_fields_or_neither(tmp_path):

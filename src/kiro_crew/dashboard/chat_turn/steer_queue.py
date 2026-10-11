@@ -450,7 +450,9 @@ def _has_user_queued_followup(slot: "_ChatSlot") -> bool:
     return any(not _queue_entry_is_orchestration(q) for q in getattr(slot, "_queue", []))
 
 
-def _drop_stale_admissions(state: DashboardState, slot: _ChatSlot) -> bool:
+def _drop_stale_admissions(
+    state: DashboardState, slot: _ChatSlot, *, chain_enabled: bool | None = None
+) -> bool:
     """Drop queued entries whose admission-time containment has lapsed.
 
     Authorization is decided when a prompt is ADMITTED (`authorize_target` for
@@ -562,7 +564,9 @@ def _drop_stale_admissions(state: DashboardState, slot: _ChatSlot) -> bool:
         if held_for_manager:
             changed = [name for name in changed if name != "manager_unknown"]
         try:
-            if _sc.sender_lost_its_reach(state, slot, q.get("meta")):
+            if _sc.sender_lost_its_reach(
+                state, slot, q.get("meta"), chain_enabled=chain_enabled
+            ):
                 changed = [*changed, _sc.SENDER_LOST_REACH]
         except _sc.SessionControlError:
             held_for_manager = True
