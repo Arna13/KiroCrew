@@ -90,6 +90,7 @@ from .inline_payload import (
     _INLINE_DYNAMIC_EXEC_RE,
     _decoded_b64_literal_sources,
     _has_self_importing_inline_program,
+    _stdin_redirect_imports_product,
 )
 from .shell_normalizer import (
     _AMBIGUOUS_EXPANSION_RE,
@@ -445,8 +446,15 @@ def _is_credential_mint(text_lower: str, *, raw_text: "str | None" = None) -> bo
     # next command's payload.
     submitted = raw_text if raw_text is not None else text_lower
     decoded_literals = _decoded_b64_literal_sources(submitted)
-    for tokens in _self_token_frames(text_lower):
+    for source, tokens in _shell_payload_walk(text_lower):
         programs = _argv_programs(tokens)
+        # The quoted-redirect residual: an interpreter fed its program by a stdin redirection
+        # whose target quotes a substitution opener reads as a script to the de-quoted token
+        # gate below, so the program on stdin is never scanned. The ORIGINAL text still carries
+        # the quoting, so re-read each interpreter's own stdin program from it. Gated on a `<`
+        # first so a frame with no stdin redirect pays nothing.
+        if "<" in source and _stdin_redirect_imports_product(source, decoded_literals):
+            return True
         # The command-level half of ``_data_consumer_exempt`` reads only *tokens*, so its
         # answer is the same for every token in this frame.  Held here and computed at
         # most once per FRAME rather than once per trigger token: that half contains an

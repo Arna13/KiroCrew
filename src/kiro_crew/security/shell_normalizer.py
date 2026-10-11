@@ -210,6 +210,28 @@ _PYTHON_PROGRAM_RE = re.compile(r"\Apy(?:thon)?[0-9.]*(?:\.exe)?\Z")
 _PYTHON_OPERAND_FLAGS = frozenset({"-x", "-w", "-q", "--check-hash-based-pycs"})
 
 
+#: Python short options that CONSUME the rest of their cluster as a value (``-W filt``,
+#: ``-X opt``), so a ``c`` / ``m`` appearing after one of them is that value's text, not
+#: the ``-c`` / ``-m`` that would otherwise supply the program on the command line. The
+#: deny path lowercases the command before this reader sees it, so match either case.
+_PYTHON_SHORT_OPERAND_OPTS = frozenset("WXwx")
+
+
+def _short_opts_supply_program(token: str) -> bool:
+    """True when a ``-``-prefixed SHORT-option cluster runs ``-c`` / ``-m`` -- the
+    program is on the command line, not standard input. ``-W`` / ``-X`` swallow the
+    cluster's remainder as their value, so a ``c`` / ``m`` after one of them is that
+    value's text (``-Wc`` is ``-W c``), never the program-supplying flag. The option
+    letters are matched case-insensitively because the deny path lowercases first.
+    """
+    for ch in token[1:]:
+        if ch in ("c", "m"):
+            return True
+        if ch in _PYTHON_SHORT_OPERAND_OPTS:
+            return False
+    return False
+
+
 #: Interpreter flags that take an INLINE PROGRAM as their operand: ``-c`` a statement string,
 #: ``-`` / no flag a stdin script. ``python -c "from kiro_crew.cli import main; main()" token``
 #: mints the identical token as ``python -m kiro_crew token`` — the payload is one argv word
@@ -489,6 +511,47 @@ _DATA_CONSUMER_PROGRAMS = frozenset(
         "od",
     }
 )
+
+
+# Commands that EXEC their trailing argv as a new command, so an interpreter named
+# after one (``env python3 …``, ``exec python3 …``, ``sudo python3 …``) is the
+# program that runs. Used by :func:`_raw_stdin_mint_programs` to find the executed
+# interpreter: a name in any OTHER command's arguments (``echo python3`` prints it,
+# ``grep python3`` searches for it) is data, never run. An allowlist is right here
+# because a forgotten entry only misses a residual the de-quoted token path already
+# missed (the same quoted-redirect fake span) -- it never widens a refusal.
+_INTERPRETER_WRAPPERS = frozenset(
+    {
+        "env",
+        "exec",
+        "sudo",
+        "doas",
+        "nohup",
+        "setsid",
+        "stdbuf",
+        "command",
+        "builtin",
+        "nice",
+        "ionice",
+        "timeout",
+        "time",
+        "runuser",
+        "chroot",
+        "pkexec",
+        "setpriv",
+        "taskset",
+        "chrt",
+    }
+)
+
+
+# Reserved words that INTRODUCE a simple command rather than being one: a leading
+# ``then`` / ``do`` / ``{`` / ``!`` before an interpreter is shell grammar, not the
+# executed program, so interpreter resolution steps over them the way it steps over
+# a flagless wrapper.  Left out are the words that open a compound head whose next
+# word is a condition, not the command (``if`` / ``while`` / ``for`` / ``case``);
+# the ``;`` or newline that ends that head starts the branch command on its own.
+_SHELL_COMMAND_PREFIX_KEYWORDS = frozenset({"then", "else", "elif", "do", "{", "!"})
 
 
 # program in a run that ``shlex`` handed over as a single word.
@@ -995,6 +1058,511 @@ def _python_reads_stdin(later_tokens: list[str]) -> bool:
             continue  # an ordinary interpreter flag
         return False  # a positional that is not `-` is a script path
     return True  # nothing but flags → bare interpreter reads stdin
+
+
+def _heredoc_free_source(source: str) -> "tuple[str, list[str]]":
+    """``(command text with heredoc bodies removed, the bodies in declaration order)``.
+
+    :func:`_iter_shell_chars` is a plain quote/escape machine: it does not know a
+    heredoc BODY is literal, so a lone ``'`` or ``"`` in one body toggles its quote
+    state and desyncs every command AFTER it (``cat <<'DOC'`` whose body holds a
+    ``'`` would leave the next command reading as quoted). Removing the bodies up
+    front -- and carrying the quote state ACROSS each removed body with the machine's
+    own resume parameters -- keeps the command text's quoting exactly bash's, while
+    the bodies themselves (an interpreter's stdin program) are returned for matching.
+    A heredoc delimiter is read quote-awarely, so a ``<<`` inside quotes is data.
+    """
+    clean: list[str] = []
+    bodies: list[str] = []
+
+    def emit_line(line_steps: "list[_ShellChar]", base: int) -> "list[tuple[str, bool]]":
+        """Append *line_steps* to *clean* (dropping any ``#`` comment) and return the
+        heredocs it declares. *base* is the source offset the steps are relative to."""
+        pending: list[tuple[str, bool]] = []
+        in_comment = False
+        arith_depth = 0  # >0 inside `$(( ))` / `(( ))` arithmetic, where `<<` is a shift
+        for k, step in enumerate(line_steps):
+            if step.active and step.char == "\n":
+                clean.append(step.text)  # keep the separator
+                continue
+            if in_comment:
+                continue  # a `#` comment runs to the newline; drop it from the view
+            if step.active and step.char == "#" and _opens_comment(source, base + step.offset):
+                in_comment = True
+                continue
+            clean.append(step.text)
+            if step.active and step.char == "(":
+                # `((` (two adjacent parens, as in `$((` or a bare `((`) opens
+                # arithmetic; a lone `(` is a subshell / substitution and is not
+                # tracked, so a real `<<` heredoc inside `$( … )` still counts.
+                next_is_paren = (
+                    k + 1 < len(line_steps)
+                    and line_steps[k + 1].active
+                    and line_steps[k + 1].char == "("
+                )
+                if arith_depth > 0:
+                    arith_depth += 1
+                elif next_is_paren:
+                    arith_depth = 1
+            elif step.active and step.char == ")" and arith_depth > 0:
+                arith_depth -= 1
+            if (
+                step.active
+                and step.char == "<"
+                and arith_depth == 0  # a `<<` inside arithmetic is a left shift, not a heredoc
+                and not (k > 0 and line_steps[k - 1].active and line_steps[k - 1].char == "<")
+            ):
+                run = 1  # count the WHOLE `<` run once, from its first character
+                while (
+                    k + run < len(line_steps)
+                    and line_steps[k + run].active
+                    and line_steps[k + run].char == "<"
+                ):
+                    run += 1
+                if run == 2:  # `<<` heredoc; `<<<` (run 3) is a here-string with no body
+                    j = k + 2
+                    strip_tabs = False
+                    if j < len(line_steps) and line_steps[j].active and line_steps[j].char == "-":
+                        strip_tabs = True
+                        j += 1
+                    while (
+                        j < len(line_steps)
+                        and line_steps[j].active
+                        and line_steps[j].char.isspace()
+                    ):
+                        j += 1
+                    tag_chars: list[str] = []
+                    while j < len(line_steps):
+                        s2 = line_steps[j]
+                        if s2.active and (
+                            s2.char.isspace() or s2.char in "<>;&|" or s2.char == "\n"
+                        ):
+                            break
+                        tag_chars.append(s2.text)
+                        j += 1
+                    pending.append((_dequote_delimiter("".join(tag_chars)), strip_tabs))
+        return pending
+
+    pos = 0
+    state = 0
+    ansi = False
+    while pos < len(source):
+        # ONE generator serves every line with no heredoc to strip; it is only
+        # restarted (and the source only re-sliced) when a body is lifted out, which
+        # resets the quote state cleanly. So a file of N blank lines costs O(N), not
+        # the O(N^2) a per-line re-slice would.
+        base = pos
+        line_steps: "list[_ShellChar]" = []
+        advanced = False
+        for step in _iter_shell_chars(source[base:], state, ansi):
+            line_steps.append(step)
+            if not (step.active and step.char == "\n"):
+                continue
+            pending = emit_line(line_steps, base)
+            line_steps = []
+            if not pending:
+                continue  # keep consuming the same generator
+            # Lift the heredoc bodies that follow this newline, then restart.
+            state = step.state
+            ansi = step.ansi
+            body_pos = base + step.offset + len(step.text)
+            for tag, strip_tabs in pending:
+                scan = body_pos
+                captured = False
+                while scan < len(source):
+                    line_end = source.find("\n", scan)
+                    line = source[scan : line_end if line_end != -1 else len(source)]
+                    if (line.lstrip("\t") if strip_tabs else line) == tag:
+                        bodies.append(source[body_pos:scan])
+                        body_pos = line_end + 1 if line_end != -1 else len(source)
+                        captured = True
+                        break
+                    if line_end == -1:
+                        break
+                    scan = line_end + 1
+                if not captured:  # unterminated heredoc runs to the end of the source
+                    bodies.append(source[body_pos:])
+                    body_pos = len(source)
+            pos = body_pos
+            advanced = True
+            break
+        if not advanced:
+            emit_line(line_steps, base)  # a trailing line with no closing newline
+            break
+    return "".join(clean), bodies
+
+
+def _substitution_free_source(clean: str) -> "tuple[str, set[int]]":
+    """Strip every command substitution, subshell and arithmetic expansion out of
+    *clean* -- the HEREDOC-FREE command text (:func:`_heredoc_free_source` has already
+    lifted the bodies, so there are no body quotes here to desync this walk).
+
+    A substitution ``$(...)`` / backtick or subshell ``(...)`` is ONE word of the
+    command that contains it, never that command's executed program, so each
+    collapses to a single space -- an argument after it (``echo $(true) python3``)
+    stays an argument, and an outer heredoc after it (``cat $(…) <<EOF``) is the
+    OUTER command's. Arithmetic ``$((...))`` / ``((...))`` collapses too. The nested
+    command a substitution runs is NOT re-scanned here: a stdin mint hidden entirely
+    inside ``$(...)`` is the same residual the de-quoted token path carries.
+
+    :func:`_heredoc_free_source` is substitution-blind, so a ``<<`` heredoc sitting
+    inside a stripped substitution still had its body lifted into *bodies*; the index
+    of each such body is returned in the drop set so the caller can discard it and
+    keep the remaining bodies aligned with the heredocs left in the OUTER text. A
+    substitution carrying no heredoc (the common case) returns an empty drop set.
+    """
+    steps = list(_iter_shell_chars(clean))
+    n = len(steps)
+    outer: list[str] = []
+    drop: set[int] = set()
+    heredoc_index = 0  # count of `<<` heredocs seen in order, aligning with *bodies*
+
+    def matching_close(open_at: int) -> int:
+        depth = 0
+        k = open_at
+        while k < n:
+            if steps[k].active and steps[k].char == "(":
+                depth += 1
+            elif steps[k].active and steps[k].char == ")":
+                depth -= 1
+                if depth == 0:
+                    return k
+            k += 1
+        return n - 1  # an unterminated group runs to the end of the text
+
+    def count_heredocs(lo: int, hi: int) -> None:
+        # Advance *heredoc_index* over every `<<` heredoc (run of exactly 2, outside
+        # arithmetic) in steps[lo:hi], recording each one's body index in *drop* --
+        # those bodies were lifted but their commands are being stripped away.
+        nonlocal heredoc_index
+        arith = 0
+        k = lo
+        while k < hi:
+            s = steps[k]
+            if s.active and s.char == "(":
+                nxt = k + 1 < hi and steps[k + 1].active and steps[k + 1].char == "("
+                if arith > 0:
+                    arith += 1
+                elif nxt:
+                    arith = 1
+            elif s.active and s.char == ")" and arith > 0:
+                arith -= 1
+            elif (
+                s.active
+                and s.char == "<"
+                and arith == 0
+                and not (k > lo and steps[k - 1].active and steps[k - 1].char == "<")
+            ):
+                run = 1
+                while k + run < hi and steps[k + run].active and steps[k + run].char == "<":
+                    run += 1
+                if run == 2:
+                    drop.add(heredoc_index)
+                    heredoc_index += 1
+            k += 1
+
+    i = 0
+    while i < n:
+        s = steps[i]
+        if not s.active:
+            outer.append(s.text)
+            i += 1
+            continue
+        ch = s.char
+        dollar_paren = ch == "$" and i + 1 < n and steps[i + 1].active and steps[i + 1].char == "("
+        arith = (
+            dollar_paren and i + 2 < n and steps[i + 2].active and steps[i + 2].char == "("
+        ) or (ch == "(" and i + 1 < n and steps[i + 1].active and steps[i + 1].char == "(")
+        if arith:
+            close = matching_close(i + 1 if dollar_paren else i)
+            outer.append(" ")  # arithmetic runs no command; its `<<` are shifts
+            i = close + 1
+            continue
+        if ch == "`":
+            j = i + 1
+            while j < n and not (steps[j].active and steps[j].char == "`"):
+                j += 1
+            count_heredocs(i + 1, j)
+            outer.append(" ")
+            i = j + 1 if j < n else n
+            continue
+        if dollar_paren or ch == "(":
+            open_at = i + 1 if dollar_paren else i
+            close = matching_close(open_at)
+            count_heredocs(open_at + 1, close)
+            outer.append(" ")
+            i = close + 1
+            continue
+        if ch == "<" and not (i > 0 and steps[i - 1].active and steps[i - 1].char == "<"):
+            run = 1
+            while i + run < n and steps[i + run].active and steps[i + run].char == "<":
+                run += 1
+            if run == 2:
+                heredoc_index += 1  # a `<<` heredoc kept in the outer text
+        outer.append(s.text)
+        i += 1
+    return "".join(outer), drop
+
+
+def _raw_stdin_mint_programs(source: str) -> "list[str]":
+    """Program text each Python interpreter in *source* takes from STANDARD INPUT,
+    read with quoting INTACT -- one entry per interpreter that reads its program
+    from stdin, each carrying ONLY that command's own stdin program.
+
+    :func:`_python_reads_stdin` reads tokens the tokenizer has already de-quoted,
+    where a QUOTED substitution opener in a redirect target -- ``2>'a$(b'`` arrives
+    as ``2>a$(b`` -- is identical to a real ``$(``. :func:`_operand_span_end` then
+    runs that operand across the following tokens to the next closer, which for a
+    heredoc lands on a ``)`` inside the BODY, swallowing the ``<<`` marker and
+    leaving the delimiter tag to read as a script positional. The gate reports a
+    script and the program on stdin goes unscanned.
+
+    This re-reads the ORIGINAL text, where the opener is still quoted and inert,
+    and parses the shell grammar directly rather than through the de-quoting
+    tokenizer:
+
+    * Line continuations are folded first (:func:`_fold_line_continuations`), so a
+      ``\\``-newline between an interpreter and its stdin redirect does not read as a
+      script positional.
+    * Heredoc bodies are lifted next (:func:`_heredoc_free_source`), so a quote in a
+      body never desyncs the command text's quote state. Each heredoc body is the
+      stdin program of the command that declared it, matched by declaration order, so
+      one command's body is never charged to another's interpreter. A ``<<`` inside
+      ``$((...))`` arithmetic is a left shift and declares nothing.
+    * Command substitutions ``$(...)`` / backtick, subshells ``(...)`` and arithmetic
+      ``$((...))`` are then stripped from the body-free text
+      (:func:`_substitution_free_source`): each is ONE word of the command that
+      contains it, never that command's executed program, so an argument after a
+      substitution (``echo $(true) python3``) stays an argument and an outer heredoc
+      after it (``cat $(…) <<EOF``) is the OUTER command's. The outer text then holds
+      no parenthesis; a mint hidden entirely inside ``$(...)`` is the same residual
+      the de-quoted token path carries.
+    * Simple commands are split on an unquoted ``;`` / newline, or an unquoted
+      ``|`` / ``&`` that is NOT part of a redirect operator (``>&``, ``<&``, ``&>``,
+      ``>|``) -- compared character-by-character, so a quoted separator is data.
+    * An unquoted ``<`` / ``>`` (optionally fd-prefixed) begins a redirect whose
+      operand runs to the next unquoted metacharacter, so a QUOTED opener in that
+      operand is consumed as data and a second redirect glued behind it
+      (``2>'a$(b'<<EOF``) is still seen.
+    * The EXECUTED command is the first word that is not a leading reserved word
+      (:data:`_SHELL_COMMAND_PREFIX_KEYWORDS` -- ``then``, ``do``, ``{`` …) or
+      assignment, read through a chain of :data:`_INTERPRETER_WRAPPERS` (``env``,
+      ``exec``, ``sudo`` …), so ``env python3`` and ``env VAR=1 python3`` and
+      ``if true; then python3`` all count while ``echo python3`` (an argument of a
+      non-wrapper) does not; ``command -v`` / ``-V`` only report resolution and run
+      nothing.
+    * Standard input is fed only through file descriptor 0, and only the LAST
+      redirect targeting fd 0 decides it -- a trailing ``<<<`` supersedes an earlier
+      ``<<``, ``0>&3`` reassigns fd 0 away from a heredoc, and ``3<<`` targets fd 3
+      and feeds nothing.
+
+    An interpreter reads its program from stdin only when nothing else supplies it:
+    a script positional, ``-c`` or ``-m`` supplies it elsewhere, and a bare ``-``
+    reads it from stdin. Each returned string is the stdin program of ONE such
+    command; the caller matches it the way the token-path carriers are matched. A
+    command fed from a FILE yields an empty program, since its contents are not here.
+    """
+    source = _fold_line_continuations(source)
+    clean, bodies = _heredoc_free_source(source)
+    outer, dropped = _substitution_free_source(clean)
+    if dropped:
+        bodies = [b for idx, b in enumerate(bodies) if idx not in dropped]
+    steps = list(_iter_shell_chars(outer))
+    n = len(steps)
+    results: list[str] = []
+
+    def redirect_gt_follows(start: int) -> bool:
+        # `&>` is a redirect; the `>` must be the IMMEDIATELY next character. A
+        # single-step lookahead keeps this O(1), so a command padded with `&`
+        # separators cannot drive the walk quadratic.
+        return start < n and steps[start].active and steps[start].char == ">"
+
+    heredoc_count = 0  # `<<` operators seen so far, indexing into *bodies* by order
+    # Per simple command: the LAST fd-0 redirect decides the stdin program.
+    tokens: list[str] = []
+    word: list[str] = []
+    stdin_kind: "str | None" = None  # None | 'herestring' | 'heredoc' | 'opaque'
+    stdin_text = ""  # the here-string word, when stdin_kind == 'herestring'
+    stdin_slot = -1  # the heredoc's index into *bodies*, when stdin_kind == 'heredoc'
+    expect_operand = False
+    pending_herestring: "bool | None" = None  # fd-0 flag when the next word is a here-string word
+    prev_active = ""
+
+    def flush_word() -> None:
+        nonlocal expect_operand, pending_herestring, stdin_kind, stdin_text
+        if not word:
+            return
+        joined = "".join(word)
+        word.clear()
+        if expect_operand:
+            if pending_herestring is not None:
+                if pending_herestring:
+                    stdin_kind, stdin_text = "herestring", joined  # the fd-0 here-string word
+                pending_herestring = None
+            expect_operand = False  # a redirect operand or heredoc tag, not an argument
+        else:
+            tokens.append(joined)
+
+    def executed_interpreter_index() -> int:
+        """Index of the EXECUTED interpreter, or -1 when the command runs none."""
+        idx = 0
+        while idx < len(tokens):
+            d = _dequote_token(tokens[idx])
+            if d in _SHELL_COMMAND_PREFIX_KEYWORDS:
+                idx += 1  # a reserved word that introduces a command (`then`, `do`)
+                continue
+            if _LOCAL_ASSIGN_RE.match(d):
+                idx += 1  # a `NAME=value` assignment, leading or an `env VAR=val` one
+                continue
+            if _program_basename(d) in _INTERPRETER_WRAPPERS and idx + 1 < len(tokens):
+                nxt = _dequote_token(tokens[idx + 1])
+                if nxt.startswith("-"):
+                    # The wrapper carries a flag/option this reader does not model
+                    # (`env -u X`, `command -v`, `sudo -u u`), so which word it finally
+                    # execs is uncertain -- do not guess an interpreter. Missing such a
+                    # mint is the same residual the de-quoted token path has, never a
+                    # new refusal. A `NAME=value` after the wrapper is NOT a stop: it is
+                    # the wrapper's own assignment (`env VAR=1 python3`), consumed by the
+                    # assignment branch above on the next turn so resolution reaches the
+                    # real command.
+                    break
+                idx += 1  # resolve directly through a flagless wrapper (`env python3`)
+                continue
+            break
+        return idx if idx < len(tokens) else -1
+
+    def command_reads_stdin() -> bool:
+        if stdin_kind is None:
+            return False
+        idx = executed_interpreter_index()
+        if idx < 0:
+            return False
+        if not _PYTHON_PROGRAM_RE.match(_program_basename(_dequote_token(tokens[idx]))):
+            return False  # the executed command is not a Python interpreter
+        j = idx + 1
+        while j < len(tokens):
+            d = _dequote_token(tokens[j])
+            if d == "--":
+                # end of options: the NEXT argument is a script path, unless it is
+                # exactly `-`; nothing after it means a bare interpreter reads stdin.
+                if j + 1 < len(tokens):
+                    return _dequote_token(tokens[j + 1]) == "-"
+                return True
+            if d.startswith("-") and not d.startswith("--") and _short_opts_supply_program(d):
+                return False  # `-c` / `-m`, even clustered (`-Bc`) or attached (`-cPROG`)
+            if d == "-":
+                return True  # `-` reads the program from stdin
+            if d in _PYTHON_OPERAND_FLAGS:
+                j += 2  # an operand-taking flag consumes its value (`-X dev`)
+                continue
+            if len(d) > 2 and d[:2] in _PYTHON_OPERAND_FLAGS:
+                j += 1  # the operand is attached (`-Xdev`)
+                continue
+            if d.startswith("-"):
+                j += 1  # an ordinary interpreter flag
+                continue
+            return False  # a bare positional is a script path, so stdin is data
+        return True
+
+    def finish_command() -> None:
+        nonlocal stdin_kind, stdin_text, stdin_slot, expect_operand, pending_herestring, prev_active
+        if command_reads_stdin():
+            if stdin_kind == "herestring":
+                program = stdin_text
+            elif stdin_kind == "heredoc":
+                program = bodies[stdin_slot] if 0 <= stdin_slot < len(bodies) else ""
+            else:
+                program = ""  # a file or fd dup feeds stdin from bytes not present here
+            if program:
+                results.append(program)
+        tokens.clear()
+        word.clear()
+        stdin_kind = None
+        stdin_text = ""
+        stdin_slot = -1
+        expect_operand = False
+        pending_herestring = None
+        prev_active = ""
+
+    i = 0
+    while i < n:
+        step = steps[i]
+        if not step.active:
+            word.append(step.text)
+            i += 1
+            continue
+        ch = step.char
+        separator = ch in (";", "\n")
+        if not separator and ch == "|":
+            separator = prev_active != ">"  # `>|` noclobber keeps the `|` with the redirect
+        if not separator and ch == "&":
+            # `>&`, `<&`, `2>&` dup and `&>` redirect keep the `&`; a lone `&` separates.
+            separator = prev_active not in ("<", ">") and not redirect_gt_follows(i + 1)
+        if separator:
+            flush_word()
+            finish_command()
+            i += 1
+            continue
+        if ch.isspace():
+            flush_word()
+            prev_active = ch
+            i += 1
+            continue
+        if ch in "<>" or (ch == "&" and redirect_gt_follows(i + 1)):
+            buffered = "".join(word)
+            fd = buffered if buffered.isdigit() else ""
+            if buffered and not buffered.isdigit():
+                flush_word()  # a non-fd word precedes this redirect
+            else:
+                word.clear()  # drop a bare fd prefix (`2>`, `3<<`, `&>`)
+            operator: list[str] = []
+            while i < n and steps[i].active and steps[i].char in "<>&|":
+                operator.append(steps[i].char)
+                prev_active = steps[i].char
+                i += 1
+            op = "".join(operator)
+            heredoc = op == "<<"
+            herestring = op == "<<<"
+            if heredoc and i < n and steps[i].active and steps[i].char == "-":
+                prev_active = "-"
+                i += 1  # `<<-` strips leading tabs; the body was already lifted out
+            operand: list[str] = []
+            while i < n:
+                nxt = steps[i]
+                if nxt.active and (nxt.char in "<>;&|" or nxt.char == "\n" or nxt.char.isspace()):
+                    break
+                operand.append(nxt.text)
+                prev_active = nxt.char
+                i += 1
+            fd0 = fd in ("", "0")  # an input redirect feeds the program only on fd 0
+            if heredoc:
+                slot = heredoc_count
+                heredoc_count += 1  # count EVERY heredoc so the body order stays aligned
+                if fd0:
+                    stdin_kind, stdin_slot = "heredoc", slot
+                if not operand:
+                    expect_operand = True  # the delimiter tag is the next word
+            elif herestring:
+                if operand:
+                    if fd0:
+                        stdin_kind, stdin_text = "herestring", "".join(operand)
+                else:
+                    expect_operand = True  # the here-string word is the next word
+                    pending_herestring = fd0
+            else:
+                if ("<" in op and fd0) or (fd == "0"):
+                    # fd 0 is (re)assigned: an input file/dup, or an output/dup like
+                    # `0>&3` that moves stdin off a heredoc. The bytes are not here.
+                    stdin_kind = "opaque"
+                if not operand:
+                    expect_operand = True  # the operand is the next whitespace-split word
+            continue
+        word.append(step.text)
+        prev_active = ch
+        i += 1
+    flush_word()
+    finish_command()
+    return results
 
 
 def _data_consumer_command_disqualified(tokens: "list[str]") -> bool:
@@ -2875,6 +3443,38 @@ def _dequote_token(token: str) -> str:
     reduced all three to bare words and erased their tags.
     """
     return token.replace("'", "").replace('"', "").replace("\\", "")
+
+
+def _dequote_delimiter(tag: str) -> str:
+    """Resolve a heredoc delimiter to the literal word bash matches a closing line
+    against. A delimiter is not expanded, but shell QUOTE REMOVAL still applies, so
+    ``'EOF'``, ``"EOF"``, ``\\EOF`` and the ANSI-C ``$'EOF'`` / locale ``$"EOF"``
+    forms all name the delimiter ``EOF`` -- while a quote of the OTHER kind sitting
+    inside a quoted run (``"E'OF"``) is literal and stays. Walking the shell quote
+    state machine, a quote CHARACTER that opens or closes a run is dropped, the ``$``
+    that only introduces an ANSI-C / locale quote is dropped, and every other
+    character (including a quote that is itself quoted, and a backslash-escaped one)
+    is kept. A ``$`` not introducing a quote is literal (a delimiter is not expanded).
+    """
+    steps = list(_iter_shell_chars(tag))
+    out: list[str] = []
+    prev_state = 0  # quote state BEFORE the current step
+    for k, s in enumerate(steps):
+        if s.char in ("'", '"') and s.state != prev_state:
+            prev_state = s.state
+            continue  # a quote CHARACTER that opens or closes a run is removed
+        if (
+            s.active
+            and s.char == "$"
+            and k + 1 < len(steps)
+            and steps[k + 1].char in ("'", '"')
+            and steps[k + 1].state != s.state
+        ):
+            prev_state = s.state
+            continue  # the `$` of an ANSI-C `$'...'` / locale `$"..."` is removed
+        prev_state = s.state
+        out.append(s.char)
+    return "".join(out)
 
 
 def _split_shell_words(segment: str) -> list[str]:

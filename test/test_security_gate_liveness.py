@@ -243,7 +243,35 @@ def _url_payload_command(n: int) -> str:
 #: deny-exception check both passes of ``is_denied`` share, which reads a deny
 #: exception through kiro-cli's one ``Running: `` title prefix so a shell title
 #: earns exactly its command's carve-out. No glob, verb or eligibility test moved.
-_PACKAGE_LINE_BUDGET = 28_844
+#:
+#: Raised again, from 28,844, for the quote-aware stdin-redirect re-read that
+#: closes the credential-mint residual where a quoted substitution opener in a
+#: redirect target hides the stdin program feeding an interpreter.
+#: ``shell_normalizer._heredoc_free_source`` lifts heredoc bodies out first (so a
+#: body's quote cannot desync the command text), ``_raw_stdin_mint_programs`` then
+#: parses the shell grammar directly (redirects, the executed interpreter behind
+#: ``env``/``exec``/``sudo`` wrappers, ``command -v`` inspection, fd-0 is the only
+#: stdin and the LAST fd-0 redirect wins), and
+#: ``inline_payload._stdin_redirect_imports_product`` matches each command's own
+#: stdin program. No deny verb or eligibility test moved.
+#:
+#: Raised again, from 29,265, as that re-read grew to resolve the executed
+#: interpreter past a leading reserved word (``then``/``do``) and an ``env
+#: NAME=value`` assignment, and to bound a command at an unquoted ``(`` / ``)`` so a
+#: ``$(...)`` substitution's interpreter is read on its own. No deny verb moved.
+#:
+#: Raised again, from 29,285, as that re-read grew to recognise a clustered ``-c`` /
+#: ``-m`` short option (``-Bc``) as supplying the program and to dequote an ANSI-C /
+#: locale ``$'EOF'`` heredoc delimiter, both of which were over-refusing. No deny
+#: verb moved.
+#:
+#: Raised again, from 29,318, as the re-read moved to a structural preprocessing
+#: pass -- line continuations folded, command substitutions / subshells / arithmetic
+#: lifted out of the body-free text (:func:`_substitution_free_source`), a quote-aware
+#: heredoc delimiter and an arithmetic-aware heredoc scan -- which closed the
+#: lowercased-``-W`` / line-continuation / ``$((<<))`` bypasses and the
+#: substitution-argv / nested-quote over-refusals. No deny verb moved.
+_PACKAGE_LINE_BUDGET = 29_480
 
 #: Ceiling on any ONE file in the package. This is what the bound is really for --
 #: a package total says nothing about a single file growing back into a second

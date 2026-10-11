@@ -6257,6 +6257,265 @@ class TestOutputRedirectScanQuoting:
         assert security._python_reads_stdin(["2>a{b<<<", "prog"]) is True
 
 
+class TestQuotedRedirectHidingAStdinHeredoc:
+    """A quoted substitution opener in a redirect target must not hide the heredoc
+    that feeds an interpreter its program.
+
+    ``_python_reads_stdin`` reads de-quoted tokens, so ``2>'a$(b'`` -- a file named
+    ``a$(b`` to bash, measured -- arrives as ``2>a$(b`` and reads like a real open
+    ``$(``. ``_operand_span_end`` then runs the operand across the following tokens
+    to the next closer, which for a heredoc lands on a ``)`` inside the BODY, so the
+    ``<<`` marker is swallowed and its delimiter tag reads as a script positional.
+    The gate reports a script and the program arriving on stdin -- a credential mint
+    -- goes unscanned. ``_raw_stdin_mint_programs`` re-reads the ORIGINAL text,
+    where the opener is still quoted and inert, parses the shell grammar directly,
+    and hands each interpreter its OWN stdin program.
+    """
+
+    PROG = "from kiro_crew.cli import main; main()"
+
+    def test_the_quoted_redirect_heredoc_bypass_is_denied_end_to_end(self):
+        """Each spelling runs the here-doc / here-string program in bash while the
+        redirect target names a literal file. On the uncorrected gate every one was
+        ALLOWED."""
+        from kiro_crew import security
+
+        prog = self.PROG
+        for cmd in (
+            f"python3 2>'a$(b' <<EOF\n{prog}\nEOF",
+            f"python3 2>'a$(b'<<EOF\n{prog}\nEOF",
+            f"python3 2>'a$(b' <<'EOF'\n{prog}\nEOF",
+            f"python 2>'a$(b' <<EOF\n{prog}\nEOF",
+            f"python3 2>'a$(b' - <<EOF\n{prog}\nEOF",
+            f"python3 2>'a$(b' - x <<EOF\n{prog}\nEOF",
+            f"python3 1>'x$(y' <<EOF\n{prog}\nEOF",
+            f"python3 2>'a$((b' <<EOF\n{prog}\nEOF",
+            # A `&` or `|` that is part of a redirect operator must not be read as a
+            # command separator and split the interpreter from its heredoc.
+            f"python3 2>&1 2>'a$(b' <<EOF\n{prog}\nEOF",
+            f"python3 &>'a$(b' <<EOF\n{prog}\nEOF",
+            f"python3 >&2 2>'a$(b' <<EOF\n{prog}\nEOF",
+            f"python3 >|'a$(b' <<EOF\n{prog}\nEOF",
+            # A redirect operand separated by a space is still consumed as the operand.
+            f"python3 2> 'a$(b' <<EOF\n{prog}\nEOF",
+            # A command separator before the interpreter does not disable the re-read.
+            f"true && python3 2>'a$(b' <<EOF\n{prog}\nEOF",
+            # A wrapper runs the interpreter at a non-command position.
+            f"env python3 2>'a$(b' <<EOF\n{prog}\nEOF",
+            f"exec python3 2>'a$(b' <<EOF\n{prog}\nEOF",
+            # A pipe producer ahead of the interpreter does not hide its heredoc.
+            f"echo hi | python3 2>'a$(b' <<EOF\n{prog}\nEOF",
+            # A tab-stripping heredoc body is still the program.
+            f"python3 2>'a$(b' <<-EOF\n\t{prog}\n\tEOF",
+            # Another executor wrapper runs the interpreter.
+            f"sudo python3 2>'a$(b' <<EOF\n{prog}\nEOF",
+            f"sudo env python3 2>'a$(b' <<EOF\n{prog}\nEOF",
+            # The LAST fd-0 input redirect wins: a trailing heredoc supersedes a
+            # here-string, so the heredoc body is the program.
+            f"python3 2>'a$(b' <<<'print(1)' <<EOF\n{prog}\nEOF",
+            # A quote in an UNRELATED earlier heredoc body must not desync this mint.
+            f"cat <<'DOC'\n'\nDOC\npython3 2>'a$(b' <<EOF\n{prog}\nEOF",
+            # A `<<<` here-string ahead must not spawn a phantom heredoc that strips
+            # the real interpreter from the re-read.
+            f"cat <<< x\npython3 2>'a$(b' - token <<EOF\n{prog}\nEOF",
+            # An `env NAME=value` assignment precedes the interpreter: resolution
+            # must step over the assignment the wrapper carries, not stop at `env`.
+            f"env EXAMPLE=1 python3 2>'a$(b' - <<EOF\n{prog}\nEOF",
+            # A reserved word that introduces the command (`then` / `do`) is grammar,
+            # not the executed program, so the interpreter behind it is still read.
+            f"if true; then python3 2>'a$(b' - <<EOF\n{prog}\nEOF",
+            f"if true; then env EXAMPLE=1 python3 2>'a$(b' - <<EOF\n{prog}\nEOF",
+            f"for x in a; do python3 2>'a$(b' - <<EOF\n{prog}\nEOF",
+            # A `-W` / `-X` cluster takes an operand but does NOT supply the program,
+            # so an interpreter still reading stdin behind it is a mint. The deny path
+            # lowercases first, so `-Wmodule` reaches the reader as `-wmodule`.
+            f"python3 -Wignore 2>'a$(b' - <<EOF\n{prog}\nEOF",
+            f"python3 -Wmodule 2>'a$(b' - <<EOF\n{prog}\nEOF",
+            f"python3 -B 2>'a$(b' - <<EOF\n{prog}\nEOF",
+            # A line continuation between the interpreter and its stdin redirect is
+            # folded, so the heredoc still reaches the interpreter.
+            f"python3 \\\n 2>'a$(b' - <<EOF\n{prog}\nEOF",
+            # An arithmetic `<<` is a left shift, not a heredoc, so it does not
+            # misalign the real heredoc that feeds a later interpreter.
+            f": $((1<<2)); python3 2>'a$(b' - <<EOF\n{prog}\nEOF",
+            # An ANSI-C quoted delimiter still bounds the body that feeds a stdin
+            # interpreter its mint program.
+            f"python3 2>'a$(b' - <<$'EOF'\n{prog}\nEOF",
+        ):
+            assert security.is_denied(cmd) is not None, cmd
+
+    def test_the_ordinary_shapes_stay_allowed(self):
+        """A real script positional, or an inline-program flag, means the
+        interpreter is not reading its program from stdin, so the heredoc or
+        here-string is data and the command is allowed. The re-read must not refuse
+        these, must not fire on an interpreter name that is only another command's
+        argument, must not read a heredoc BODY as further commands, must not count a
+        non-stdin descriptor, must respect that the LAST fd-0 redirect wins, and
+        must not charge one command's body to another's interpreter."""
+        from kiro_crew import security
+
+        prog = self.PROG
+        for cmd in (
+            "python script.py",
+            f"python3 script.py <<EOF\n{prog}\nEOF",
+            f"python3 script.py <<< '{prog}'",
+            f"python3 -c 'print(1)' <<EOF\n{prog}\nEOF",
+            # The quoted opener must not swallow the `-c` flag and make this look bare.
+            f"python3 2>'a$(b' -c 'print(1)' <<EOF\n{prog}\nEOF",
+            # An operand-taking flag's value is not a script positional.
+            "python3 -X dev script.py <<EOF\nx\nEOF",
+            # An interpreter name that is only an argument of a non-wrapper command.
+            f"python3 -c 'print(1)' <<EOF\n{prog}\nEOF\necho python3 '<'; echo ok",
+            f"echo python3 2>'a$(b' <<EOF\n{prog}\nEOF",
+            f"grep python3 2>'a$(b' <<EOF\n{prog}\nEOF",
+            f"env grep python3 2>'a$(b' <<EOF\n{prog}\nEOF",
+            # A heredoc BODY line that reads like a command is not one.
+            f"python3 -c 'print(1)' <<EOF\npython3 < harmless\n{prog}\nEOF",
+            # A non-stdin descriptor (fd 3) does not feed the program.
+            f"printf '' | python3 2>'a$(b' 3<<EOF\n{prog}\nEOF",
+            f"python3 3<<EOF\n{prog}\nEOF",
+            # The LAST fd-0 redirect wins: a trailing here-string supersedes the
+            # heredoc, so the program is the here-string, not the heredoc body.
+            f"python3 2>'a$(b' <<EOF <<< 'print(1)'\n{prog}\nEOF",
+            f"python3 2>'a$(b' 3<<EOF <<< 'print(1)'\n{prog}\nEOF",
+            # The LAST fd-0 redirect wins: a trailing here-string supersedes the
+            # heredoc, so the program is the here-string, not the heredoc body.
+            f"python3 2>'a$(b' <<EOF <<< 'print(1)'\n{prog}\nEOF",
+            f"python3 2>'a$(b' 3<<EOF <<< 'print(1)'\n{prog}\nEOF",
+            # `0>&3` reassigns stdin off the heredoc onto fd 3.
+            f"python3 3<<<'print(1)' <<EOF 0>&3\n{prog}\nEOF",
+            # `command -v` / `-V` only report resolution; they execute nothing.
+            f"command -v python3 2>'a$(b' <<EOF\n{prog}\nEOF",
+            f"command -V python3 2>'a$(b' <<EOF\n{prog}\nEOF",
+            # An operand-taking wrapper flag consumes the interpreter name as its
+            # operand, so nothing executes it.
+            f"env -u python3 2>'a$(b' <<EOF\n{prog}\nEOF",
+            f"sudo -u user python3 2>'a$(b' <<EOF\n{prog}\nEOF",
+            # `--` ends option parsing: the following word is a script path, so the
+            # heredoc is data even though the name starts with `-`.
+            f"python3 -- -script.py 2>'a$(b' <<EOF\n{prog}\nEOF",
+            # A quote in an UNRELATED earlier heredoc body must not desync a benign
+            # command into a false refusal either.
+            f"cat <<'DOC'\n'\nDOC\npython3 script.py <<EOF\n{prog}\nEOF",
+            # A `#` comment that contains `<<EOF` is not a heredoc.
+            f"echo ok # <<EOF\npython3 script.py <<EOF\n{prog}\nEOF",
+            # One command's benign body is not charged to another command's heredoc.
+            f"python3 2>'a$(b' <<EOF\nimport os\nEOF\npython3 script.py <<EOF2\n{prog}\nEOF2",
+            # A wrapper with a real script positional supplies the program.
+            f"env python3 script.py <<EOF\n{prog}\nEOF",
+            # An outer command's heredoc must not be charged to an interpreter inside
+            # a `$(...)` substitution that reads only a file -- the `)` bounds it.
+            f"cat $(true; python3 2>'a$(b' </dev/null) <<EOF\n{prog}\nEOF",
+            # A clustered `-c` short option (`-Bc`) supplies the program inline, so the
+            # heredoc is unused stdin data, not the program.
+            f"python3 -Bc'print(1)' 2>'a$(b' <<EOF\n{prog}\nEOF",
+            f"python3 -Bm json.tool <<EOF\n{prog}\nEOF",
+            # An ANSI-C / locale quoted heredoc delimiter still names `EOF`, so the
+            # body ends at `EOF` and does not run on into the next command.
+            f"python3 2>'a$(b' <<$'EOF'\nprint(1)\nEOF\npython3 script.py <<DOC\n{prog}\nDOC",
+            f"python3 2>'a$(b' <<$\"EOF\"\nprint(1)\nEOF\npython3 script.py <<DOC\n{prog}\nDOC",
+            # A quote of the OTHER kind inside a quoted delimiter is literal, so
+            # `<<"E'OF"` names `E'OF` and the body ends only at a bare `E'OF` line --
+            # the later `cat` body is not run on into this interpreter's program.
+            f"python3 2>'a$(b' <<\"E'OF\"\nprint(1)\nE'OF\ncat <<DOC\n{prog}\nDOC",
+            # A `$(...)` substitution is one word of the command, so a bare `python3`
+            # after it is an argument of `echo`, not an executed interpreter.
+            f"echo $(true) python3 2>'a$(b' <<EOF\n{prog}\nEOF",
+            # A `then` / `do` prefix on an interpreter with a real script positional
+            # stays allowed: stdin is data.
+            f"if true; then python3 script.py <<EOF\n{prog}\nEOF",
+            # `env NAME=value` before an interpreter with a script positional: data.
+            f"env EXAMPLE=1 python3 script.py <<EOF\n{prog}\nEOF",
+            "python -m json.tool",
+            "python3 2>'a$(b' <<EOF\nprint('hello')\nEOF",
+            f"cat <<EOF\n{prog}\nEOF",
+        ):
+            assert security.is_denied(cmd) is None, cmd
+
+    def test_the_raw_reader_reads_each_commands_own_stdin_program(self):
+        """The helpers, directly: ``_raw_stdin_mint_programs`` returns each
+        stdin-reading interpreter's OWN program, and ``_stdin_redirect_imports_product``
+        is True only when one of those programs imports the product."""
+        from kiro_crew.security.inline_payload import _stdin_redirect_imports_product
+        from kiro_crew.security.shell_normalizer import _raw_stdin_mint_programs
+
+        prog = self.PROG
+        assert _stdin_redirect_imports_product(f"python3 2>'a$(b' <<EOF\n{prog}\nEOF")
+        assert _stdin_redirect_imports_product(f"python3 2>'a$(b'<<< '{prog}'")
+        assert _stdin_redirect_imports_product(f"env python3 2>'a$(b' <<EOF\n{prog}\nEOF")
+        # An `env NAME=value` assignment is stepped over to reach the interpreter.
+        assert _stdin_redirect_imports_product(
+            f"env EXAMPLE=1 python3 2>'a$(b' - <<EOF\n{prog}\nEOF"
+        )
+        # A reserved-word command prefix does not hide the interpreter behind it.
+        assert _stdin_redirect_imports_product(
+            f"if true; then python3 2>'a$(b' - <<EOF\n{prog}\nEOF"
+        )
+        # A script positional or `-c` program means stdin is data, not the program.
+        assert not _stdin_redirect_imports_product(f"python3 script.py <<EOF\n{prog}\nEOF")
+        assert not _stdin_redirect_imports_product(
+            f"python3 2>'a$(b' -c 'print(1)' <<EOF\n{prog}\nEOF"
+        )
+        # A non-stdin descriptor does not feed the program.
+        assert not _stdin_redirect_imports_product(f"python3 3<<EOF\n{prog}\nEOF")
+        # An interpreter inside `$(...)` that reads a FILE is bounded by the `)`, so
+        # an outer command's heredoc is not charged to it.
+        assert not _stdin_redirect_imports_product(
+            f"cat $(true; python3 2>'a$(b' </dev/null) <<EOF\n{prog}\nEOF"
+        )
+        # Each command's program is its OWN: a benign body is not charged elsewhere.
+        progs = _raw_stdin_mint_programs(
+            f"python3 2>'a$(b' <<EOF\nimport os\nEOF\npython3 - <<EOF2\n{prog}\nEOF2"
+        )
+        assert any("import os" in p for p in progs)
+        assert any("kiro_crew" in p for p in progs)
+        assert not _stdin_redirect_imports_product(
+            f"python3 2>'a$(b' <<EOF\nimport os\nEOF\npython3 script.py <<EOF2\n{prog}\nEOF2"
+        )
+
+    def test_the_heredoc_free_pass_stays_linear(self):
+        """``_heredoc_free_source`` lifts bodies with ONE generator across lines,
+        restarting only to skip a body, so a flood of blank lines is linear rather
+        than the O(N^2) a per-line re-slice of the source would be."""
+        import time
+
+        from kiro_crew.security.shell_normalizer import _heredoc_free_source
+
+        def elapsed(n: int) -> float:
+            src = "echo x </dev/null\n" + "\n" * n + "true"
+            start = time.perf_counter()
+            _heredoc_free_source(src)
+            return time.perf_counter() - start
+
+        elapsed(4000)  # warm imports
+        small = elapsed(8000)
+        large = elapsed(32000)
+        # Four times the lines must not cost quadratically more. A generous bound
+        # (8x) absorbs timer noise while still catching an O(N^2) regression, which
+        # would be ~16x.
+        assert large < max(small * 8, 0.5), f"{small:.4f}s -> {large:.4f}s is super-linear"
+
+    def test_the_substitution_free_pass_stays_linear(self):
+        """``_substitution_free_source`` jumps the walk past each group it strips, so
+        many substitutions -- or one deeply nested group -- stay linear rather than
+        the O(N^2) a re-scan per group would be. A generous absolute cap is the
+        backstop (a timed doubling RATIO measures the shared runner, not the code, and
+        false-reds here): linear is tens of milliseconds, a quadratic would be
+        seconds to minutes, so a 3-second cap separates them with wide margin."""
+        import time
+
+        from kiro_crew.security.shell_normalizer import _substitution_free_source
+
+        def elapsed(src: str) -> float:
+            start = time.perf_counter()
+            _substitution_free_source(src)
+            return time.perf_counter() - start
+
+        elapsed("echo $(x) " * 2000)  # warm imports
+        assert elapsed("echo $(x) " * 32000) < 3.0  # 320k chars of flat substitutions
+        assert elapsed("echo " + "$(" * 16000 + "x" + ")" * 16000) < 3.0  # deep nesting
+
+
 class TestNestedPayloadExtractionIsLinear:
     """``_nested_shell_payloads`` must stay LINEAR in token count.
 
@@ -8250,8 +8509,15 @@ class TestDataConsumerGuardIsChargedPerFrameNotPerTriggerToken:
             node
             for node in ast.walk(tree)
             if isinstance(node, ast.For)
-            and isinstance(node.target, ast.Name)
-            and node.target.id == "tokens"
+            and (
+                (isinstance(node.target, ast.Name) and node.target.id == "tokens")
+                or (
+                    isinstance(node.target, ast.Tuple)
+                    and any(
+                        isinstance(elt, ast.Name) and elt.id == "tokens" for elt in node.target.elts
+                    )
+                )
+            )
         ]
         assert len(frame_loops) == 1, f"{floor} no longer has exactly one frame loop"
         loop = frame_loops[0]

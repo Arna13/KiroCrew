@@ -25,6 +25,7 @@ from .shell_normalizer import (
     _normalize_operand,
     _program_basename,
     _python_reads_stdin,
+    _raw_stdin_mint_programs,
     _shell_tokens,
     _stdin_program_text,
 )
@@ -773,6 +774,29 @@ def _decoded_b64_literals(raw_text: str) -> tuple[str, ...]:
     return tuple(decoded for _, decoded in _decoded_b64_literal_sources(raw_text))
 
 
+def _stdin_redirect_imports_product(
+    source: str, decoded_literals: "tuple[tuple[str, str], ...]" = ()
+) -> bool:
+    """True if any interpreter in *source* reads a self-importing program from STDIN.
+
+    The de-quoted token gate (:func:`_has_self_importing_inline_program` via
+    :func:`_python_reads_stdin`) misses a stdin program hidden behind a quoted
+    substitution opener in a redirect target: the opener de-quotes to the same
+    bytes as a real ``$(``, so the operand span swallows the stdin operator.
+    :func:`_raw_stdin_mint_programs` re-reads the ORIGINAL text, where the opener
+    is still quoted, and returns each interpreter's OWN stdin program; matching
+    that here closes the residual without charging one command's heredoc body to
+    another's interpreter. Each program is normalised the way the token-path
+    carriers are -- whitespace-split, leading shell wrappers stripped, joined on a
+    newline -- so an import statement spread over several words is still legible.
+    """
+    for program in _raw_stdin_mint_programs(source):
+        normalised = "\n".join(t.lstrip(_SHELL_WRAPPER_CHARS) for t in program.split())
+        if normalised and _inline_payload_reaches_cli(normalised, decoded_literals):
+            return True
+    return False
+
+
 def _inline_payload_reaches_cli(
     payload: str, decoded_literals: tuple[tuple[str, str], ...] = ()
 ) -> bool:
@@ -842,7 +866,9 @@ def _names_the_mint(view: str) -> bool:
 
 
 def _has_self_importing_inline_program(
-    tokens: list[str], i: int, decoded_literals: "tuple[tuple[str, str], ...]" = ()
+    tokens: list[str],
+    i: int,
+    decoded_literals: "tuple[tuple[str, str], ...]" = (),
 ) -> bool:
     """True if ``tokens[i]`` is an interpreter given a ``-c`` payload that imports this package.
 
@@ -879,7 +905,10 @@ def _has_self_importing_inline_program(
     # STDIN program: the text is not an operand of this interpreter — the shell fills stdin from
     # a heredoc body, a redirected file, or a pipe producer — so the search space is those
     # carriers rather than this position's operands. `_python_reads_stdin` is precise so this
-    # does not fire for `python script.py`, `python -c …`, or `python -m …`.
+    # does not fire for `python script.py`, `python -c …`, or `python -m …`. A quoted
+    # substitution opener in a redirect target can hide a stdin redirect from this de-quoted
+    # view (`_output_redirect_scan`/`_operand_span_end` span it as a real `$(`); that residual
+    # is recovered separately from the ORIGINAL text in `_stdin_redirect_imports_product`.
     if _python_reads_stdin(later_tokens):
         # The carriers arrive whitespace-split -- a heredoc body is one word per token --
         # so a statement spanning several words (``from kiro_crew.x import generate_token``)
