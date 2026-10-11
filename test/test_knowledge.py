@@ -2590,8 +2590,10 @@ class TestScheduledDedupCadence:
         w._sweep_count = 4
         calls = []
 
-        def _sweep(store_arg, apply, certain_only):
-            calls.append({"apply": apply, "certain_only": certain_only})
+        def _sweep(store_arg, apply, certain_only, max_fuzzy_bucket=None):
+            calls.append(
+                {"apply": apply, "certain_only": certain_only, "max_fuzzy_bucket": max_fuzzy_bucket}
+            )
             return [{"loser": "a", "winner": "b", "reason": "exact"}]
 
         with (
@@ -2605,6 +2607,11 @@ class TestScheduledDedupCadence:
 
         assert [c["apply"] for c in calls] == [False, True]
         assert all(c["certain_only"] for c in calls)
+        # The SCHEDULED sweep passes the single-signature bucket cap so a
+        # pathological bucket cannot stall the gateway.
+        from kiro_crew.knowledge.dedup import SCHEDULED_FUZZY_BUCKET_CAP
+
+        assert all(c["max_fuzzy_bucket"] == SCHEDULED_FUZZY_BUCKET_CAP for c in calls)
 
     @pytest.mark.asyncio
     async def test_a_failed_pass_does_not_arm_the_applying_one(self, store):

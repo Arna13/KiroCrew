@@ -13,7 +13,7 @@ from kiro_crew.embeddings import PRIORITY_BULK
 from kiro_crew.security import is_sensitive_path
 from kiro_crew.sel import sel
 
-from .dedup import dedup_sweep
+from .dedup import SCHEDULED_FUZZY_BUCKET_CAP, dedup_sweep
 from .embedder import embedder_signature
 from .folder_watcher import FolderWatcher, folder_chunk_budget
 from .ingestion import (
@@ -492,7 +492,8 @@ class KnowledgeWatcher:
             # not judgements. Fuzzy candidates are still found and reported, for
             # the user to apply deliberately via the CLI or the dedup tool.
             results = await asyncio.to_thread(
-                dedup_sweep, self.store, apply=not preview, certain_only=True)
+                dedup_sweep, self.store, apply=not preview, certain_only=True,
+                max_fuzzy_bucket=SCHEDULED_FUZZY_BUCKET_CAP)
         except Exception:
             logger.warning("Scheduled knowledge dedup sweep failed", exc_info=True)
             return
