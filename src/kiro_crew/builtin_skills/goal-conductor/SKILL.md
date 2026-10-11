@@ -467,7 +467,8 @@ terminal: that is a stop condition, not a pause.
 
 **Rounds are not gated, but spend is bounded.** A cap on parallel work, an
 advisory line on the total and a no-progress check replace the old per-round
-pause. Count all three from `work_ledger_read`, not from memory:
+pause. Count all three from `work_ledger_read`, not from memory, and read the item
+total from its `conductor.goal_items_used`, not by counting `items`:
 
 - **Concurrency cap.** When the user set no bound of their own, a goal may hold
   at most **6 ledger items open at once**. The ledger enforces it: a `create`
