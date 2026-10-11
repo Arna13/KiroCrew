@@ -66,3 +66,21 @@ right, and each error was invisible in the picture:
 The key set matching was what hid the second one: identical keys, different types, and a
 picture that looked correct because the harness's own list happened to have the right
 length. The pin now checks the type of every key.
+
+
+## R6 light theme, R7 the refetch band
+
+| File | Requirement | What it proves |
+|---|---|---|
+| `r6-light.png` | R6 the page in light theme | The same page under light tokens: the tree's spine, the elbows and the row rules all take the host's values rather than the dark fallbacks baked into the page's CSS. |
+| `r7-refetch-band.png` | R7 a gap recovery that failed | The band the tab raises above the frame when a refetch never arrives, with its own sentence and a retry. Asserted on the live page by role, not just captured. |
+
+The first attempt at R6 came out entirely dark, and the reason is worth recording: the
+harness set the theme tokens on the PARENT document, and an iframe does not inherit CSS
+variables. The real tab injects them inside the frame (`readThemeVars` + `buildSrcdoc`),
+so the harness now does the same. A "light theme" still that was dark would have been
+evidence for the opposite of what it claimed.
+
+R7's sentence is its own string, not the kept-last-good one. That string says a newer
+VERSION of the page did not load, which is a different situation with a different remedy:
+here the page is the right one and only its numbers are behind.
