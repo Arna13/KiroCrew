@@ -47,3 +47,22 @@ names, so what is on screen is what the product produces.
 
 A test now pins this: the row keys are read out of `_worktree_render`'s own source and
 every `board.<key>` the page reads must be one of them.
+
+
+## These captures are built from the shape a real folded tree carries
+
+`test_dashboard_gallery_real_tree.py` plants real `work/recorded` entries in real session
+logs, folds them with the real `read_tree_projection`, and pins both the row's keys AND
+their types against what the harness here builds. Three takes were needed to get this
+right, and each error was invisible in the picture:
+
+1. rows built as `slot_key` / `on_cycle` / `entries` -- the fold emits `board` / `cycle`
+   / `items`, so the page read three keys that do not exist;
+2. `items` built as a list of dicts -- the fold emits an integer count, so a page taking
+   `.length` of it would print nothing;
+3. the island's version started at 0 -- the host mints one per full read, so a first
+   paint carries 1 and the first patch is 2.
+
+The key set matching was what hid the second one: identical keys, different types, and a
+picture that looked correct because the harness's own list happened to have the right
+length. The pin now checks the type of every key.
