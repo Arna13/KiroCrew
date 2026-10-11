@@ -13,6 +13,7 @@ from aiohttp import web
 from kiro_crew.constants import DENY_CAUSE_SURFACE_POLICY
 from kiro_crew.dashboard.request_priority import owner_start_priority
 from kiro_crew.dashboard.state import DashboardState
+from kiro_crew.image_refs import strip_image_refs
 from kiro_crew.llm_helpers import _steer_host_deny
 from kiro_crew.providers.base import EVENT_COMPLETE, EVENT_PERMISSION_REQUEST, EVENT_TEXT_CHUNK
 from kiro_crew.security import (
@@ -232,7 +233,13 @@ async def handle_optimize(request: web.Request) -> web.Response:
         return web.json_response({"error": "invalid JSON"}, status=400)
 
     prompt = data.get("prompt", "").strip()
-    context = data.get("context", "")
+    # The context is replayed chat history, forwarded as text and then run
+    # through build_prompt_blocks by the session stream — which inlines any
+    # readable absolute image path as a (multi-MB) base64 image block. A pasted
+    # screenshot ref in that history would therefore bloat every optimize call,
+    # yet the optimizer only rewrites text and never needs the picture. Scrub
+    # local image refs to a content-free marker before forwarding.
+    context = strip_image_refs(data.get("context", ""))
     # Paste blocks the frontend collapsed out of the prompt: [{seq, content}, ...]
     # (mirrors PasteBlock in pasteTokens.ts). The prompt carries only the
     # "[ Paste #N · M lines ]" placeholders; the real content rides here so the
@@ -358,6 +365,22 @@ async def handle_optimize(request: web.Request) -> web.Response:
     except Exception:
         logger.warning("Optimizer failed, returning original", exc_info=True)
         return web.json_response({"optimized": prompt, "changed": False})
+    finally:
+        # Throw away the dedicated session's conversation after every call. Each
+        # optimize is independent and needs no continuity, but a persistent
+        # "_optimizer" key RESUMES the same conversation on the next call, so its
+        # history (and the pasted-screenshot image blocks that rode in it) grows
+        # without bound until requests fail as malformed. discard_conversation
+        # with replay=False clears the resume sid and suppresses replay, so the
+        # next call cold-starts fresh; a plain reset only recycles the process
+        # and keeps the sid, which would reload the same growing transcript.
+        # Runs outside the 30s budget and on every path, after _optimize's own
+        # finally has released the lease. Best-effort: a failed discard must
+        # never replace a good rewrite with an error.
+        try:
+            await state.sessions.discard_conversation(optimizer_session_key, replay=False)
+        except Exception:
+            logger.debug("Optimizer: failed to discard dedicated session", exc_info=True)
 
     optimized = text.strip().strip('"').strip("'")
     # Strip one model-added XML wrapper before the sentinel check, the
