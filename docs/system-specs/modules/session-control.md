@@ -32,9 +32,305 @@ unreachable in production because the caller's `X-Internal-Secret` is ignored.
 | `session_broadcast` | `POST /api/session-control/broadcast` | Deliver ONE message to several sessions — by default every session the caller created — in a required `queue` or `steer` mode, reporting the outcome per target |
 | `session_status` | `GET /api/session-control/status` | List the sessions the caller stood up and what each is doing, with the roster taken from the crew log's session tree so a session that is gone still appears |
 | `session_adopt` | `POST /api/session-control/adopt` | Take another session under the caller in the session tree, keeping the parent it had on record; refused when the target is already above the caller |
+| `session_handoff` | `POST /api/session-control/handoff` | Give a session to another session, which manages it from then on: the target's current manager (its creator until a handoff says otherwise) names a recipient it also manages, the recipient gains the reach to send, read, stop, close, adopt, release and hand on while the giver loses it, and the sidebar edge moves with it through the same record `session_adopt` writes |
 | `session_release` | `POST /api/session-control/release` | Let a session the caller holds, or the caller itself, out from under its parent; the released session keeps its own subtree |
 | `session_read_message` | `GET /api/session-control/read` | Read another session's transcript tail + liveness |
 | `session_summary` | `GET /api/session-control/summary` | Read another session's cached intent summary + liveness, authorized as `session_read_message` is; never generates one |
+
+`session_handoff` is the only writer of `_ChatSlot._manager`, the slot's record of
+the session that HOLDS it. `manager_of` answers `_manager or _created_by`, so a
+gateway where nothing has been handed over authorizes exactly what it authorized
+before the field existed, and the fence reads the manager only for the operations
+`HANDOFF_WIDENED_OPERATIONS` names (`send`, `read`, `summary`, `stop`, `close`, `adopt`,
+`release`, `handoff`) and the creator for every other verb. `summary` is in that set with
+`read` because it is authorized as a transcript read is and is generated from the
+transcript. `broadcast_audience` reads the same `_managed_by_other`, because `send` is one
+of those operations and an audience that disagreed with the fence judging each delivery
+would put a handed-away session in its giver's default audience, where every delivery is
+then refused, and leave it out of the audience of the manager that can reach it.
+`_created_by` is never rewritten, so `_delegation_lineage_fenced`, the per-creator slot cap
+and the create and fork gates keep their own answer.
+
+The LOG is the ONLY store for who manages a session. The slot's metadata line does not
+carry it: the codec has no `manager` row, so no save writes one and no restore reads one.
+A copy there would be written on every save, read on every restore and then overwritten
+every time, because the start establishes the field from the log on the same path that
+restores the slots -- and it was itself how a revoked manager came back, because a line
+outlives the grant it names. `created_by` stays on the line because nothing else records
+it. The key remains in `history.SLOT_OWNED_META_KEYS` so an existing line SHEDS it: owned
+means absence on a save is a retraction, where unowned would mean carried forward onto
+every later line. Decoding a line that still carries the key keeps working and ignores the
+value; no migration cleans it up and none is needed.
+
+The commit point is this verb's own
+`session/manager_set` entry, appended inside the lock after the tree edge has landed and
+awaited through `awaiting_settlement`, and `_manager` is published only once that entry is
+on disk. That wait answers three values rather than two, because the two ways of not being
+on disk need opposite handling: an append the writer gave up on left nothing behind and
+refuses 409 `handoff_not_recorded` outright, while an append still QUEUED when the bound
+runs out may land at any time afterwards and would then be the newest statement on the
+log. The second case is CORRECTED rather than abandoned -- `_revoke_manager_record` queues
+a further entry behind it, and the writer is FIFO per unit, so whichever order the two
+land in the newest statement is the correction.
+
+That correction needs the log to be able to say "back to nobody", which is what
+`session/manager_set.to_creator` states: a statement that could only name a successor
+cannot CLEAR a manager, and naming the creator instead would record a handoff TO the
+creator rather than none at all. A slot that had a published manager reverts to that
+manager; one that had none reverts to its creator.
+
+A recorded manager is RE-VALIDATED before the rebuild publishes it, through
+`_manager_still_admissible`, which re-asks the admission the verb checked before it
+published: the manager is not a member's own DM surface (by key, so it answers without a
+session), it is still open, it AGREES with the managed session on its memory store, and
+it is not a session that cannot be reached at all (`_live_target_refusal`). Fail closed --
+a reason that cannot be determined is a reason.
+
+`resolve_slot_manager` is the ONE way the field is ever established on a slot, and every
+path that builds one calls it before publishing: the boot reconstruction, a revive, a
+resume from history (those two share `resume_slot_from_history`, so one call covers both)
+and targeted rehydration (`rehydrate_slot_from_history_async`, reached when a cron
+notification wakes a worker the startup budget skipped). One helper rather than a call
+added per path as each is found, because that is the shape of hole this line has closed
+four times.
+
+It is backed by DEFAULT-DENY rather than by remembering. A slot's manager lives only in
+the crew log, so a slot hydrated from a metadata line has no established manager --
+`metadata_codec.apply` sets `_manager_unresolved` for every hydrating purpose, and only
+`resolve_slot_manager` clears it, and only on an authoritative read. While it stands,
+every read that authorizes against the manager is refused 409 `manager_unresolved`. So a
+build path added later that publishes a slot without consulting the log does not silently
+revert a handoff and hand a revoked giver its reach back: it produces a slot that refuses
+the manager-dependent verbs, which is visible. A freshly minted slot never carries the
+flag -- nothing was handed over before it existed.
+
+THE REFUSAL IS ON THE READ, not at a gate. `require_manager_of` is the one way an
+authorization answer reads who manages a slot, and it refuses for both ways the value can
+be unknown before returning it; `manager_of` is the raw read and belongs to the rebuild
+alone. The refusal used to be two conditions at the top of `authorize_target`, keyed on
+`operation in HANDOFF_WIDENED_OPERATIONS` -- a predicate that APPROXIMATES "this
+operation reads the manager", and it was wrong in both directions. Too wide: the fence
+short-circuits on `ownership_fenced`, so an unfenced caller never reads the manager and
+its answer could not change, yet it was refused anyway -- which on a gateway that never
+hands anything off is every caller, after every restart. Too narrow: three sites reach
+the value without passing that gate -- the handoff verb's own `already_manager` check,
+its commit's `previous_manager`, and `broadcast_audience`, which filters every slot by
+who manages it for any caller. Put on the read, the guard cannot be reached around, and
+a test pins it from source: no function outside `require_manager_of` and the rebuild may
+call `manager_of`.
+
+At the drain, `manager_unknown` carries both refusals as one snapshot boolean, compared
+only when the entry RECORDED it. The boolean set is the wrong fail-closed floor for this
+one: the restore path strips the containment stamp deliberately and every hydrated slot
+starts `_manager_unresolved`, so counting it against the unmarked baseline would make the
+first drain after a restart delete every prompt a person had typed. Those were admitted by
+the authenticated composer and never read the manager. A STAMPED entry is still dropped --
+its admission did read the value, and the drain cannot re-read it.
+
+The CALLER half of an admission is re-asserted at the drain too, and separately, because
+it is not a per-slot constraint: it is a relation between the target's current manager and
+one entry's stamped sender. While the fence read `created_by` it needed no re-check -- a
+slot's creator is written at birth and never moves, so the relation that admitted an entry
+could not flip while it waited. A handoff moves it, so a lead can queue a message on a
+busy worker, hand the worker to a conductor, and have the message run under an
+authorization the handoff revoked. `sender_lost_its_reach` compares the stamped sender
+through `_managed_by_other` -- the SAME predicate `authorize_target` admitted the entry
+with, not a second manager read placed at the drain -- and an unread manager raises out of
+it, which is a drop under `manager_unknown` rather than a claim about the sender. Only a
+cross-session delivery is re-checked: a human-typed entry carries no `send_origin_slot`,
+and neither does a restored one, so neither is dropped for a relation their admission
+never read.
+
+A per-slot refusal also ARMS the read that clears it. `resolve_slot_manager`'s callers
+are all build paths and none runs again for a slot already open, so an unresolved slot
+used to stay unresolved until the process restarted while every refusal said "retry in a
+moment". One bad unit anywhere in the store is enough to get there, since the listing
+behind the read is store-wide and a `CrewLogError` from it is not an `OSError`. The
+re-read is scheduled from the refusal, deduplicated per slot, so the window is
+self-clearing and the instruction is true.
+
+UNRESOLVED is its own state and never collapses into a decided one. An undecided read
+establishes nothing, so the slot keeps the flag; an empty `_manager` is the decided answer
+"the creator holds it", which a read that could not see the bytes cannot make. Both
+decided answers clear the flag, including the empty one and a gateway with no crew log at
+all. A store that does not EXIST is decided too -- nothing was ever recorded there, so no
+handoff can exist -- which is why `slot_manager` answers `FileNotFoundError` on the
+listing as "no handoff" and only a store that is there and unreadable as undecided. Without
+that split a first run, where no crew-log store exists yet, would refuse every slot.
+
+A handoff is also refused when the TARGET is not ownership-fenced and the RECIPIENT is
+(`deputy_refused`). The fence decides what a caller may reach and, for the verbs a handoff
+widens, it reads the manager -- so a fenced agent-created worker given one of the person's
+own tabs drives a session the fence does not apply to, and through it reaches every session
+in the workspace while reading the results back. Each half of how it got there is
+admissible on its own, which is why the refusal is on the combination. Refused here rather
+than by making a managed slot count as fenced, which would change the TARGET's fence status
+as a side effect of being managed: a person's own tab would silently lose its own reach for
+having been handed to someone. Fenced to fenced (a lead's workers to a lead's conductor)
+and unfenced to unfenced (a person's own tabs) both pass; only the mixed direction builds
+a deputy.
+
+The verb applies that SAME store comparison, so the answer a caller gets is the answer
+the next boot will give. `_receiver` compares the recipient against the giver AND against
+the target, before the append and again immediately before publication. Three sessions
+make those two comparisons disagree -- an owner-rooted lead on the default store
+dispatches a member-store worker and a default-store conductor, so giver and recipient
+agree while recipient and target do not -- and a handoff admitted on the giver's binding
+alone would be accepted now and silently revoked at the next start, which is worse than
+refusing it up front. The refusal names the mismatch (`recipient_other_store`). The log stays the authority on WHAT was
+recorded and was never the authority on whether that record is still allowed: a recipient
+can be rebound to another principal's store, linked to a channel or closed while the
+gateway is DOWN, and no append-only entry can know it. This is also what closes the gap a
+corrective append leaves, because a correction that never landed and a crash between the
+entry and its correction both leave the log stating a grant that was refused, and this is
+the one point such a grant would otherwise take effect.
+
+`rebuild_managers_from_log` RESTORES `_manager` from the newest entry per slot, through
+`session_tree.slot_manager`, which answers `(manager, decided)` so a caller can tell "no
+handoff was recorded" from "the log did not say". It is the only way the field is ever
+populated at a start.
+
+It is NOT on the boot path. That read is proportional to the surviving history of every
+restored slot -- a unit is only PROVED to record no handoff by reading all of it -- so
+awaiting it would put history-sized work with no total bound in front of READY, for a
+feature most installs never use. `session_restore` arms `arm_manager_restore()`
+synchronously BEFORE the first restore call and runs the pass as its own task. Before,
+not after: HTTP is already serving when the restore runs, and the restores publish slots
+one at a time and yield to the loop between them, so a request can arrive while some slots
+exist and none has had its manager read. Armed after the work instead, every one of those
+requests is answered from `_created_by`, which admits a giver whose reach a recorded
+handoff already moved away. While it runs, every read that authorizes
+against the manager is refused 409 `managers_not_restored`, because
+until the pass settles every manager field is empty and the fence would read the CREATOR
+for every slot -- which admits a giver whose reach a recorded handoff already moved away,
+the one direction that must not be guessed. Verbs outside that set do not depend on the
+manager and are served immediately, as is any caller whose fence verdict never reaches
+the read. The gate is armed synchronously rather than inside the task, because a gate armed one loop iteration late is a gate the first verb of a
+restored gateway gets past, and it is released in a `finally`, so a pass that fails cannot
+leave the gateway refusing for the life of the process. The log decides in three directions, and only two of them
+return the session to its creator. An entry-less log and a decided revert (the
+`to_creator` entry form) both leave `_manager` empty, which IS the statement "the creator
+holds this session". A recorded manager that fails revalidation -- closed, or rebound to
+another principal's store -- makes neither statement, so manager-dependent access is
+DENIED rather than reverted: "the recipient is not admissible" and "no handoff happened"
+are different facts, and reverting would invent a transfer back and hand a revoked grant
+to the session that gave it away. An undecided read establishes nothing and leaves the
+slot unresolved, so a briefly unreadable store costs a handoff until a read succeeds
+rather than handing anyone reach the log cannot show they were given. Denying strands
+nobody: an unfenced caller's reach never came from this field, so a person can still
+adopt, release or close such a session, and the way back is a fresh handoff. With the
+crew log switched off there is no authority at all and every slot keeps its creator.
+
+The verb writes NO slot line, which is the other half of the same decision. The entry is
+the handoff and `_manager` is this process's copy of it, so there is no second write to
+order, no partial state to report -- the reply carries no `cached` key -- and no cache to
+fall out of date. Publishing on the strength of a `best_effort` save instead, back when the
+line did carry the field, is what let a save that failed plus a restart before the periodic
+flush retried it restore the manager a handoff had just revoked.
+
+A handoff whose commit is REFUSED puts the parent back. `_reparent_target` makes the tree
+edge durable before the commit runs, which is the order the record owes -- a field written
+first and an append that then failed would leave the gateway acting on a move no record
+carries -- and that leaves a window where the edge is on disk and the manager has not
+moved. `_landed_then_committed` closes it: a commit that raises triggers `_restore_parent`,
+which durably adopts the target back under the parent it had, or RELEASES it when it had
+none (an adoption naming an empty parent is not an edge, and the emitter refuses to write
+one), or releases it when restoring that parent would CLOSE A CYCLE. A rollback is a
+forward write like any other, so `_restoring_would_cycle` checks it against the same
+settled-plus-queued view: the window runs after its verb gave up its place in the mutation
+lock, so the previous parent can have been reparented under the target meanwhile by moves
+each checked and each fine, and the restoration is then the edge that completes the loop.
+That check fails closed by answering True, which is the opposite direction from the forward
+path, because a compensation has no refusal available -- releasing loses nesting, which is
+visible and repairable, where persisting a cycle is neither.
+
+The rollback is ANNOUNCED as well as checked. It takes a `_tree_append_waiter` like a
+forward append, which fences the slot and -- on the adoption, the only branch that adds an
+edge -- publishes `slot -> previous parent` in `_tree_pending_edges`. Checking the rollback
+against the queued edges while not publishing it among them would close one direction and
+leave its mirror image open: the next mover's cycle check would read a tree without the
+edge this compensation is about to write. The fence and the edge are cleared by the
+waiter's own future, so a wait that runs out leaves them standing until the writer settles,
+which is the state a later decision most needs to see. Without that the target hung
+under the recipient while the giver was still its
+manager, so the recipient could not drive it and the giver's own `session_release`
+answered `not_parent`. The compensation is bounded and never raises its own error over the
+refusal that caused it; a compensation that cannot be written is logged as the one case an
+operator has to see. The window runs in its own task behind `asyncio.shield`, so a caller
+that goes away cancels the wait and not the work, and `_hold_tree_fence` keeps the slot
+fenced for as long as the task runs -- a cancelled caller unwinds out of the mutation lock
+while the commit is still settling, so the lock alone would not keep the next verb out.
+
+The caller's wait and the window's are DIFFERENT bounds, which is the same idea applied to
+a slow writer rather than an absent caller. A request cannot be held for as long as the
+writer may take, so it is answered 409 `tree_write_pending` on `_TREE_APPEND_TIMEOUT`
+while the task goes on waiting for the real verdict up to `_TREE_SETTLE_TIMEOUT`. A window
+that ended on the caller's bound would end with the edge still queued and the commit never
+attempted, which is the split the compensation exists to prevent; so when even the longer
+bound runs out, the window compensates on the way out rather than leaving an edge a start
+could read as a move that happened.
+
+Because that window outlives the request, the CYCLE CHECK runs against the settled tree
+plus every queued, unsettled reparent edge (`_tree_pending_edges`, overlaid by
+`_tree_with_pending_edges`). The projection advances only when an append settles, so a
+check against the settled tree alone cannot see a move the writer is already holding --
+and two such moves can close a loop neither closes on its own. Both reparenting verbs
+register their edge, because a queued adoption closes a loop exactly as a queued handoff
+does. If the combined view cannot be built the move is REFUSED `tree_not_ready`, on the
+rule this whole module applies to an unreadable log: "no loop" concluded from a view you
+could not read is a confident wrong answer, not a missing one.
+
+A handoff also fences BOTH endpoints (`fence_parent`) rather than the target alone, and
+the window owns the parent's fence so it is released when the work is. That is now a
+cheap EARLY refusal in front of the real check rather than the guarantee itself: it
+catches the two-node case, where the next move shares a slot with the queued one, and it
+catches it without folding a view. It cannot catch a larger loop -- with `D -> A` and
+`B -> C` settled and `A -> B` queued, a handoff of `C` to `D` names neither endpoint --
+which is why the validator and not the fence is what closes the hole. Refusing a reparent
+whose endpoint has an unsettled write is `tree_write_pending`: fail-closed, retryable, and
+lasting only until settlement.
+
+Serializing tree mutations until pending writes settle would close the same hole and is
+rejected: it pins the loop's serialized region to one slow disk, so a single stalled
+writer stalls every unrelated tree write. That is the defect `_tree_pending_slots` exists
+to avoid.
+
+The endpoint FENCE is scoped to `session_handoff`. `session_adopt` and `session_release`
+carry the same pre-existing hazard on their own paths and are tracked in
+[#19253](https://github.com/kirodotdev/KiroCrew/issues/19253). The cycle VALIDATOR is not
+scoped that way: it reads every queued edge whichever verb registered it, so a queued
+adoption is folded into a handoff's check and the reverse.
+
+The audit and the sidebar broadcast are written from INSIDE the window, not in the
+caller's frame. A caller that times out raises through `_audit_denials`, which records
+`denied` for that timeout; the window then commits and the reach really does move, so an
+`allowed` line written in the caller's frame is never written at all and the SEL is left
+saying the opposite of what happened. `_reparent_target` passes one `on_committed` for
+both, and each verb supplies its own `after_commit` beside it -- the handoff's is the
+sidebar push, and the adoption asks for none. The verb's pre-lock refusals are audited
+too: the shared `gate` and the handoff's own recipient resolution both sit inside
+`_audit_denials`, so `already_manager`, `member_recipient`, `recipient_other_store` and a
+replaced recipient each leave a record, which is what `backend-security-controls`
+requires of a permission decision.
+
+The recipient is authorized by `authorize_target` like a target and then tested for
+its PRINCIPAL: a `member-` DM key is refused by key alone, and a recipient whose
+`memory_store` differs from the giver's is refused `recipient_other_store`. That test
+is positive on purpose -- `_store_is_member_owned` answers False for an unreadable or
+incomplete record, which withholds member status for an admission and ADMITS one for a
+refusal, so the recipient rule reads the two slots' own bindings instead. The recipient is
+re-established against the LIVE slot object TWICE, and the second time is the one that
+decides: immediately before the publish, with nothing suspending after it. The append
+suspends, and the recipient's own routes take its slot lock and not this verb's, so an
+agent switch, a store rebind, a new channel link or a same-key reopen inside that
+suspension would otherwise move the reach on a verdict formed before the change. The
+earlier check is kept only because it is free and spares the log a correction in the
+common case. A declined publish refuses 409 `recipient_replaced` and never writes
+`_manager` -- but the entry is already the authority by then, so declining to publish is
+not enough on its own: the handoff is taken back on the log through
+`_revoke_manager_record`, or a start would grant at boot the very reach the refusal
+withheld. The parent can then be put back knowing the manager never moved. It shares `_reparent_target` with `session_adopt`, which is where both verbs' tree
+checks, id resolution, in-lock re-authorization and same-key replacement refusals live.
 
 `session_adopt` and `session_release` reshape the session tree, so both go
 through `authorize_target` like every other verb and add tree checks of their

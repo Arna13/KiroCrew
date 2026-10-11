@@ -94,6 +94,9 @@ def test_human_typed_enqueue_stamps_admission_snapshot(tmp_path):
         "app": False,
         "unattended": False,
         "workspace": "default",
+        # False at admission by construction: this slot's manager is known, which is
+        # what let the entry be admitted for a verb that reads it at all.
+        "manager_unknown": False,
     }
 
 
@@ -775,6 +778,24 @@ _TARGET_CONTAINMENT_REFUSALS = {
     "app_scoped_target": "app",
     "unattended_target": "unattended",
     "workspace_mismatch": "workspace",
+    # Both ways `require_manager_of` can refuse, against the one snapshot boolean that
+    # says who manages the slot is not known. Containment, not caller-side: the value
+    # is a property of the TARGET, a handoff moves it while an entry waits, and a
+    # failed read can retract it -- so the drain has something of the target's to
+    # re-compare, unlike `not_creator` below.
+    #
+    # Compared only when the entry RECORDED it, like `workspace`: the boolean set is
+    # the wrong fail-closed floor for this one, because the restore path strips the
+    # stamp and every hydrated slot starts unresolved, so counting it against the
+    # unmarked baseline would delete every prompt a person typed before a restart. The
+    # population that skips the check is restores, whose admission was the composer and
+    # never read the manager; every cross-session producer stamps at enqueue.
+    "managers_not_restored": "manager_unknown",
+    "manager_unresolved": "manager_unknown",
+    # The third way the value is not usable: read, decided, and the recorded manager
+    # cannot hold the session. Same snapshot boolean, because the drain-time
+    # consequence is identical -- there is no manager to authorize a delivery against.
+    "manager_grant_inadmissible": "manager_unknown",
 }
 
 _NON_CONTAINMENT_REFUSALS = {
@@ -788,9 +809,21 @@ _NON_CONTAINMENT_REFUSALS = {
     "mirrored_caller",
     "caller_gone",
     # Caller-relative ownership: fires only for member callers, comparing the
-    # caller's key to the target's created_by. Both are written once at birth
-    # and never mutate, so the relation that admitted an entry cannot flip
-    # while it waits -- and the drain has no caller left to re-evaluate.
+    # caller's key to the target's holder. For every verb OUTSIDE
+    # `HANDOFF_WIDENED_OPERATIONS` that holder is `created_by`, and both sides are
+    # written once at birth and never mutate, so the relation that admitted an entry
+    # cannot flip while it waits -- and the drain has no caller left to re-evaluate.
+    #
+    # For a WIDENED verb the holder is `manager_of`, which a handoff MOVES, so the
+    # relation can flip mid-wait: an entry admitted while A managed the target is
+    # drained after the target was handed to B. `manager_unknown` above covers the
+    # case where the value cannot be read; it does NOT cover a value that was read
+    # and then moved. That half is not re-checked HERE because it is not a per-slot
+    # constraint: it is a relation between the target's current manager and one entry's
+    # stamped sender, so it is per-entry and lives beside this table rather than in it
+    # (`session_control.sender_lost_its_reach`, called by `_drop_stale_admissions`).
+    # `manager_unknown` above covers a value that cannot be READ; that one covers a
+    # value read and then moved.
     "not_creator",
     # Not containment: global config state, a resolution failure, and the
     # self-target guard. None of the three can change while an entry waits in a
@@ -832,6 +865,16 @@ def _authorize_target_refusal_codes() -> set[str]:
     The four live-target containment refusals live in ``_live_target_refusal``,
     which RETURNS ``(reason, code)`` for its caller to raise through ``deny``, so
     its returned tuples are read as codes the same way.
+
+    ``_manager_unread_refusal`` is read the same way and for the same reason. The
+    two refusals owed when who manages a slot has not been read deliberately do
+    NOT live in the gate: they live on the READ (``require_manager_of``), because a
+    condition in the gate had to name which operations consult the manager and that
+    list was wrong at three sites which reach the value without passing the gate.
+    They still reach the caller through ``authorize_target``, which re-raises them
+    via ``deny`` with ``exc.code`` -- a variable the ``deny`` parse cannot see. So
+    the helper that spells them is parsed directly; without this the two codes read
+    as deleted and the tables they are classified in fail OPEN.
     """
     codes: set[str] = set()
     for fn in (
@@ -842,9 +885,8 @@ def _authorize_target_refusal_codes() -> set[str]:
     ):
         tree = ast.parse(textwrap.dedent(inspect.getsource(fn)))
         codes |= _deny_codes(tree)
-    codes |= _returned_refusal_codes(
-        ast.parse(textwrap.dedent(inspect.getsource(sc._live_target_refusal)))
-    )
+    for returning in (sc._live_target_refusal, sc._manager_unread_refusal):
+        codes |= _returned_refusal_codes(ast.parse(textwrap.dedent(inspect.getsource(returning))))
     return codes
 
 
@@ -947,4 +989,216 @@ def test_the_snapshot_carries_no_unmapped_constraint(tmp_path):
         f"containment_snapshot key(s) with no authorize_target refusal behind them: "
         f"{sorted(extra)}. Map each to its refusal, or add it to "
         "_SNAPSHOT_NON_CONSTRAINT_KEYS if it is comparison detail rather than a constraint."
+    )
+
+
+def test_a_handoff_between_enqueue_and_drain_drops_the_givers_queued_send(tmp_path, _inline_audit):
+    """The caller-side half of the admission, re-asserted at the drain.
+
+    Every other test in this file changes something about the TARGET. This one changes
+    nothing about it: the worker is the same session, unlinked, unmirrored, in the same
+    workspace, with a readable manager. What moved is WHO manages it, and the entry was
+    admitted on the relation between that value and its sender.
+
+    The relation needed no re-check while the fence read ``created_by``, which is
+    written at birth and never moves. A handoff moves it, so the lead's queued message
+    would otherwise run in a worker it had already been refused.
+    """
+    state = _make_state(tmp_path)
+    lead = state.get_or_create_slot("chat-lead")
+    conductor = state.get_or_create_slot("chat-conductor")
+    worker = _busy(state.get_or_create_slot("chat-worker"))
+    worker._created_by = lead.key
+
+    worker.queue_append(
+        "finish the migration",
+        meta={
+            **sc.containment_meta(state, worker),
+            **sc.send_origin_meta(state, lead.key, manager_fenced=True),
+        },
+    )
+    assert worker._queue, "the premise: the lead's delivery is waiting"
+
+    # The containment snapshot is unchanged; only the manager moved.
+    worker._manager = conductor.key
+    cr._drop_stale_admissions(state, worker)
+
+    assert worker._queue == [], "the giver's queued send does not survive the handoff"
+    notices = [m for m in worker.messages if m.get("role") == "notice"]
+    assert notices and "no longer manages this one" in notices[-1]["content"]
+    call = _inline_audit.log_tool_invocation.call_args
+    assert call.kwargs["outcome"] == "denied"
+    assert sc.SENDER_LOST_REACH in call.kwargs["metadata"]["newly_held"]
+
+
+def test_the_new_managers_own_queued_send_survives_the_drain(tmp_path):
+    """The counterpart, so the check cannot pass by dropping everything.
+
+    A delivery from the session that NOW manages the target is exactly what the handoff
+    was for, and dropping it would make the feature useless the moment it was used.
+    """
+    state = _make_state(tmp_path)
+    conductor = state.get_or_create_slot("chat-conductor")
+    worker = _busy(state.get_or_create_slot("chat-worker"))
+    worker._created_by = "chat-lead"
+    worker._manager = conductor.key
+
+    worker.queue_append(
+        "carry on",
+        meta={
+            **sc.containment_meta(state, worker),
+            **sc.send_origin_meta(state, conductor.key, manager_fenced=True),
+        },
+    )
+    cr._drop_stale_admissions(state, worker)
+    assert len(worker._queue) == 1, "the manager's own delivery is untouched"
+
+
+# ── The TIME axis: what the gate reads, and whether it can go stale ──────────
+
+
+def test_every_mutable_target_value_the_gate_reads_is_re_checked_at_drain():
+    """The temporal completeness argument, parsed rather than asserted in prose.
+
+    Admission is decided at enqueue and re-asserted at drain only for what can CHANGE in
+    between. That makes the exemption list a claim about MUTABILITY, and a claim like
+    that rots silently: the day someone adds a writer for an exempt value, the drain
+    stops re-checking something that now moves, and nothing fails.
+
+    So the gate's target-side reads are extracted from source and each one must be
+    accounted for -- either carried in `containment_snapshot`, so the drain compares it,
+    or named here as immutable with the reason. A read this cannot classify fails.
+    """
+    import ast
+    import inspect
+    import textwrap
+
+    #: Target-side values the gate reads that the drain does NOT re-compare, each with
+    #: why it cannot go stale. Anything else must be in the snapshot.
+    _IMMUTABLE_READS = {
+        # Written at birth by the three mint paths and by restore onto a fresh slot
+        # object, never on a live one -- which is what `test_created_by_is_only_ever_
+        # written_at_birth` below pins. This is the premise that exempts `not_creator`.
+        "_created_by": "written at birth only",
+        # A slot key never changes, and `unattended` keys off its prefix.
+        "key": "slot keys are immutable",
+    }
+    #: Snapshot fields that are not slot attribute names, mapped to the attribute each
+    #: one carries. The drain compares the FIELD; this says which read it covers.
+    _COVERED_BY = {
+        "_app": "app",
+        "linked_session_key": "linked",
+        "memory_mode": "ephemeral",
+        "workspace": "workspace",
+        "_manager": "manager_unknown",
+        "_manager_unresolved": "manager_unknown",
+        "_manager_grant_inadmissible": "manager_unknown",
+    }
+
+    gate = (
+        sc.authorize_target,
+        sc._live_target_refusal,
+        sc._managed_by_other,
+        sc.manager_of,
+        sc._created_by_other,
+        sc._manager_unread_refusal,
+    )
+    reads: set[str] = set()
+    for fn in gate:
+        tree = ast.parse(textwrap.dedent(inspect.getsource(fn)))
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Call)
+                and getattr(node.func, "id", "") == "getattr"
+                and len(node.args) >= 2
+                and isinstance(node.args[0], ast.Name)
+                and node.args[0].id == "slot"
+                and isinstance(node.args[1], ast.Constant)
+            ):
+                reads.add(node.args[1].value)
+            if (
+                isinstance(node, ast.Attribute)
+                and isinstance(node.value, ast.Name)
+                and node.value.id == "slot"
+            ):
+                reads.add(node.attr)
+    assert reads, "the parse found nothing, so this test would pin nothing"
+
+    snapshot_fields = set(_base_snapshot_fields())
+    unaccounted = sorted(
+        name
+        for name in reads
+        if name not in _IMMUTABLE_READS and _COVERED_BY.get(name) not in snapshot_fields
+    )
+    assert not unaccounted, (
+        "the gate reads these target values and the drain does not re-compare them: "
+        f"{unaccounted}. Either add the value to containment_snapshot and map it in "
+        "_COVERED_BY, or add it to _IMMUTABLE_READS with the reason it cannot change "
+        "between admission and delivery."
+    )
+    # And every mapping points at a field that really exists, so a renamed snapshot key
+    # cannot leave a read silently 'covered' by a field that is gone.
+    stale = sorted(f for f in _COVERED_BY.values() if f not in snapshot_fields)
+    assert not stale, f"_COVERED_BY names snapshot fields that do not exist: {stale}"
+
+
+def _base_snapshot_fields() -> set[str]:
+    """Snapshot field names, read off the builder rather than a hand-kept copy."""
+    import ast
+    import inspect
+    import textwrap
+
+    tree = ast.parse(textwrap.dedent(inspect.getsource(sc._snapshot_from_probe)))
+    out: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Dict):
+            for key in node.keys:
+                if isinstance(key, ast.Constant) and isinstance(key.value, str):
+                    out.add(key.value)
+        if isinstance(node, ast.Subscript) and isinstance(node.slice, ast.Constant):
+            if isinstance(node.slice.value, str):
+                out.add(node.slice.value)
+    return out
+
+
+def test_created_by_is_only_ever_written_at_birth():
+    """The premise that exempts `not_creator` from the drain re-check, pinned.
+
+    `not_creator` is the one caller-relative refusal the drain does not re-evaluate, and
+    the stated reason is that both sides are written once and never mutate. If a writer
+    appears that stamps `_created_by` on a slot that is already open, a queued entry
+    admitted under one creator can be delivered under another, and the exemption becomes
+    a hole with nothing red.
+
+    Every writer must therefore be a MINT or a RESTORE -- a slot object with no queue
+    yet. Scanned from source, so a new writer has to come and argue with this list.
+    """
+    import pathlib
+    import re
+
+    repo_root = pathlib.Path(__file__).resolve().parents[1]
+    #: Each writer, with why it cannot reach a slot that already has a queue.
+    allowed = {
+        "src/kiro_crew/dashboard/session_control.py": "create_session, at the mint",
+        "src/kiro_crew/dashboard/chat_handlers.py": (
+            "cron attribution, both sites guarded by created_in_send / is_new_slot"
+        ),
+        "src/kiro_crew/dashboard/slot_persistence/metadata_codec.py": (
+            "restore, onto a freshly built slot object"
+        ),
+    }
+    offenders: list[str] = []
+    for path in sorted(repo_root.joinpath("src").rglob("*.py")):
+        rel = path.relative_to(repo_root).as_posix()
+        text = path.read_text(encoding="utf-8")
+        for match in re.finditer(r"^\s*\w+\._created_by\s*=\s*", text, re.M):
+            if rel not in allowed:
+                line = text[: match.start()].count("\n") + 1
+                offenders.append(f"{rel}:{line}")
+    assert not offenders, (
+        "these write _created_by outside the mint and restore paths: "
+        f"{offenders}. A slot that is already open can then change creator while an "
+        "entry waits in its queue, which breaks the premise that exempts `not_creator` "
+        "from the drain re-check. Either write it at the mint, or re-check it at the "
+        "drain and move the refusal into _TARGET_CONTAINMENT_REFUSALS."
     )

@@ -524,11 +524,35 @@ def _drop_stale_admissions(state: DashboardState, slot: _ChatSlot) -> None:
         # a channel-born session still drains: its stamp records linked=True.
         if q.get("kind") in (CRON_NOTIFICATION_KIND, SUBAGENT_COMPLETION_KIND):
             continue
+        # Whether the FENCE applied to this entry's admission, read once and used by
+        # both manager re-checks below. An admission the fence never touched did not
+        # read the manager, so neither "the manager moved" nor "the manager cannot be
+        # read" is a constraint it gained -- and dropping is the destructive outcome
+        # here, because the entry is a message that was already accepted.
+        manager_fenced = _sc.send_origin_manager_fenced(q.get("meta"))
         changed = _sc.newly_held_constraints(
             now,
             q.get("meta"),
             directive_user_origin=q.get("_directive_user_origin") is True,
+            manager_fence_applied=manager_fenced,
         )
+        # The CALLER-side half of the admission, which the snapshot above cannot carry:
+        # it describes the target alone, while this is a relation between the target's
+        # current manager and this entry's stamped sender. It needed no re-check while
+        # the fence read `created_by`, written at birth and never mutated; a handoff
+        # moves the relation, so a lead can queue a message on a busy worker, hand the
+        # worker over, and have the message run under an authorization it has lost.
+        #
+        # An unread manager raises out of the same predicate `authorize_target` admits
+        # with, and that is a drop too -- under the snapshot's own reason, since
+        # "we cannot tell" is what `manager_unknown` names and the wording must not
+        # claim the sender lost a reach this cannot verify it had.
+        try:
+            if _sc.sender_lost_its_reach(state, slot, q.get("meta")):
+                changed = [*changed, _sc.SENDER_LOST_REACH]
+        except _sc.SessionControlError:
+            if "manager_unknown" not in changed:
+                changed = [*changed, "manager_unknown"]
         if changed:
             doomed.append((q, changed))
     for q, changed in doomed:

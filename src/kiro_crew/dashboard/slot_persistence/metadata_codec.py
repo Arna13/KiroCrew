@@ -1187,6 +1187,14 @@ FIELDS: tuple[Field, ...] = (
             "it after the build when lineage corroborates"
         ),
     ),
+    # NO ``manager`` row, deliberately, and not beside ``created_by``: the two look
+    # alike and are stored in opposite places. The crew log is the ONLY store for who
+    # manages a session -- ``session_control.rebuild_managers_from_log`` reads it from
+    # the log and re-validates it before publishing -- so a copy on this line would be
+    # written on every save, read on every restore and then overwritten every time. A
+    # field nobody trusts is worse than no field: it would itself be the way a revoked
+    # manager came back, because a line can outlive the grant it names. ``created_by``
+    # stays because nothing else records it.
     Field(
         "folder_id",
         _ALL,
@@ -1670,6 +1678,16 @@ def apply(
     reader's own rollback owns the slot it created.
     """
     applied = AppliedMeta(slot=slot, purpose=purpose, meta=meta)
+    # UNRESOLVED until the crew log is read. This line carries no manager -- the log is
+    # the only store -- so a slot hydrated from it has no established manager yet, and
+    # an empty field here would otherwise read as the decided answer "the creator holds
+    # it". Set for EVERY hydrating purpose and cleared only by
+    # ``session_control.resolve_slot_manager`` on an authoritative read, which is what
+    # makes a build path that forgets that read fail closed: session control refuses the
+    # verbs whose authorization reads the manager instead of handing a revoked giver its
+    # reach back. Set BEFORE the field table runs, so a row that raises still leaves the
+    # slot denied rather than half-built and servable.
+    slot._manager_unresolved = True
     read = _Read(state=state, slot=slot, meta=meta, purpose=purpose, applied=applied)
     for row in FIELDS:
         if row.read is not None and purpose.purpose in row.purposes:
