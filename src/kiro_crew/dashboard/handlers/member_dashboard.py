@@ -229,6 +229,13 @@ async def api_member_dashboard(request: web.Request) -> web.Response:
         # behind the same owner check: a staged page carries this crewmate's fold
         # values exactly as the live one does, so a route of its own would be a second
         # place to get that gate right. `instance.preview_url` builds this link.
+        #
+        # A STAGED COMPOSED PACKAGE is asked about first, and both readers answer
+        # ``None`` for the other's payload, so at most one page comes back -- never
+        # the wrong kind drawn as the one that was staged.
+        staged_package = await _run(lambda: instance.staged_package_preview(slug))
+        if staged_package is not None:
+            return await _staged_package_body(request, slug, _member, staged_package, locale)
         staged = await _run(lambda: _preview_record(slug))
         if staged is None:
             return web.json_response(
@@ -390,6 +397,105 @@ async def _package_body(
         "blocks": blocks,
         "missing": missing,
         "read": read,
+    }
+    rendered = await _run(
+        lambda: _minted_package_page(slug, package, read, theme=_page_theme(), title=member)
+    )
+    if rendered is not None:
+        body["rendered_html"] = rendered
+    return web.json_response(body)
+
+
+async def _staged_package_body(
+    request: web.Request,
+    slug: str,
+    member: str,
+    staged: Any,
+    locale: str,
+) -> web.Response:
+    """The page a crewmate COMPOSED but nobody has approved yet, rendered for a look.
+
+    :func:`_package_body` without the push. A staged package is not this crewmate's
+    dashboard -- no artifact is bound to it and the live page is untouched -- so there
+    is nothing for a fold advance to push to, and arming a controller from here would
+    stream a page the person may be about to decline. The values are read ONCE, for
+    this response, through a :class:`LivePage` built with no hub: the same code path
+    :func:`_package_body` falls into when there is no hub to arm.
+
+    ``instance_version`` is 0 and ``package.version`` is 0 because staging wrote
+    neither. A reader that saw either move would believe the page had been installed,
+    which is the thing the staging gate exists to prevent. ``preview: true`` is the
+    key a reader tells this body apart by, as it is on the template preview above.
+    """
+    from kiro_crew import dashboard_package_render as render
+    from kiro_crew.artifact_store import dashboard_package as pkg
+    from kiro_crew.dashboard.handlers import member_dashboard_push as push
+
+    try:
+        package = pkg.parse_package(staged.content)
+    except Exception:
+        # Staged bytes that no longer parse. Answered as "nothing is staged", which is
+        # the answer the agent can act on: save it again.
+        logger.warning("dashboard: %r's staged package no longer parses", slug, exc_info=True)
+        return web.json_response(
+            {"error": "nothing is staged to preview", "code": "no_preview"}, status=404
+        )
+    if _package_names_unsafe(package):
+        # THE READ'S OWN NAME RULE, applied to a staged page too. The save route
+        # refuses such a package outright, so this is the older-staging-file case --
+        # and a whole read is refused rather than a name rewritten, for
+        # :func:`_unsafe_names`' reason.
+        return web.json_response(
+            {"error": "nothing is staged to preview", "code": "no_preview"}, status=404
+        )
+    model = pkg.model_of(package, slug="", version=0)
+    if not _owns_package(slug, model):
+        # THE PUSH PATH'S OWN OWNER RULE, asked here for its reason: a package bound
+        # to another crewmate, or to a session slot, is not this crewmate's to be
+        # shown filled with this crewmate's fold values. The save route stamps the
+        # binding from the vetted caller, so this is the older-staging-file case.
+        return web.json_response(
+            {"error": "nothing is staged to preview", "code": "no_preview"}, status=404
+        )
+    slot = await _run(lambda: _dashboard_slot(member, slug))
+    page = push.LivePage(
+        slug,
+        member,
+        model,
+        slot=slot,
+        state=None,
+        loop=None,
+        redact=_page_safe,
+        # NO RE-READ. A re-read resolves the crewmate's BINDING to a stored artifact,
+        # and a staged page is precisely the page that has none -- so a refresh from
+        # here would quietly swap the page being looked at for the live one. Nothing
+        # calls it while no push is armed; passing the artifact reader anyway would be
+        # a loaded gun for the next caller that arms one.
+        reread=lambda _slug: None,
+        locale=locale,
+        display_seam=render.display_values,
+        patch_seam=render.block_patch,
+        package=package,
+    )
+    await _run(page.ensure_subscribed)
+    blocks, missing = page.blocks()
+    read = page.read()
+    body: dict[str, Any] = {
+        "state": "live",
+        "preview": True,
+        "instance_version": 0,
+        "package": {
+            "slug": "",
+            "version": 0,
+            "layout_fingerprint": str(model.layout_fingerprint),
+            "bound_to": str(model.bound_to),
+        },
+        "page_message": _page_message_type(),
+        "page_patch_message": _page_patch_message_type(),
+        "blocks": blocks,
+        "missing": missing,
+        "read": read,
+        "staged_ms": int(staged.staged_ms),
     }
     rendered = await _run(
         lambda: _minted_package_page(slug, package, read, theme=_page_theme(), title=member)

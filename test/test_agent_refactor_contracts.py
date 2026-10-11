@@ -112,10 +112,11 @@ BASE_SURFACE: dict[str, str] = {
     "_MCP_REGISTRY_TYPE": "value str 06c63899e16a32c5",
     "_MEMBER_DASHBOARD_GRANTS": "value tuple 217848c3e96f9a58",
     # Moved for ``@kirocrew-panel/dashboard_types``, the dynamic dashboard's data-type
-    # catalog. The readable pin for this tuple is
+    # catalog, and again for ``dashboard_save``, the verb that stages a composed page.
+    # The readable pin for this tuple is
     # ``test_the_member_grants_extend_the_conductor_grants``, which spells the whole set
     # out; this digest is the byte-level half and moves with it.
-    "_MEMBER_PANEL_GRANTS": "value tuple bf985b450bc18937",
+    "_MEMBER_PANEL_GRANTS": "value tuple fe49f85f5f3b65f6",
     "_NATIVE_PROMPT_STUB": "value str ceed0be70c1f6da8",
     "_PIPELINE_CONDUCTOR_AGENT_FILENAME": "value str 3b5e111de6d1d305",
     "_PIPELINE_CONDUCTOR_CORE_GRANTS": "value tuple 1ad9ce711e266082",

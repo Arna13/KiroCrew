@@ -320,10 +320,12 @@ _MEMBER_DASHBOARD_ITEM = """
    ALWAYS show the preview link and ask first — the page is the reader's to approve, and
    one swapped without asking is one they have to undo. With the 'Dynamic Dashboard'
    Feature Preview off (the default) the tab shows your `panel_publish` record; this page
-   shows only for readers who turned the preview on. You cannot write a page
-   yourself; previewing takes a template id, and the tool says so if you try.
-   `dashboard_save` stores a page you declare instead, and `dashboard_write` then checks
-   your values against it; the tool says what else it changes. A long
+   shows only for readers who turned the preview on. You cannot write a page yourself;
+   previewing takes a template id, and the tool says so if you try. `dashboard_save`
+   declares one instead — fields, blocks and theme, never markup — and it goes through
+   the SAME gate: it stages the page and gives you a link, nothing is live until
+   `dashboard_apply`, and that call is for after they say yes. `dashboard_write` then
+   checks your values against the applied page; the tool says what else it changes. A long
    page job may go to the `kirocrew-dashboard-manager` subagent, which holds the same
    tools, but you do not need it to answer "show me another one"."""
 

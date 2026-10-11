@@ -1416,3 +1416,103 @@ async def test_a_package_page_never_reaches_the_template_execution_gate():
     # The structural half of the claim: a validated package has no key that can carry
     # markup or script, so there is no stored page for that gate to be asked about.
     assert set(dp.validate_package(package())) == {"kind", "bound_to", "model", "view", "theme"}
+
+
+# --------------------------------------------------------------------------
+# the STAGED page: rendered for a look, and pushing nothing
+# --------------------------------------------------------------------------
+
+
+def _stage(content: str | None = None) -> None:
+    """Stage a composed package for this crewmate, the way a save does."""
+    from kiro_crew.dashboard_templates import instance as instance_store
+
+    instance_store.stage_package_preview(
+        SLUG,
+        content=(
+            content if content is not None else dp.canonical_package_content(json.dumps(package()))
+        ),
+    )
+
+
+def _preview_q() -> str:
+    return f"{_q()}&preview=1"
+
+
+async def test_a_staged_package_renders_through_the_preview_read(store):
+    """The link a save hands back has to show something, so this read composes it.
+
+    Nothing is stored -- there is no artifact at all here -- and the page still
+    draws, which is what makes "have a look at this one" cost nothing when the
+    answer is no.
+    """
+    _stage()
+    hub = _Hub()
+    async with _client(hub) as client:
+        resp = await client.get(_preview_q())
+        assert resp.status == 200, await resp.text()
+        body = await resp.json()
+    assert body["preview"] is True
+    assert set(body["blocks"]) == {"prs", "runs"}
+    assert body["rendered_html"], "the staged page composed no document"
+    assert store.list(kind="dashboard") == [], "a preview read stored a package"
+
+
+async def test_a_staged_package_reports_no_version_because_staging_wrote_none(store):
+    """A reader that saw a version move would believe the page had been installed."""
+    _stage()
+    async with _client(_Hub()) as client:
+        body = await (await client.get(_preview_q())).json()
+    assert body["instance_version"] == 0
+    assert body["package"]["version"] == 0
+    assert body["package"]["slug"] == ""
+
+
+async def test_a_staged_package_arms_no_push(store):
+    """A page nobody has approved pushes nothing.
+
+    The controller exists to stream a crewmate's LIVE dashboard. Arming it from a
+    preview read would push a page the person may be about to decline -- and the
+    push resolves a crewmate's binding to refresh itself, which a staged page does
+    not have, so what it refreshed to would be some other page entirely.
+    """
+    _stage()
+    hub = _Hub()
+    async with _client(hub) as client:
+        assert (await client.get(_preview_q())).status == 200
+    assert _live_page(SLUG) is None, "the preview read armed a live push"
+    assert hub.frames == []
+
+
+async def test_the_live_read_is_untouched_while_a_page_is_staged(store, saved):
+    """The gate's other half: staging does not disturb the page being read.
+
+    With a package already applied, a staged second page must change nothing about
+    the ordinary read -- same slug, same version, no ``preview`` key. A save that
+    leaked into this body would be the "live immediately" behaviour under another
+    name.
+    """
+    second = package()
+    second["theme"] = {"tokens": {"--accent": "oklch(0.2 0.01 0)"}}
+    _stage(dp.canonical_package_content(json.dumps(second)))
+    async with _client(_Hub()) as client:
+        body = await (await client.get(_q())).json()
+    assert "preview" not in body
+    assert body["package"]["slug"] == saved.slug
+    assert body["package"]["version"] == saved.version
+
+
+async def test_a_staged_package_bound_elsewhere_is_not_shown_here(store):
+    """The push path's owner rule, asked on the preview read too.
+
+    A package bound to another crewmate, or to a session slot, must not be drawn
+    full of THIS crewmate's fold values. The save route stamps the binding from the
+    vetted caller, so this is the older-staging-file case.
+    """
+    theirs = package()
+    theirs["bound_to"] = "crewmate:someone-else"
+    _stage(dp.canonical_package_content(json.dumps(theirs)))
+    async with _client(_Hub()) as client:
+        resp = await client.get(_preview_q())
+        assert resp.status == 404, await resp.text()
+        assert (await resp.json())["code"] == "no_preview"
