@@ -159,9 +159,11 @@ class TestSnapshotRead:
 class TestSlotPayload:
     def test_on_by_default_serializes_the_strip(self) -> None:
         payload = _slot().to_dict()
+        # Three chips in total, pull requests first: both PRs and the newest
+        # issue; the other issue is behind "+1".
         assert [link["url"] for link in payload["source_links"]] == [
             *reversed(PRS),
-            *reversed(ISSUES),
+            ISSUES[-1],
         ]
         assert payload["source_links_total"] == 4
 
@@ -191,7 +193,7 @@ class TestSerializeSlots:
         state._slots = {"s1": _slot("s1"), "s2": _slot("s2")}
 
         _set_config(monkeypatch, True)
-        assert [len(p["source_links"]) for p in state.serialize_slots()] == [4, 4]
+        assert [len(p["source_links"]) for p in state.serialize_slots()] == [3, 3]
 
         _set_config(monkeypatch, False)
         assert [p["source_links"] for p in state.serialize_slots()] == [[], []]
@@ -224,7 +226,9 @@ class TestSerializeSlots:
         _set_config(monkeypatch, False)
         assert state.serialize_slot(slot)["source_links"] == []
         _set_config(monkeypatch, True)
-        assert len(state.serialize_slot(slot)["source_links"]) == 4
+        # Two PRs and two issues: the shared three-chip budget keeps both PRs
+        # and the newest issue.
+        assert len(state.serialize_slot(slot)["source_links"]) == 3
 
 
 class TestCheckRefreshFeed:

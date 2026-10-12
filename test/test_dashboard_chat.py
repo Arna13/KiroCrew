@@ -231,26 +231,26 @@ class TestChatSlot:
         assert d["pending_approval"] is False
 
     def test_issue_links_do_not_crowd_out_pr_chips(self):
-        """Each kind gets its own chip budget, so a PR chip is never starved.
+        """The chip budget is shared, but pull requests claim it first.
 
-        A single shared budget sliced before the kind filter would drop the PR
-        entirely once three issues are mentioned first -- and, because the
-        check-status refresh reads the same slice, would also stop scheduling
-        that PR's CI updates.
+        The slice is taken after changes are grouped ahead of issues, so a PR
+        chip is never starved however many issues the session mentions -- and,
+        because the check-status refresh reads the same slice, that PR's CI
+        updates keep being scheduled too. Issues fill only the slots left over.
         """
         slot = _ChatSlot("s1")
         pr_url = "https://github.com/acme/widgets/pull/12"
         issue_urls = [f"https://github.com/acme/widgets/issues/{n}" for n in (1, 2, 3, 4)]
-        # The issues are mentioned FIRST, so a shared budget would spend all of
-        # it before ever reaching the pull request.
+        # The issues are mentioned FIRST, so a slice taken in mention order
+        # would spend the whole budget before ever reaching the pull request.
         slot.append("assistant", "\n".join([*issue_urls, pr_url]), ts="t1")
 
         payload = slot.to_dict()
         serialized = payload["source_links"]
-        assert pr_url in [link["url"] for link in serialized]
         assert [link["url"] for link in serialized if link["kind"] == "change"] == [pr_url]
-        # Three of the four issues fit their own budget; the fourth overflows.
-        assert len([link for link in serialized if link["kind"] == "issue"]) == 3
+        # The PR takes one of the three slots; two issues fit in the rest.
+        assert len([link for link in serialized if link["kind"] == "issue"]) == 2
+        assert len(serialized) == 3
         assert payload["source_links_total"] == 5
 
     def test_jira_issue_links_scanned_from_user_messages(self):
@@ -410,7 +410,7 @@ class TestChatSlot:
         assert beyond_cap.reads == 0
 
     def test_pr_source_links_are_ordered_most_recently_mentioned_first(self):
-        """The chip budget serializes only the first few links per kind, so a
+        """The chip budget serializes only the first few links, so a
         first-mention order handed those slots to the oldest pull requests and
         collapsed the one being worked on into the "+N" pill."""
         slot = _ChatSlot("s1")
@@ -555,7 +555,7 @@ class TestChatSlot:
             "https://github.com/acme/widgets/pull/7",
         ]
 
-    def test_serialized_chips_keep_the_newest_links_of_each_kind(self):
+    def test_serialized_chips_keep_the_newest_pull_requests(self):
         slot = _ChatSlot("s1")
         for number in (1, 2, 3, 4, 5):
             slot.append("assistant", f"https://github.com/acme/widgets/pull/{number}")
@@ -567,10 +567,11 @@ class TestChatSlot:
         changes = [x["number"] for x in serialized if x["kind"] == "change"]
         issues = [x["number"] for x in serialized if x["kind"] == "issue"]
 
-        # Three per kind, newest first, and the total still counts everything so
-        # the "+N" pill stays honest.
+        # Three in total, newest pull requests first; with the budget spent on
+        # PRs every issue folds into "+N", and the total still counts everything
+        # so that pill stays honest.
         assert changes == [5, 4, 3]
-        assert issues == [13, 12, 11]
+        assert issues == []
         assert payload["source_links_total"] == 9
 
     def test_to_dict_scans_pr_source_links_once(self, monkeypatch):

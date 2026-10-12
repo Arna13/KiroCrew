@@ -1807,9 +1807,10 @@ _QUESTION_RETIRING_ROLES = frozenset({"user"})
 #: requested while the answer is still streaming (``to_dict``'s ``last_turn_ts``).
 _PROMPT_ROLES = frozenset({"user", "inject"})
 _MAX_SOURCE_LINKS_PER_SLOT = 64
-# How many source links each slot payload actually serializes (the sidebar
-# renders at most this many chips). Shared with the periodic check-status
-# refresh so the driver and the serializer cannot drift.
+# How many source links each slot payload actually serializes, ACROSS kinds:
+# the sidebar renders at most this many chips per session card, pull requests
+# and issues together. Shared with the periodic check-status refresh so the
+# driver and the serializer cannot drift.
 _SERIALIZED_SOURCE_LINKS_PER_SLOT = 3
 # Hard ceiling on a slot's persisted dismissed-source-link set. Additions are
 # gated on an identity being one of the transcript's DISTINCT derived links, so
@@ -1824,18 +1825,21 @@ _MAX_DISMISSED_SOURCE_LINKS = 512
 
 
 def _budgeted_source_links(links: list[dict]) -> list[dict]:
-    """Apply the sidebar chip budget PER KIND, changes first.
+    """Apply the sidebar chip budget: ``_SERIALIZED_SOURCE_LINKS_PER_SLOT`` chips
+    in total, pull requests first.
 
-    Pull requests and issues each get their own
-    ``_SERIALIZED_SOURCE_LINKS_PER_SLOT`` allowance. A single shared budget
-    sliced before the kind filter would let three mentioned issues crowd every
-    PR chip out of the sidebar -- and, because the check-status refresh reads
-    the same slice, would also stop scheduling that PR's CI status updates.
-    Budgeting per kind keeps pre-existing pull-request behaviour unchanged and
-    makes issues purely additive.
+    One shared allowance caps what a session card shows at three chips,
+    however many links the session mentions; the rest sit behind the "+N"
+    overflow chip. The slice is taken AFTER grouping changes
+    ahead of issues, so an issue can only ever occupy a slot no pull request
+    wanted: a session with three pull requests and a dozen issues shows three
+    PR chips and folds every issue into "+N". That ordering is what keeps the
+    check-status refresh honest too -- it reads this same slice, so every PR
+    chip the card renders is also the one whose CI status gets scheduled, and a
+    mentioned issue can never push a PR out of either.
     """
     changes, issues = _source_links_by_kind(links)
-    return changes[:_SERIALIZED_SOURCE_LINKS_PER_SLOT] + issues[:_SERIALIZED_SOURCE_LINKS_PER_SLOT]
+    return (changes + issues)[:_SERIALIZED_SOURCE_LINKS_PER_SLOT]
 
 
 def _source_links_by_kind(links: list[dict]) -> tuple[list[dict], list[dict]]:
@@ -5870,9 +5874,9 @@ class _ChatSlot:
     ) -> dict:
         """Every source link this slot carries — the unbudgeted read.
 
-        ``to_dict`` serializes at most ``_SERIALIZED_SOURCE_LINKS_PER_SLOT`` per
-        kind, so the sidebar's "+N" overflow chip has nothing on the client to
-        expand into. This is what that expand fetches.
+        ``to_dict`` serializes at most ``_SERIALIZED_SOURCE_LINKS_PER_SLOT``
+        links in total, so the sidebar's "+N" overflow chip has nothing on the
+        client to expand into. This is what that expand fetches.
 
         Ordering repeats the budgeted slice's grouping (changes, then issues) so
         the chips already on screen keep their positions and the revealed ones
