@@ -593,6 +593,16 @@ Two mechanisms make "the split changed nothing for a caller" a tested claim rath
   Governance-home path writes are intentionally outside this module and are
   enforced by the OS sandbox. Structure is the point: the product name in a path,
   search pattern, or commit message is not itself a verdict.
+- `chmod_floor.py` — the argv-structural floor under the world-rwx `chmod` catalog
+  row, gated on that row's own opt-out: for each command and nested payload, is
+  `chmod` the program that runs, and is the first operand after its options (at any
+  position, in any packing) a world-rwx numeric mode. A union with the row's regex,
+  never a replacement. It reads the argv through the shell reader's frame walk and
+  argv attribution and the shared data-consumer vocabulary, so a `chmod` word that is
+  a search tool's argument is never read as an invocation. It sits beside
+  `perm_verb_mention.py` at the top of the order: nothing in
+  the package imports it but the facade's evaluator, through `_submodule`. Its own
+  file because `argv_floor.py` is at the per-module line cap.
 - `readonly_bash.py` — the read-only bash classifier: `is_read_only_bash` / `unsafe_bash_reason`, the last gate before a shell command auto-approves with no human prompt under `--approval reads` / trust-reads and in the tool gate's `read-only` tier (`hook_runtime/gate_tiers.py`), together with every table that verdict rests on -- the prefix allowlist, the per-verb write, exec and indirection flag denylists, the git ref and remote subcommand rules, the positive option accept-lists for the four tools whose surface is small enough to enumerate (`sort`, `date`, `file`, `hostname`), and the shell-expansion readers that decide whether a token's real spelling is knowable before it runs. Deny-by-default: a command has to be RECOGNISED as read-only, so a spelling nobody thought of prompts rather than passes, and every table entry carries the measurement that put it there. It imports nothing from the package and nothing from the dashboard, which is what lets `hooks.py` import it at module top; its two consumers are `dashboard/chat_runner.py` (the approval flow, where the reason text becomes the refusal card) and the gate's `read-only` tier (the auto-approve branch, reading it through `hooks.py`). It is NOT a facade submodule and is reached by its own path, for two reasons. It is not a piece of the split: the classifier came here from `dashboard/state.py`, where no caller or patch site ever reached it as `kiro_crew.security.<name>`, so the facade has nothing to preserve for it and adding its private tables to the frozen manifest would widen the facade's API for no caller. And it answers a different question from the tiers the facade fronts: those decide whether a command is DENIED, and `hooks.on_tool_call` runs every one of them before it asks this module whether the survivor is read-only enough to skip the prompt -- a verdict layer above the deny tiers, not one of them, so it does not belong in the deny tiers' dependency order (which has `perm_verb_mention.py` above the argv floor). Pinned by `test_trust_reads.py`.
 
 ## Threat Model
@@ -2096,6 +2106,121 @@ stays exempt: it has no in-place flag.
 The narrowing records its own SEL `mechanism` value, `_PERM_VERB_MENTION`, distinct
 from the glob carve-out map's `_DENY_EXCEPTIONS`; the two share one emitter and nothing
 else, and the audit trail exists to answer which one allowed a command.
+
+### The world-rwx `chmod` row is enforced on the argv (`security/chmod_floor.py`)
+
+The `local-destructive-chmod-777` row is the literal `chmod 777.*`. A literal names one
+SPELLING, and every option between the program and the mode re-spells the identical
+permission change: `chmod -R 777 ~`, a packed `-Rv`/`-vR`/`-Rvfc`, a split `-R -v`, a
+long `--recursive`, its abbreviation `--rec`, `--` before the mode, `0777` for `777`.
+Each of those was measured taking the gate's ALLOW while the bare spelling was refused.
+Widening the regex is the wrong instrument: it either pins the few option spellings its
+author enumerated (and `-Rvfc` still passes) or opens the kind of gap the ReDoS screens
+on the regex tier exist to refuse.
+
+So the row gains an argv-structural floor (`chmod_floor._is_chmod_world_rwx`), the same
+enforcement shape the self-protection rows have and the shape the `rm` rows take in
+their own change: for every command in the input and in every nested shell payload
+(`bash -c`, `eval`, `$( )`, `<( )`, heredocs — the frame walk is shared), **is `chmod`
+the program that runs, and does its mode operand grant all nine permission bits?** The
+words are read the way the shell and then `chmod` read them. A redirection is the
+shell's and never reaches `chmod` — `2>/dev/null`, `>file`, `&>/dev/null`, `2>&1`, and
+any operator with no target in its own word (a bare `>`, `2>`, or one glued to the end
+of an option or of the program word: `--recursive> /dev/null`, `chmod> /dev/null`) takes
+the NEXT word as its target — so `chmod -R --recursive> /dev/null 777 ~` hands `chmod` a
+`777` mode. Each word is then brace-expanded as bash expands it before `chmod` runs
+(`_expand_braces`: `{00777,0755}` is two words with `00777` first, `{0..0}0777` is
+`00777`, `{state}` and `${x}` stay literal; past 64 words the reader refuses rather than
+enumerates). Of what remains, options are recognised by shape at any position, since
+GNU `chmod` permutes them; `--` ends them; a `-`-led MODE word (`-x`, `-w,+777`,
+`-+777` — `_is_dash_mode`) is the mode and turns every operand into a file, so `chmod
+-x *` removes a bit from the files and is allowed; `--reference` (or an unambiguous
+abbreviation) means the command has no mode operand; otherwise the first operand is the
+mode. **Both readings are taken, GNU's and BSD's, and either grant refuses**: BSD
+`chmod` (macOS) stops reading options at the first operand, so `chmod -v 777
+--reference=t f` and `chmod -v 777 -x f` set `777` there whatever GNU makes of them, and
+the gate cannot know which binary the line reaches. The gate lowercases text before the
+floor sees it, so `-r` is read as the option `-R` (keeping the next operand as the
+mode, the fail-closed choice) unless more mode characters follow (`-rw`, `-rwx,+777`).
+
+The mode is then EVALUATED, not matched (`_mode_grants_world_rwx`), with GNU
+`mode_compile`'s grammar, measured case by case on a file at mode `000`: an all-octal mode
+is that value with any run of leading zeros up to `07777`; anything else is a comma list
+of clauses, each an optional `[ugoa]*` and one or more operator actions, composed left to
+right — `+777` adds, `=777` sets, `-777` removes, and `=600,+777`, `+07,+0770`, `-x+777`
+all end at `777`. Octal after a who letter (`u=777`), a second action after a digit run
+(`+7+70`), an empty clause (`777,`) and a bare number inside a list (`u+x,777`) are
+INVALID and change nothing. A letter action is the symbolic grammar the issue leaves
+alone and contributes nothing — not even a removal, so `=777,u-w` is read as a grant (the
+fail-closed over-read). A mode word that is still a pathname glob after brace expansion
+(`7?7`) is refused: the filesystem decides it. A glued control operator ends the argv
+and leaves its head to `chmod` (`chmod -R 777;ls` sets `777`); a same-line assignment is
+resolved by the reader (`m=777; chmod -R $m ~` is refused).
+
+**Which `chmod` word is an invocation is decided by the program that owns it**, against
+the shell reader's data-consumer vocabulary (`_DATA_CONSUMER_PROGRAMS`): a word in
+program position, or owned by a program that EXECUTES its arguments — `sudo`, `env`,
+`nice`, `time`, `command`, `exec`, `xargs`, `find -exec`, `busybox`, `docker exec`, and
+any wrapper nobody enumerated — is read as the invocation; a word owned by a data
+consumer is that program's data, and the words after it are that program's, not a mode
+(`grep -rn chmod src/`, `ls -l /bin/chmod`, `rg -n chmod *`, `sed -i 's/chmod -R 777/…/'
+f`). The WHOLE consumer vocabulary is used here, not the narrower set the inert-mention
+narrowing accepts: `rg`, `sed`, `awk` and `echo` are excluded there because they can emit
+or spawn — which matters for exonerating a row the regex has already matched — but none
+of them hands its argv to `chmod`, and reading `rg`'s bare `*` as a mode that could expand
+to `777` refused an ordinary search (measured by the security-scope lane). The regex row
+keeps catching the literal under an emitter (`echo chmod 777 ~`) on its own, and the
+mention narrowing keeps deciding whether that is inert. A word carrying a glued control
+operator (`f|chmod`) is a program again, because `_argv_programs` opens a command only
+between whole tokens and `_program_basename` takes the trailing segment.
+
+**Each argv word is split the way bash lexes it** before it is read (`_split_word`): an
+attached redirection comes off — `+777>/dev/null` is the word `+777` plus a redirect
+(measured: it sets `777`), while an all-digit prefix is the descriptor and leaves no word
+(`777>/dev/null` is fd 777 redirected; measured: `chmod: missing operand`) — and a glued
+`;`, `|`, `&` or `&&` is a command boundary, so `chmod -R 777 ./project&echo
+--reference=t` hands `chmod` the file `./project` and the next command's `--reference`
+is not its (measured: the mode lands). `_ends_argv` declines to cut at a glued `&`
+because a redirection's `>&` carries one; here the redirection is split off first, so
+what is left of an `&` is bash's own boundary.
+
+**A heredoc body that is only READ is data to this floor.** The shared walk folds a body
+into its frame as commands, because it cannot tell `bash <<EOF` from `cat <<EOF`; on its
+own that refused every commit message, spec bullet and fixture that names a flag
+spelling (`git commit -F - <<'EOF'`, `git commit -m "$(cat <<'EOF' …)"`, `cat >> spec.md
+<<'EOF'`, `tee fixture.txt <<'EOF'` — measured by the security-scope lane). So this floor
+alone sets the body aside (`_without_data_heredoc_body`) when the frame holds exactly one
+heredoc, its consumer reads stdin as data (`_DATA_CONSUMER_PROGRAMS` minus `sed`, `awk`,
+`less`, `more`, plus `git` and `gh`), and nothing in any frame can run printed text
+(`_can_run_printed_text`): no shell, `eval`, `source`, `.` or `xargs`, and no expansion in
+program position or under a program outside that vocabulary. `cat <<EOF | bash`,
+`sudo "$(cat <<EOF …)"`, `m=$(cat <<EOF …); $m` and `sed -f - <<EOF` keep the body as
+commands. The body ends at the first line that is exactly the tag, as bash ends it, so a
+command after it is read. The shared walk is untouched: the credential-mint floor keeps
+its own reading of the same prose.
+
+**Union, gated, catalog untouched.** The row stays in the regex tier (a text the
+tokenizer cannot see into is still caught; a reader error in the floor is a `False`,
+never a bypass of the literal), the floor runs only while the row's pattern is in the
+effective set (an operator opt-out of the row disables both), and the refusal reports
+the row's own pattern with the structural note on its second line and the
+`component=argv-floor` diagnostic last — the pattern, the id, the governance pin map and
+the golden fixture are byte-for-byte unchanged. A cheap pre-filter (the literal word, or
+a glue character that could de-quote into it) is a necessary condition for a hit, never
+the verdict; its marginal cost on an ordinary command is under 0.1 ms.
+
+**Residuals, pinned to their current answer** in `test_chmod_world_rwx_floor.py`:
+symbolic world-rwx (`a+rwx`, `a=rwx`, `ugo=rwx`, and a letter grant beside a number,
+`u+rwx,+077`) is a different grammar, relative to the current bits and the umask, and the
+row is about the numeric mode; a filename a glob expands to (`chmod 644 -- *` beside a
+file named `-x,+777`) is the filesystem's; a value that needs the line run to be known
+(`$((777))`, `$(echo 777)`, an unresolved `$M`) is outside every static floor in this
+package, as it is at program position; a glob or expansion in the PROGRAM word
+(`ch?od`, `${X}mod`) names a command the filesystem or environment decides; and a mode
+change inside an interpreter payload (`os.chmod(…, 0o777)`) is not a shell argv. A
+`bash -c` named in prose inside a read-only heredoc is still descended by the shared walk
+and refused, over-strictly. The regex row's own prefix quirk (`chmod 7770` matches the
+literal) is the row's, not the floor's, and is left as it is.
 
 ### Sanctioned read channels over fenced data
 
