@@ -32,7 +32,7 @@
  12 test_acp_refactor_runtime_start.py
   8 test_acp_refactor_transport_framing.py
   3 test_acp_register_before_send.py
-115 test_acp_runtime.py
+113 test_acp_runtime.py
  10 test_acp_runtime_exit_watcher.py
   4 test_acp_runtime_failed_start_reap.py
   7 test_acp_sandbox_init_classification.py

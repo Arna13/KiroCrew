@@ -77,6 +77,7 @@ from kiro_crew.mcp_cleanup import KIROCREW_BIN_MCP_SERVERS
 from kiro_crew.mcp_gateway.claim import STUB_SESSION_TOKEN_ENV
 from kiro_crew.metrics.events import CHILD_PERMISSION_DENIED
 from kiro_crew.start_priority import StartPriority
+from kiro_crew.testing.wait import async_wait_until
 
 # ── Harness ──
 
@@ -1036,7 +1037,9 @@ async def _stop_reader(task: asyncio.Task) -> None:
         pass
 
 
-async def _await_routed(rt: AcpRuntime, *session_ids: str, timeout: float = 5.0) -> dict[str, int]:
+async def _await_routed(
+    rt: AcpRuntime, *session_ids: str, timeout: float | None = None
+) -> dict[str, int]:
     """Wait until the runtime has an in-flight request for each session, and
     return the ``{session_id: request_id}`` map.
 
@@ -1059,24 +1062,35 @@ async def _await_routed(rt: AcpRuntime, *session_ids: str, timeout: float = 5.0)
     Waiting on ``_routed_requests`` is the right signal: ``send_request``
     populates it in the same synchronous block that allocates the id
     (``runtime.py``), so the entry is visible as soon as the request exists.
+
+    ``timeout`` is a lost-run bound, not the barrier (rule D1): by default half
+    the running test's timeout, so a driver that never sends fails here by name
+    instead of at the runner's kill. It is NOT a budget for how fast the driver
+    reaches ``send_request``: that is the bet the hand-rolled 5 s poll this
+    replaced was making, and it lost on loaded Windows runners.
     """
-    deadline = time.monotonic() + timeout
+    assert session_ids, "name at least one session to wait for"
     wanted = set(session_ids)
-    while True:
-        routed = {sid: rid for rid, sid in rt._routed_requests.items()}
-        if wanted <= routed.keys():
-            return routed
-        if time.monotonic() >= deadline:
-            raise AssertionError(
-                f"timed out after {timeout}s waiting for in-flight requests for "
-                f"{sorted(wanted)}; currently routed: {routed}"
-            )
-        # Yield rather than spin: the driver task needs the loop to progress.
-        await asyncio.sleep(0.001)
+
+    def routed_now() -> dict[str, int]:
+        return {sid: rid for rid, sid in rt._routed_requests.items()}
+
+    def all_routed() -> dict[str, int] | None:
+        routed = routed_now()
+        return routed if wanted <= routed.keys() else None
+
+    return await async_wait_until(
+        all_routed,
+        timeout=timeout,
+        describe=lambda: (
+            f"waiting for in-flight requests for {sorted(wanted)}; "
+            f"currently routed: {routed_now()}"
+        ),
+    )
 
 
 async def _await_pending(
-    rt: AcpRuntime, *, exclude: set[int] | None = None, timeout: float = 5.0
+    rt: AcpRuntime, *, exclude: set[int] | None = None, timeout: float | None = None
 ) -> int:
     """Wait for an in-flight control-plane request and return its id.
 
@@ -1095,23 +1109,34 @@ async def _await_pending(
     allocates the id (``runtime.py``), so the entry is visible as soon as the
     request exists. ``exclude`` drops ids the caller already consumed, so a test
     driving a second request cannot pick up a leftover entry from the first.
+
+    The pre-request path is not short, and its length is the host's. Before
+    ``create_session`` reaches ``_send_and_await`` it hops off the loop to build
+    the session's MCP array and read the agent spec for the unresolved-ref guard;
+    under the suite's per-test agents dir that spec does not exist yet, so the
+    read self-heals it (``ensure_agent_materialized`` -> ``rebuild_agent_config``,
+    sixteen file writes). A fixed 5 s ceiling on that hop lost on loaded Windows
+    runners with ``currently pending: []``. ``timeout`` is therefore a lost-run
+    bound only (rule D1), half the test's timeout by default, never a bet on how
+    fast the host writes files.
     """
     seen = exclude or set()
-    deadline = time.monotonic() + timeout
-    while True:
-        fresh = [rid for rid in rt._pending_requests if rid not in seen]
-        if fresh:
-            # These tests keep exactly one control-plane request in flight, so
-            # more than one means the id being returned is a coin flip.
-            assert len(fresh) == 1, f"expected one in-flight request, got {fresh}"
-            return fresh[0]
-        if time.monotonic() >= deadline:
-            raise AssertionError(
-                f"timed out after {timeout}s waiting for an in-flight request; "
-                f"currently pending: {sorted(rt._pending_requests)}"
-            )
-        # Yield rather than spin: the caller needs the loop to progress.
-        await asyncio.sleep(0.001)
+
+    def fresh_now() -> list[int]:
+        return [rid for rid in rt._pending_requests if rid not in seen]
+
+    fresh = await async_wait_until(
+        fresh_now,
+        timeout=timeout,
+        describe=lambda: (
+            "waiting for an in-flight request; "
+            f"currently pending: {sorted(rt._pending_requests)}"
+        ),
+    )
+    # These tests keep exactly one control-plane request in flight, so more than
+    # one means the id being returned is a coin flip.
+    assert len(fresh) == 1, f"expected one in-flight request, got {fresh}"
+    return fresh[0]
 
 
 # ── The _await_routed helper itself ──
