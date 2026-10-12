@@ -46,6 +46,35 @@ export const DEFAULT_BOTTOM_THRESHOLD = 100
  */
 export const SELF_SCROLL_EPSILON = 2
 
+/**
+ * The scroller's `overflow-anchor` value for a given follow state.
+ *
+ * The scroller carries native `overflow-anchor: auto`, which the browser uses
+ * to keep a scrolled-up reader's content visually stable when height changes
+ * ABOVE them -- the primary mechanism for that case, with the hook's own anchor
+ * (see shiftCompensation.ts) a fallback for an unmounted anchor node and the
+ * whole of it on WebKit, which ships none.
+ *
+ * While follow is ARMED the app's bottom pin owns the position outright, so
+ * native anchoring has nothing to contribute there -- and on Firefox it does
+ * worse than nothing. Gecko's anchoring picks an anchor node and, when the TAIL
+ * grows under a reader pinned at the bottom, holds that node by adjusting
+ * scrollTop UPWARD, away from the end. That adjustment fires a scroll event
+ * whose scrollTop lands outside SELF_SCROLL_EPSILON of the pin's last write, so
+ * the follow guard reads it as the reader scrolling up and releases the pin for
+ * the rest of the turn -- the transcript stops tracking new output. Chromium's
+ * anchoring cooperates with a bottom pin and never produced this; WebKit has no
+ * anchoring to produce it.
+ *
+ * So native anchoring is turned OFF exactly while the pin owns the position and
+ * back ON the moment the reader is scrolled up, where it is needed and already
+ * relied upon. This neither adds nor removes anything for the scrolled-up case
+ * on any engine; it only stops Gecko from fighting the pin.
+ */
+export function followAnchorMode(stick: boolean): 'auto' | 'none' {
+  return stick ? 'none' : 'auto'
+}
+
 // After a genuine user scroll, suppress ResizeObserver-driven auto-pins for
 // this long. Streaming/widget growth that should "follow" happens while the
 // user is stationary at the bottom; a re-measuring widget that fires mid-fling

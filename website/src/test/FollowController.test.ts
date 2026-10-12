@@ -15,6 +15,7 @@ import {
   resolveUserScrollStick,
   evaluateAutoPin,
   atBottomEpsilon,
+  followAnchorMode,
   SELF_SCROLL_EPSILON,
   DEFAULT_BOTTOM_THRESHOLD,
   FOLLOW_REENGAGE_PX,
@@ -1058,5 +1059,20 @@ describe('resolveUserScrollStick — a clamp under an upward user input is the r
       readerIntent: 1,
       upwardInputWithinSettle: false,
     })).toBe(true)
+  })
+})
+
+describe('followAnchorMode — native scroll anchoring vs the bottom pin', () => {
+  // While follow is armed the app's bottom pin owns the position, so native
+  // scroll anchoring must stand down -- on Firefox it holds a node above the
+  // tail and drags scrollTop up off the end as new output streams, which the
+  // follow guard then reads as a user scroll-up and releases the pin.
+  it('turns native anchoring OFF while the pin owns the position', () => {
+    expect(followAnchorMode(true)).toBe('none')
+  })
+  // Scrolled up, the reader owns the position and native anchoring is the
+  // mechanism that keeps their view steady as height changes above them.
+  it('hands native anchoring back ON when the reader is scrolled up', () => {
+    expect(followAnchorMode(false)).toBe('auto')
   })
 })
