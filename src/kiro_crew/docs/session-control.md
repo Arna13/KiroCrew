@@ -12,8 +12,8 @@ The server is defined in `src/kiro_crew/mcp_dashboard.py`. Two halves:
 - **Session control** — `session_create`, `session_fork`, `session_send`,
   `session_read_message`, `session_summary`, `session_stop`, `session_end_wait`, `session_retry`,
   `session_set_model`, `session_reload`, `session_rename`, `session_close`, `session_revive`,
-  `session_history_list`, `session_broadcast`, `session_status`, `session_adopt`, `session_release`. These reach another
-  session.
+  `session_history_list`, `session_broadcast`, `session_status`, `session_adopt`,
+  `session_release`. These reach another session.
 - **Sidebar shape** — `chat_folder_tree`, `chat_folder_create`,
   `chat_folder_move`, `chat_folder_update`, `chat_folder_move_session`, `chat_folder_delete`,
   `chat_folder_file_self`, `chat_tag_list`, `chat_tag_create`, `chat_tag_update`, `chat_tag_assign`,
