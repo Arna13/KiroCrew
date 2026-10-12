@@ -38,7 +38,16 @@ advice:
 * **``run`` is single-shot.** A second ``run`` would reset ``/etc/machine-id`` and
   re-register the SSM agent under a new identity, severing the owner's only route
   to their own crew. A probe really did reach ``POST .../run`` with a token and
-  get a 200; it was inert only because of the marker this module writes.
+  get a 200; it was inert only because of the marker this module writes. The
+  marker is written as soon as a body decodes, so a payload this guest REFUSES
+  also consumes it and a caller gets one attempt rather than unlimited ones; the
+  single exception is a registration that failed, which stays retryable.
+* **The account the VM joins is checked, after it joins.** The activation in the
+  payload decides which account the node enrolls in, and nothing in the payload
+  says which account that is. So an image created with an account pin reads the
+  account back from the node's own published credential before the crew starts,
+  and a mismatch deregisters the node and leaves the crew unstarted. An image
+  created without the pin does not check the account at all.
 * **No ``Server`` header.** The default names the interpreter version.
 
 The crew itself is NOT on this port. The front process binds loopback on this
@@ -100,7 +109,15 @@ SSM_REGISTRATION = _guest_path(VAR, "lib", "amazon", "ssm", "registration")
 
 #: Where the crew's data home sits when the environment names none.
 DEFAULT_DATA_HOME = _guest_path(VAR, "lib", "kirocrew")
-RUN_MARKER = f"{STATE_DIR}/run.done"
+
+#: The marker that makes ``/run`` single-shot. Named for when it is written, which
+#: is as soon as a ``/run`` body DECODES -- before the payload is judged, so a
+#: payload this guest refuses consumes the one ``/run`` it answers and the caller
+#: cannot send a second, different one. It is removed again only on the one path
+#: that must stay retryable: a registration that failed (see
+#: :func:`_handle_run_once`). A body that does not decode is not an attempt and
+#: writes nothing.
+RUN_MARKER = f"{STATE_DIR}/run.attempted"
 
 #: Held for the whole single-shot ``/run`` bootstrap, so the marker check and the
 #: marker write are one step rather than two with the bootstrap in between.
@@ -164,6 +181,44 @@ def log(event: str, **fields: Any) -> None:
         sys.stdout.flush()
     except Exception:  # noqa: BLE001 - a log must never be why a boot fails
         pass
+
+
+def ensure_state_dir() -> None:
+    """Create the guest's state directory and make it root-only.
+
+    The mode is set on every call rather than only at creation, because
+    ``os.makedirs(..., exist_ok=True)`` leaves an existing directory's mode alone
+    and the image creates this one with a plain ``mkdir -p``.
+
+    Root-only because of what is in it: :data:`RUN_MARKER` is what makes ``/run``
+    single-shot, and removing a file needs write on its DIRECTORY rather than on
+    the file. The crew runs as another uid in this same kernel, so a directory
+    that uid could write is a marker it could unlink.
+    """
+    os.makedirs(STATE_DIR, exist_ok=True)
+    os.chmod(STATE_DIR, 0o700)
+
+
+def write_run_marker() -> None:
+    """Write :data:`RUN_MARKER` so only root can read, replace or remove it."""
+    ensure_state_dir()
+    with open(RUN_MARKER, "w", encoding="ascii") as fh:
+        fh.write(str(time.time()))
+    os.chmod(RUN_MARKER, 0o600)
+
+
+def clear_run_marker() -> None:
+    """Remove :data:`RUN_MARKER`, making ``/run`` answerable once more.
+
+    One caller, one reason: a registration that failed. Logged rather than raised,
+    because that caller re-raises the registration's own error straight after and
+    a second exception from this cleanup would replace the diagnosis with the
+    cleanup's.
+    """
+    try:
+        os.unlink(RUN_MARKER)
+    except OSError as exc:
+        log("run.marker_not_cleared", error=repr(exc))
 
 
 def write_state(path: str, data: "dict[str, Any]") -> None:
@@ -563,9 +618,11 @@ def boot_crew(payload: "dict[str, Any]") -> None:
     SSM node, which the inline half of ``run`` has already arranged.
 
     The order is forced. Credentials before secrets, because the guest's only AWS
-    identity is the one the SSM agent publishes. The identity last of the two
-    secrets, so a failure to read it is reported after the control secret that
-    every other call needs.
+    identity is the one the SSM agent publishes. The account check between them,
+    because it reads that same credential and because a node in an account this
+    image does not pin must not be handed the owner's control secret. The identity
+    last of the two secrets, so a failure to read it is reported after the control
+    secret that every other call needs.
     """
     stage = "start"
     try:
@@ -578,6 +635,26 @@ def boot_crew(payload: "dict[str, Any]") -> None:
             raise RuntimeError(
                 "the SSM agent never published node credentials, so no secret can be read"
             )
+
+        # The account the node ACTUALLY joined, against the pin -- the one check
+        # that binds the activation rather than the payload's own strings. Here
+        # and not inside the ``/run`` hook because the credential this reads is
+        # published by the agent some seconds after it registers, and the hook's
+        # whole budget is 60 seconds.
+        #
+        # Before the two secret reads and before the supervisor, which is what
+        # makes a refusal worth anything: a node in a stranger's account never
+        # gets the owner's control secret, and the crew bundle never serves.
+        stage = "account-pin"
+        _boot.update(stage=stage)
+        pinned, pin_verdict = account_pin_verdict()
+        if not pinned:
+            # Hand the node back on the way out. The VM keeps billing to its wall
+            # and the platform is not waiting on this thread, so the one thing
+            # worth doing is releasing the node this guest registered.
+            log("run.account_refused", verdict=pin_verdict)
+            deregister_self(f"account-pin-{pin_verdict}")
+            raise RuntimeError(f"the node joined an account this image does not pin: {pin_verdict}")
 
         stage = "secrets"
         _boot.update(stage=stage)
@@ -625,9 +702,11 @@ def boot_crew(payload: "dict[str, Any]") -> None:
 # ── is this payload for THIS VM? ─────────────────────────────────────────────
 
 #: Image-level names that say which account and region a launch of this image may
-#: name. ``Dockerfile.microvm`` declares them as build args with empty defaults,
-#: so an operator who builds with their own account and region baked gets the
-#: check, and an image built without them keeps the checks that need no pin.
+#: name. They are IMAGE ENVIRONMENT variables, set by
+#: ``cloud/microvm/image.py``'s ``guest_environment`` when the lane creates the
+#: image -- not ``Dockerfile.microvm`` build args, which the Dockerfile does not
+#: declare. An operator whose image was created with both gets the checks below;
+#: an image created without them keeps only the checks that need no pin.
 EXPECTED_ACCOUNT_ENV = "SMC_MICROVM_ACCOUNT"
 EXPECTED_REGION_ENV = "SMC_MICROVM_REGION"
 
@@ -646,25 +725,30 @@ def _arn_parts(value: str) -> "tuple[str, str]":
 
 
 def run_payload_verdict(payload: "dict[str, Any]") -> "tuple[bool, str]":
-    """Whether this ``/run`` payload is one of THIS VM's own launches, and why not.
+    """Whether what this ``/run`` payload SAYS is consistent, and why not.
 
-    The hook port is reachable from the internet by anyone holding
-    ``lambda:CreateMicrovmAuthToken`` in the owner's account, the platform presents
-    no credential the guest can check, and ``/run`` is single-shot. So a caller who
-    reaches this route before the platform does hands the VM an activation they
-    minted themselves, the VM registers as a node in THEIR account, and the
-    owner's own launch is answered ``repeat_ignored`` -- with the owner's crew
-    bundle serving to whoever minted the control secret.
-
-    This is the one authentication available to a process that holds no key: the
-    payload must be internally consistent, and it must agree with whatever the
-    image was built knowing.
+    Exactly four comparisons, over two fields and nothing else -- the payload's
+    ``region``, and the region and account of ``secretRef``/``identityRef`` when
+    those are ARNs:
 
     * A pinned region refuses a payload, or an ARN inside it, that names another.
     * A pinned account refuses a payload whose secret ARNs name another.
     * With or without a pin, a payload naming two accounts or two regions is
       refused: the lane writes both secrets in one account and one region, so a
       mixture is a payload assembled from more than one launch.
+
+    **What this function does NOT check is the activation, and the activation is
+    what decides which account the VM joins.** ``amazon-ssm-agent -register``
+    enrolls the node in whichever account minted the activation id and code under
+    ``ssm``; nothing about those two strings says which account that is, and this
+    function never looks at them. So a payload carrying a stranger's activation
+    and no ARNs at all -- ``{"v":1,"ssm":{"id":...,"code":...}}`` -- passes here,
+    and the lane's own launcher sends bare secret NAMES, which carry no account
+    either. On those payloads the account pin compares nothing.
+
+    What binds the account is :func:`account_pin_verdict`, read AFTER the
+    registration, which asks the node's own published credential which account it
+    is in. This function is the cheap half that runs before anything is written.
 
     The verdict is a fixed code from a closed set, never a value out of the
     payload: it reaches a log, and this module's logs carry no caller-chosen
@@ -696,17 +780,84 @@ def run_payload_verdict(payload: "dict[str, Any]") -> "tuple[bool, str]":
     return True, "ok"
 
 
+def joined_account() -> str:
+    """The account this node actually registered into, or ``""`` if unreadable.
+
+    Asked of STS with the credential the SSM agent published for the managed
+    node, which is the guest's only AWS identity. That credential came from
+    whichever account minted the activation, so the answer is the account the
+    node JOINED rather than any account a payload named.
+
+    No new grant: ``sts:GetCallerIdentity`` is documented as requiring no
+    permissions, so the lane's roles are unchanged and an operator's existing
+    image needs nothing added. No live AWS call happens on a developer machine --
+    this function only ever runs as PID 1 in the guest, after
+    :func:`wait_for_shared_credentials`.
+
+    ``""`` on any failure, and the caller treats that as a refusal rather than a
+    pass: see :func:`account_pin_verdict`.
+    """
+    try:
+        import boto3
+        from botocore.config import Config
+
+        identity = boto3.client(
+            "sts",
+            region_name=_region,
+            config=Config(connect_timeout=5, read_timeout=10, retries={"max_attempts": 2}),
+        ).get_caller_identity()
+        return str(identity.get("Account") or "")
+    except Exception as exc:  # noqa: BLE001 - unreadable is a verdict, not a crash
+        log("account.unreadable", error=repr(exc))
+        return ""
+
+
+def account_pin_verdict() -> "tuple[bool, str]":
+    """Whether the account this node joined is the one the image pins, and why not.
+
+    The half :func:`run_payload_verdict` cannot do. That one reads strings out of
+    the payload; this one reads the credential the registration produced, so it
+    binds the activation -- the thing that actually chose the account.
+
+    Three answers:
+
+    * No pin in the image environment: ``True``, and THE ACCOUNT IS NOT CHECKED.
+      An image created without :data:`EXPECTED_ACCOUNT_ENV` keeps exactly the
+      behaviour it had before this check existed, which is a deliberate choice
+      ``image.guest_environment`` documents on its own side.
+    * The account read back differs from the pin: ``False``. The caller
+      deregisters the node and never starts the crew.
+    * The account could not be read at all: ``False``, the same as a mismatch.
+      Fail-closed costs this boot nothing it was not already going to lose: the
+      credential is already known to exist, and the next stage reads two secrets
+      over the same network path, so a guest that cannot reach STS cannot reach
+      Secrets Manager either. Fail-open would let one unreachable endpoint turn
+      the check off.
+    """
+    expected = os.environ.get(EXPECTED_ACCOUNT_ENV, "").strip()
+    if not expected:
+        return True, "no-account-pin"
+    actual = joined_account()
+    if not actual:
+        return False, "joined-account-unreadable"
+    if actual != expected:
+        return False, "joined-account-is-not-this-vms"
+    return True, "ok"
+
+
 def handle_run(body: bytes) -> "dict[str, Any]":
     """The real bootstrap, and the one hook that may happen only once.
 
     A repeat answers 200 and does nothing, in the same shape a first call
     answers: this hook cannot authenticate its caller, so telling a stranger
-    their call was ignored would tell them a crew is already up.
+    their call was ignored would tell them a crew is already up. A payload this
+    guest REFUSED also leaves the marker behind, so "repeat" here means "a
+    ``/run`` body has already decoded on this VM", not "a crew is already up".
     """
-    os.makedirs(STATE_DIR, exist_ok=True)
-    # Serialised, because the marker is written at the END of the bootstrap and
-    # the check for it is at the start. Two requests arriving before it exists
-    # both find it absent and both bootstrap: they reset the machine id, both
+    ensure_state_dir()
+    # Serialised, because the marker is written inside the bootstrap and the
+    # check for it is at the start. Two requests arriving before it exists both
+    # find it absent and both bootstrap: they reset the machine id, both
     # write ``payload-seen.json`` through the same temp path so one rename
     # removes the other's file, and both spawn a supervisor.
     #
@@ -751,10 +902,26 @@ def _handle_run_once(body: bytes) -> "dict[str, Any]":
         log("run.payload_unreadable", bytes=len(body), error=type(exc).__name__)
         return {"ok": True, "repeat": False}
 
-    # Before anything is written and before the agent is registered: a payload
-    # that is not this VM's own launch gets the same constant answer a repeat
-    # gets, leaves no state behind, and does NOT consume the single-shot marker --
-    # so the owner's real launch, arriving after a stranger's, still boots.
+    # The single-shot marker, written HERE: after the body decoded and BEFORE the
+    # payload is judged. A refusal that left no marker was a check a caller could
+    # simply retry past, sending payload after payload until one agreed with the
+    # image -- so the refusal below now costs the caller the one ``/run`` this VM
+    # answers. Root-only, in a root-only directory, because the crew runs as
+    # another uid in this kernel and unlinking a file needs write on its
+    # directory.
+    #
+    # The cost is stated rather than hidden: a stranger who reaches this route
+    # before the platform does, with a body that merely DECODES, makes this VM
+    # refuse the owner's real launch. That is a VM the lane relaunches, against a
+    # caller who otherwise gets unlimited attempts at the pin; a body that does
+    # not decode is not an attempt and writes nothing.
+    write_run_marker()
+
+    # Before anything else is written and before the agent is registered: a
+    # payload that is not this VM's own launch gets the same constant answer a
+    # repeat gets and leaves no other state behind. This is the payload's own
+    # strings only -- the account the node JOINS is checked after registration,
+    # in ``boot_crew``.
     for_this_vm, verdict = run_payload_verdict(payload)
     if not for_this_vm:
         log("run.payload_refused", verdict=verdict, payload_encoding=encoding)
@@ -779,28 +946,24 @@ def _handle_run_once(body: bytes) -> "dict[str, Any]":
     )
 
     log("machine_id.in_effect", machine_id=reset_machine_id())
-    register_agent(str(ssm_block.get("id") or ""), str(ssm_block.get("code") or ""), region)
+    try:
+        register_agent(str(ssm_block.get("id") or ""), str(ssm_block.get("code") or ""), region)
+    except Exception:
+        # The one path the marker is cleared on, so a REGISTRATION that failed
+        # stays retryable. With the marker standing, a transient register failure
+        # became a permanently dark crew -- measured live -- because neither the
+        # platform nor a relaunch against the same VM can get a second ``/run``.
+        #
+        # This is narrower than the old "write it at the end": a payload refused
+        # by either verdict keeps its marker and gets no second try. What is
+        # retryable is the case where this guest already agreed the payload was
+        # its own and the agent then did not answer.
+        clear_run_marker()
+        raise
     # With the agent's own HOME, never this process's. See :func:`agent_env`.
     spawn("ssm-agent", [AGENT_BIN], env=agent_env())
     _managed_instance_id = read_managed_instance_id()
     log("run.registered", managed_instance_id=_managed_instance_id, payload_encoding=encoding)
-
-    # The single-shot marker is written HERE, after the registration succeeded,
-    # and not on the way in.
-    #
-    # Written first, a run that failed at the registration could never be retried
-    # -- not by the platform and not by a relaunch against the same VM -- so a
-    # transient failure became a permanently dark crew, which is exactly what
-    # happened live. Written here, the only thing the marker refuses is a
-    # SECOND SUCCESSFUL run, which is the property it exists for: resetting the
-    # machine id and re-registering the agent is what would sever the owner's own
-    # channel.
-    #
-    # Writing it late does not open a replay: a caller who reaches this route
-    # without a version-1 payload is turned away above, and a valid payload
-    # carries a live single-use activation code that only the platform was given.
-    with open(RUN_MARKER, "w", encoding="ascii") as fh:
-        fh.write(str(time.time()))
 
     threading.Thread(target=boot_crew, args=(payload,), name="boot", daemon=True).start()
     return {"ok": True, "repeat": False}
@@ -924,6 +1087,20 @@ class Handler(BaseHTTPRequestHandler):
     sys_version = ""
     protocol_version = "HTTP/1.1"
 
+    #: Seconds any single read or write on one hook connection may block.
+    #:
+    #: ``socketserver.StreamRequestHandler.setup`` reads this name and calls
+    #: ``settimeout`` with it, and without it the default is no timeout at all: a
+    #: client that sends ``Content-Length: 65536`` and then nothing held one
+    #: thread of this ``ThreadingHTTPServer`` for as long as it kept the socket
+    #: open, and this port is reachable from the internet.
+    #:
+    #: Twenty seconds, against a payload budget of 4 KiB that the platform's own
+    #: caller sends in one segment. It bounds a request's reads and its
+    #: keep-alive idle time, not the bootstrap: the work ``/run`` triggers runs on
+    #: a thread of its own, so a slow registration cannot be cut off by this.
+    timeout = 20
+
     #: The one body every answer that is not a hook's own carries. A dict rather
     #: than bytes so :meth:`_reply` serialises it the same way it serialises a
     #: hook's answer, and the two are indistinguishable on the wire.
@@ -978,9 +1155,20 @@ class Handler(BaseHTTPRequestHandler):
             length = int(self.headers.get("Content-Length") or "0")
         except ValueError:
             return b""
-        # The payload budget is 4 KiB; this cap is generous against it and bounds
-        # what a stranger can make this process allocate.
-        return self.rfile.read(min(length, 65536)) if length > 0 else b""
+        if length <= 0:
+            return b""
+        try:
+            # The payload budget is 4 KiB; this cap is generous against it and
+            # bounds what a stranger can make this process allocate.
+            return self.rfile.read(min(length, 65536))
+        except OSError:
+            # A client that promised bytes and sent fewer, or none. :data:`timeout`
+            # is what ends the wait; this is what turns the end of it into an
+            # empty body rather than a traceback out of the handler thread. An
+            # empty body does not decode, so no hook acts on it -- and ``/run``
+            # does not count it as the one attempt it allows.
+            self.close_connection = True
+            return b""
 
     def _route(self) -> str:
         path = (self.path or "").split("?", 1)[0].rstrip("/")
@@ -1107,7 +1295,7 @@ class HookServer(ThreadingHTTPServer):
 
 
 def main() -> None:
-    os.makedirs(STATE_DIR, exist_ok=True)
+    ensure_state_dir()
     signal.signal(signal.SIGTERM, on_signal)
     signal.signal(signal.SIGINT, on_signal)
     # 0.0.0.0 is required rather than chosen: the platform's hook caller is not

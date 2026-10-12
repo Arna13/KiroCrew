@@ -30,6 +30,7 @@ that does not change when the bucket does.
 
 from __future__ import annotations
 
+import json
 import re
 import socket
 import threading
@@ -99,7 +100,7 @@ def _dockerfile_code() -> str:
 def guest_state(tmp_path, monkeypatch):
     """The guest's own state directory, redirected into a temp tree."""
     monkeypatch.setattr(hooks, "STATE_DIR", str(tmp_path))
-    monkeypatch.setattr(hooks, "RUN_MARKER", str(tmp_path / "run.done"))
+    monkeypatch.setattr(hooks, "RUN_MARKER", str(tmp_path / "run.attempted"))
     monkeypatch.setattr(hooks, "BOOT_STATE", str(tmp_path / "boot.json"))
     monkeypatch.setattr(hooks, "PAYLOAD_SEEN", str(tmp_path / "payload-seen.json"))
     return tmp_path
@@ -375,10 +376,15 @@ class TestRunRefusesAPayloadThatIsNotThisVmsOwn:
         assert answer == {"ok": True, "repeat": False}
         assert not (guest_state / "payload-seen.json").exists()
 
-    def test_a_refused_run_does_not_consume_the_single_shot_marker(self, guest_state, monkeypatch):
-        """So the owner's real launch, arriving after a stranger's, still boots.
-        A refusal that burned the marker would be a denial of service with one
-        unauthenticated request."""
+    def test_a_refused_run_consumes_the_single_shot_marker(self, guest_state, monkeypatch):
+        """A refusal a caller can retry past is not a check.
+
+        The marker used to be written only once a registration succeeded, so a
+        caller could send payload after payload until one agreed with the pin.
+        The cost of writing it on the refusal is stated where the code writes it:
+        one decodable body from a stranger makes this VM refuse the owner's real
+        launch, which is a VM the lane relaunches.
+        """
         import json as _json
 
         monkeypatch.setenv(hooks.EXPECTED_ACCOUNT_ENV, _ACCOUNT)
@@ -394,11 +400,59 @@ class TestRunRefusesAPayloadThatIsNotThisVmsOwn:
             identityRef=f"arn:aws:secretsmanager:{_REGION}:999988887777:secret:kirocrew/crew/y-Cd",
         )
         hooks.handle_run(_json.dumps(stranger).encode("utf-8"))
-        assert not (guest_state / "run.done").exists()
+        assert (guest_state / "run.attempted").exists(), "the refusal left no marker"
 
-        hooks.handle_run(_json.dumps(_payload()).encode("utf-8"))
-        assert booted == ["ssm-agent"]
-        assert (guest_state / "run.done").exists()
+        second = hooks.handle_run(_json.dumps(_payload()).encode("utf-8"))
+        assert second == {"ok": True, "repeat": True}
+        assert booted == [], f"a second /run acted: {booted}"
+
+    def test_the_marker_is_root_only_and_so_is_its_directory(self, guest_state):
+        """The crew runs as another uid in this kernel, and unlinking a file needs
+        write on its DIRECTORY rather than on the file."""
+        import stat
+
+        hooks.write_run_marker()
+        assert stat.S_IMODE((guest_state / "run.attempted").stat().st_mode) == 0o600
+        assert stat.S_IMODE(guest_state.stat().st_mode) == 0o700
+
+    def test_a_body_that_does_not_decode_is_not_an_attempt(self, guest_state, monkeypatch):
+        """Non-vacuity for the marker, and the hole the socket timeout opens: a
+        client that promised bytes and sent none leaves an empty body, and a VM
+        that counted that as its one ``/run`` would be bricked by a dead
+        connection."""
+        monkeypatch.setattr(
+            hooks, "register_agent", lambda *a, **k: pytest.fail("an unreadable body registered")
+        )
+        assert hooks.handle_run(b"") == {"ok": True, "repeat": False}
+        assert not (guest_state / "run.attempted").exists()
+
+    def test_a_registration_that_failed_stays_retryable(self, guest_state, monkeypatch):
+        """The one path the marker is cleared on. With it standing, a transient
+        register failure is a permanently dark crew: neither the platform nor a
+        relaunch against the same VM gets a second ``/run``."""
+        import json as _json
+
+        monkeypatch.setattr(hooks, "reset_machine_id", lambda: "x")
+        monkeypatch.setattr(hooks, "read_managed_instance_id", lambda: "mi-0")
+        monkeypatch.setattr(hooks, "boot_crew", lambda payload: None)
+        monkeypatch.setattr(hooks, "spawn", lambda *a, **k: None)
+        attempts: list[int] = []
+
+        def _register(*_a: object, **_k: object) -> None:
+            attempts.append(1)
+            if len(attempts) == 1:
+                raise RuntimeError("amazon-ssm-agent -register exited 1")
+
+        monkeypatch.setattr(hooks, "register_agent", _register)
+        good = _json.dumps(_payload()).encode("utf-8")
+
+        with pytest.raises(RuntimeError):
+            hooks.handle_run(good)
+        assert not (guest_state / "run.attempted").exists()
+
+        assert hooks.handle_run(good) == {"ok": True, "repeat": False}
+        assert len(attempts) == 2
+        assert (guest_state / "run.attempted").exists()
 
     def test_the_refusal_answers_what_a_first_call_and_a_repeat_answer(
         self, guest_state, monkeypatch
@@ -422,6 +476,10 @@ class TestRunRefusesAPayloadThatIsNotThisVmsOwn:
         good = _json.dumps(_payload()).encode("utf-8")
         first = hooks.handle_run(good)
         repeat = hooks.handle_run(good)
+        # Cleared so the third call reaches the verdict instead of the marker.
+        # Without this the refusal is never judged and the comparison is vacuous:
+        # the marker is now written BEFORE the verdict.
+        hooks.clear_run_marker()
         refused = hooks.handle_run(_json.dumps(_payload(region="eu-west-1")).encode("utf-8"))
 
         assert set(first) == set(repeat) == set(refused)
@@ -445,6 +503,139 @@ class TestRunRefusesAPayloadThatIsNotThisVmsOwn:
         text = _json.dumps(lines)
         assert "999988887777" not in text
         assert "code-value" not in text
+
+
+class TestTheAccountTheNodeJoinedIsCheckedAgainstThePin:
+    """The half the payload cannot answer.
+
+    ``run_payload_verdict`` compares strings the caller chose. The activation
+    under ``ssm`` is what ``amazon-ssm-agent -register`` enrolls the node with,
+    and nothing in those two strings says which account minted them -- so a
+    payload carrying a stranger's activation and no ARNs at all passes every
+    check that runs before the registration. What binds the account is reading it
+    back from the credential the registration produced.
+    """
+
+    def test_an_image_with_no_pin_does_not_check_the_account(self, monkeypatch):
+        """Stated as the code states it: unpinned means not checked, not checked
+        and found good."""
+        monkeypatch.delenv(hooks.EXPECTED_ACCOUNT_ENV, raising=False)
+        monkeypatch.setattr(
+            hooks, "joined_account", lambda: pytest.fail("an unpinned image asked STS")
+        )
+        assert hooks.account_pin_verdict() == (True, "no-account-pin")
+
+    def test_a_node_in_the_pinned_account_passes(self, monkeypatch):
+        monkeypatch.setenv(hooks.EXPECTED_ACCOUNT_ENV, _ACCOUNT)
+        monkeypatch.setattr(hooks, "joined_account", lambda: _ACCOUNT)
+        assert hooks.account_pin_verdict() == (True, "ok")
+
+    def test_a_node_that_joined_another_account_is_refused(self, monkeypatch):
+        """The case the payload check cannot see: the payload agreed with itself
+        and the activation still enrolled this node somewhere else."""
+        monkeypatch.setenv(hooks.EXPECTED_ACCOUNT_ENV, _ACCOUNT)
+        monkeypatch.setattr(hooks, "joined_account", lambda: "999988887777")
+        allowed, verdict = hooks.account_pin_verdict()
+        assert allowed is False
+        assert verdict == "joined-account-is-not-this-vms"
+
+    def test_an_account_that_cannot_be_read_is_refused(self, monkeypatch):
+        """Fail closed. Fail-open would let one unreachable endpoint turn the
+        check off, and this boot's next stage reads two secrets over the same
+        network path anyway."""
+        monkeypatch.setenv(hooks.EXPECTED_ACCOUNT_ENV, _ACCOUNT)
+        monkeypatch.setattr(hooks, "joined_account", lambda: "")
+        assert hooks.account_pin_verdict() == (False, "joined-account-unreadable")
+
+    def test_the_account_is_read_from_sts_with_the_nodes_own_credential(self, monkeypatch):
+        """``sts:GetCallerIdentity`` needs no permission, so this adds no grant to
+        the lane's roles. The client is faked here; no call leaves this machine."""
+        boto3 = pytest.importorskip("boto3")
+        asked: list[str] = []
+
+        class _Sts:
+            @staticmethod
+            def get_caller_identity() -> dict:
+                return {"Account": _ACCOUNT, "Arn": "arn:aws:sts::x:assumed-role/y/z"}
+
+        def _client(name, **_kw):
+            asked.append(name)
+            return _Sts()
+
+        monkeypatch.setattr(boto3, "client", _client)
+        assert hooks.joined_account() == _ACCOUNT
+        assert asked == ["sts"]
+
+    def test_an_sts_failure_is_a_verdict_and_not_a_crash(self, monkeypatch):
+        boto3 = pytest.importorskip("boto3")
+
+        def _client(name, **_kw):
+            raise RuntimeError("no route to sts")
+
+        monkeypatch.setattr(boto3, "client", _client)
+        assert hooks.joined_account() == ""
+
+    @staticmethod
+    def _boot_with(monkeypatch, *, joined: str) -> "tuple[list[str], list[str]]":
+        """Run the real ``boot_crew`` with everything around the check faked."""
+        started: list[str] = []
+        released: list[str] = []
+        monkeypatch.setattr(hooks, "wait_for_shared_credentials", lambda *a, **k: True)
+        monkeypatch.setattr(hooks, "joined_account", lambda: joined)
+        monkeypatch.setattr(hooks, "deregister_self", lambda trigger: released.append(trigger))
+        monkeypatch.setattr(hooks, "read_secret", lambda ref, region: f"value-of-{ref}")
+        monkeypatch.setattr(hooks, "spawn", lambda name, *a, **k: started.append(name))
+        hooks.boot_crew(_payload())
+        return started, released
+
+    def test_a_mismatch_deregisters_the_node_and_never_starts_the_crew(
+        self, guest_state, monkeypatch
+    ):
+        """The whole point of checking: a node in a stranger's account is handed
+        back and the owner's crew bundle never serves from it."""
+        monkeypatch.setenv(hooks.EXPECTED_ACCOUNT_ENV, _ACCOUNT)
+        started, released = self._boot_with(monkeypatch, joined="999988887777")
+
+        assert started == [], f"the crew started anyway: {started}"
+        assert len(released) == 1, "the node was not handed back"
+        assert "account-pin" in released[0]
+        assert json.loads((guest_state / "boot.json").read_text())["stage"] == (
+            "failed:account-pin"
+        )
+
+    def test_a_mismatch_reads_no_secret(self, guest_state, monkeypatch):
+        """The check sits BEFORE the two Secrets Manager reads, so a node in
+        another account is never handed the owner's control secret."""
+        monkeypatch.setenv(hooks.EXPECTED_ACCOUNT_ENV, _ACCOUNT)
+        monkeypatch.setattr(hooks, "wait_for_shared_credentials", lambda *a, **k: True)
+        monkeypatch.setattr(hooks, "joined_account", lambda: "999988887777")
+        monkeypatch.setattr(hooks, "deregister_self", lambda trigger: None)
+        monkeypatch.setattr(hooks, "spawn", lambda *a, **k: None)
+        monkeypatch.setattr(
+            hooks,
+            "read_secret",
+            lambda ref, region: pytest.fail("a refused node read a secret"),
+        )
+        hooks.boot_crew(_payload())
+
+    def test_a_matching_account_starts_the_crew(self, guest_state, monkeypatch):
+        """Non-vacuity. A check that refused every boot would pass every test
+        above and ship a lane that launches nothing."""
+        monkeypatch.setenv(hooks.EXPECTED_ACCOUNT_ENV, _ACCOUNT)
+        started, released = self._boot_with(monkeypatch, joined=_ACCOUNT)
+
+        assert started == ["supervisor"]
+        assert released == []
+        assert json.loads((guest_state / "boot.json").read_text())["stage"] == "started"
+
+    def test_an_unpinned_image_still_starts_its_crew(self, guest_state, monkeypatch):
+        """An image created without the pin keeps exactly the behaviour it had
+        before this check existed."""
+        monkeypatch.delenv(hooks.EXPECTED_ACCOUNT_ENV, raising=False)
+        started, released = self._boot_with(monkeypatch, joined="")
+
+        assert started == ["supervisor"]
+        assert released == []
 
 
 def _ask(port: int, raw: bytes) -> tuple[bytes, dict[str, str], bytes]:
