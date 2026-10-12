@@ -184,6 +184,7 @@ _AGENT_UNTRUSTED_TEXT_FIELDS = (
     "workspace",
     "memory_store",
     "model",
+    "worker_model",
     "source",
     "telegram_account",
 )
