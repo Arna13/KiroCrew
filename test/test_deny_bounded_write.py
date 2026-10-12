@@ -66,12 +66,15 @@ from kiro_crew.acp.client import (
 )
 from kiro_crew.acp.runtime import AcpRuntime, AcpRuntimeDead, AcpRuntimeStdinStalled
 from kiro_crew.acp.types import JsonRpcMessage
+from kiro_crew.testing.wait import await_until
 
 # Short enough that a stalled drain fails in well under a second, long enough
 # that a healthy AsyncMock drain (resolves on the next loop tick) never trips it.
 _TEST_BOUND = 0.05
-# Outer guard: on a build without the bound the stalled drain hangs forever, so
-# the test must FAIL (asyncio.TimeoutError is not AcpProcessDied), not hang.
+# Outer guard: the ceiling passed to every await_until() below, so a stalled
+# write fails fast WITHIN the test bound instead of parking on the 5 s production
+# fallback. On a build without the bound the drain never resolves and await_until
+# raises AssertionError (not AcpProcessDied), failing the test by name, not hanging.
 _OUTER_GUARD = 1.0
 
 
@@ -134,7 +137,11 @@ class TestStalledDrainFailsFast:
         client, proc = _client_with_stdin(stalled=True)
         started = time.monotonic()
         with pytest.raises(AcpProcessDied, match=r"stdin stalled.* req='req-7'"):
-            await asyncio.wait_for(client.reject_tool("req-7"), timeout=_OUTER_GUARD)
+            await await_until(
+                asyncio.ensure_future(client.reject_tool("req-7")),
+                what="reject_tool to resolve",
+                timeout=_OUTER_GUARD,
+            )
         elapsed = time.monotonic() - started
         assert elapsed < _OUTER_GUARD, "the bound did not fire; the outer guard did"
         assert elapsed >= short_bound * 0.5, "raised before the bound elapsed"
@@ -148,15 +155,20 @@ class TestStalledDrainFailsFast:
         client, proc = _client_with_stdin(stalled=True)
         client._permission_options["req-8"] = {"reject": "reject", "once": "allow"}
         with pytest.raises(AcpProcessDied, match=r"stdin stalled.* req='req-8'"):
-            await asyncio.wait_for(client.reject_tool("req-8"), timeout=_OUTER_GUARD)
+            await await_until(
+                asyncio.ensure_future(client.reject_tool("req-8")),
+                what="reject_tool to resolve",
+                timeout=_OUTER_GUARD,
+            )
         proc.stdin.drain.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_send_error_raises_within_the_bound(self, short_bound: float) -> None:
         client, _proc = _client_with_stdin(stalled=True)
         with pytest.raises(AcpProcessDied, match=r"stdin stalled.* req=42"):
-            await asyncio.wait_for(
-                client._send_error(42, -32601, "Method not found: x/y"),
+            await await_until(
+                asyncio.ensure_future(client._send_error(42, -32601, "Method not found: x/y")),
+                what="_send_error to resolve",
                 timeout=_OUTER_GUARD,
             )
 
@@ -167,7 +179,11 @@ class TestStalledDrainFailsFast:
         client, _proc = _client_with_stdin(stalled=True)
         with caplog.at_level(logging.WARNING, logger=acp_client.logger.name):
             with pytest.raises(AcpProcessDied):
-                await asyncio.wait_for(client.reject_tool("req-9"), timeout=_OUTER_GUARD)
+                await await_until(
+                    asyncio.ensure_future(client.reject_tool("req-9")),
+                    what="reject_tool to resolve",
+                    timeout=_OUTER_GUARD,
+                )
         stall_records = [
             r
             for r in caplog.records
@@ -186,7 +202,11 @@ class TestStalledDrainFailsFast:
         client, _proc = _client_with_stdin(stalled=True)
         with caplog.at_level(logging.WARNING, logger=acp_client.logger.name):
             with pytest.raises(AcpProcessDied) as excinfo:
-                await asyncio.wait_for(client.reject_tool(hostile), timeout=_OUTER_GUARD)
+                await await_until(
+                    asyncio.ensure_future(client.reject_tool(hostile)),
+                    what="reject_tool to resolve",
+                    timeout=_OUTER_GUARD,
+                )
         rendered = [r.getMessage() for r in caplog.records if "stalled" in r.getMessage()]
         assert len(rendered) == 1
         assert "\x1b" not in rendered[0] and "\n" not in rendered[0]
@@ -203,7 +223,11 @@ class TestStalledDrainFailsFast:
         client, _proc = _client_with_stdin(stalled=True)
         with caplog.at_level(logging.WARNING, logger=acp_client.logger.name):
             with pytest.raises(AcpProcessDied) as excinfo:
-                await asyncio.wait_for(client.reject_tool(token_id), timeout=_OUTER_GUARD)
+                await await_until(
+                    asyncio.ensure_future(client.reject_tool(token_id)),
+                    what="reject_tool to resolve",
+                    timeout=_OUTER_GUARD,
+                )
         rendered = [r.getMessage() for r in caplog.records if "stalled" in r.getMessage()]
         assert len(rendered) == 1
         assert token_id not in rendered[0] and "[REDACTED" in rendered[0]
@@ -214,7 +238,11 @@ class TestStalledDrainFailsFast:
         client, _proc = _client_with_stdin(stalled=True)
         client._last_activity = 0.0
         with pytest.raises(AcpProcessDied):
-            await asyncio.wait_for(client.reject_tool("req-10"), timeout=_OUTER_GUARD)
+            await await_until(
+                asyncio.ensure_future(client.reject_tool("req-10")),
+                what="reject_tool to resolve",
+                timeout=_OUTER_GUARD,
+            )
         assert client._last_activity == 0.0, "a failed delivery must not look like activity"
 
 
@@ -225,7 +253,11 @@ class TestHealthyDrainUnchanged:
     async def test_reject_tool_cancelled_fallback_still_delivers(self) -> None:
         client, proc = _client_with_stdin(stalled=False)
         client._last_activity = 0.0
-        await asyncio.wait_for(client.reject_tool("req-1"), timeout=_OUTER_GUARD)
+        await await_until(
+            asyncio.ensure_future(client.reject_tool("req-1")),
+            what="reject_tool to resolve",
+            timeout=_OUTER_GUARD,
+        )
         proc.stdin.write.assert_called_once()
         proc.stdin.drain.assert_awaited_once()
         assert b'"id": "req-1"' in proc.stdin.write.call_args.args[0]
@@ -235,7 +267,11 @@ class TestHealthyDrainUnchanged:
     async def test_reject_tool_advertised_option_still_delivers(self) -> None:
         client, proc = _client_with_stdin(stalled=False)
         client._permission_options["req-2"] = {"reject": "reject", "once": "allow"}
-        await asyncio.wait_for(client.reject_tool("req-2"), timeout=_OUTER_GUARD)
+        await await_until(
+            asyncio.ensure_future(client.reject_tool("req-2")),
+            what="reject_tool to resolve",
+            timeout=_OUTER_GUARD,
+        )
         payload = proc.stdin.write.call_args.args[0]
         assert b'"optionId": "reject"' in payload
         proc.stdin.drain.assert_awaited_once()
@@ -243,8 +279,10 @@ class TestHealthyDrainUnchanged:
     @pytest.mark.asyncio
     async def test_send_error_still_delivers(self) -> None:
         client, proc = _client_with_stdin(stalled=False)
-        await asyncio.wait_for(
-            client._send_error(3, -32601, "Method not found: x/y"), timeout=_OUTER_GUARD
+        await await_until(
+            asyncio.ensure_future(client._send_error(3, -32601, "Method not found: x/y")),
+            what="_send_error to resolve",
+            timeout=_OUTER_GUARD,
         )
         assert b'"code": -32601' in proc.stdin.write.call_args.args[0]
         proc.stdin.drain.assert_awaited_once()
@@ -291,7 +329,11 @@ class TestHealthyDrainUnchanged:
         client, proc = _client_with_stdin(stalled=False)
         proc.stdin.drain = AsyncMock(side_effect=_slow_drain)
         try:
-            await asyncio.wait_for(client.reject_tool("req-5"), timeout=_OUTER_GUARD)
+            await await_until(
+                asyncio.ensure_future(client.reject_tool("req-5")),
+                what="reject_tool to resolve",
+                timeout=_OUTER_GUARD,
+            )
         finally:
             watchdog.cancel()
         proc.stdin.drain.assert_awaited_once()
@@ -308,8 +350,11 @@ class TestRuntimeStalledDrainFailsFast:
         started = time.monotonic()
         with caplog.at_level(logging.WARNING, logger=acp_runtime.logger.name):
             with pytest.raises(AcpRuntimeDead, match=r"stdin stalled.* req='req-r1'"):
-                await asyncio.wait_for(
-                    rt.send_response("req-r1", {"outcome": {"outcome": "cancelled"}}),
+                await await_until(
+                    asyncio.ensure_future(
+                        rt.send_response("req-r1", {"outcome": {"outcome": "cancelled"}})
+                    ),
+                    what="send_response to resolve",
                     timeout=_OUTER_GUARD,
                 )
         assert time.monotonic() - started < _OUTER_GUARD
@@ -324,8 +369,10 @@ class TestRuntimeStalledDrainFailsFast:
     async def test_send_error_raises_dead_within_the_bound(self, short_bound: float) -> None:
         rt, _proc = _runtime_with_stdin(stalled=True)
         with pytest.raises(AcpRuntimeDead, match=r"stdin stalled.* req=7"):
-            await asyncio.wait_for(
-                rt.send_error(7, -32601, "Method not found: x/y"), timeout=_OUTER_GUARD
+            await await_until(
+                asyncio.ensure_future(rt.send_error(7, -32601, "Method not found: x/y")),
+                what="send_error to resolve",
+                timeout=_OUTER_GUARD,
             )
         assert rt._dead is True
 
@@ -337,8 +384,11 @@ class TestRuntimeStalledDrainFailsFast:
         rt, _proc = _runtime_with_stdin(stalled=True)
         with caplog.at_level(logging.WARNING, logger=acp_runtime.logger.name):
             with pytest.raises(AcpRuntimeDead) as excinfo:
-                await asyncio.wait_for(
-                    rt.send_response(token_id, {"outcome": {"outcome": "cancelled"}}),
+                await await_until(
+                    asyncio.ensure_future(
+                        rt.send_response(token_id, {"outcome": {"outcome": "cancelled"}})
+                    ),
+                    what="send_response to resolve",
                     timeout=_OUTER_GUARD,
                 )
         stalled = [r.getMessage() for r in caplog.records if "stdin stalled" in r.getMessage()]
@@ -349,8 +399,11 @@ class TestRuntimeStalledDrainFailsFast:
     @pytest.mark.asyncio
     async def test_healthy_send_response_unchanged(self) -> None:
         rt, proc = _runtime_with_stdin(stalled=False)
-        await asyncio.wait_for(
-            rt.send_response("req-r2", {"outcome": {"outcome": "cancelled"}}),
+        await await_until(
+            asyncio.ensure_future(
+                rt.send_response("req-r2", {"outcome": {"outcome": "cancelled"}})
+            ),
+            what="send_response to resolve",
             timeout=_OUTER_GUARD,
         )
         proc.stdin.write.assert_called_once()
@@ -407,8 +460,11 @@ class TestNoProgressBound:
         # is declared dead.
         stdin = _stdin_with_buffer([3_000_000, 2_000_000, 1_000_000, 0], drain_after=3)
         started = time.monotonic()
-        ok = await asyncio.wait_for(
-            await_under_no_progress_bound(stdin.drain(), stdin, bound_secs=short_bound),
+        ok = await await_until(
+            asyncio.ensure_future(
+                await_under_no_progress_bound(stdin.drain(), stdin, bound_secs=short_bound)
+            ),
+            what="await_under_no_progress_bound to resolve",
             timeout=_OUTER_GUARD,
         )
         elapsed = time.monotonic() - started
@@ -418,8 +474,11 @@ class TestNoProgressBound:
     @pytest.mark.asyncio
     async def test_flat_buffer_is_a_stall_at_exactly_one_bound(self, short_bound: float) -> None:
         stdin = _stdin_with_buffer([3_000_000, 3_000_000, 3_000_000], drain_after=None)
-        ok = await asyncio.wait_for(
-            await_under_no_progress_bound(stdin.drain(), stdin, bound_secs=short_bound),
+        ok = await await_until(
+            asyncio.ensure_future(
+                await_under_no_progress_bound(stdin.drain(), stdin, bound_secs=short_bound)
+            ),
+            what="await_under_no_progress_bound to resolve",
             timeout=_OUTER_GUARD,
         )
         assert ok is False
@@ -430,8 +489,11 @@ class TestNoProgressBound:
     async def test_progress_then_flat_fails_after_the_flat_window(self, short_bound: float) -> None:
         # One window of progress, then nothing: the second window is the stall.
         stdin = _stdin_with_buffer([3_000_000, 2_000_000, 2_000_000, 2_000_000], drain_after=None)
-        ok = await asyncio.wait_for(
-            await_under_no_progress_bound(stdin.drain(), stdin, bound_secs=short_bound),
+        ok = await await_until(
+            asyncio.ensure_future(
+                await_under_no_progress_bound(stdin.drain(), stdin, bound_secs=short_bound)
+            ),
+            what="await_under_no_progress_bound to resolve",
             timeout=_OUTER_GUARD,
         )
         assert ok is False
@@ -445,8 +507,11 @@ class TestNoProgressBound:
         # measure again from the new level; only a level that holds still for a
         # whole window is the stall.
         stdin = _stdin_with_buffer([3_000_000, 5_000_000, 4_000_000, 0], drain_after=3)
-        ok = await asyncio.wait_for(
-            await_under_no_progress_bound(stdin.drain(), stdin, bound_secs=short_bound),
+        ok = await await_until(
+            asyncio.ensure_future(
+                await_under_no_progress_bound(stdin.drain(), stdin, bound_secs=short_bound)
+            ),
+            what="await_under_no_progress_bound to resolve",
             timeout=_OUTER_GUARD,
         )
         assert ok is True
@@ -456,8 +521,11 @@ class TestNoProgressBound:
         self, short_bound: float
     ) -> None:
         stdin = _stdin_with_buffer([3_000_000, 5_000_000, 5_000_000, 5_000_000], drain_after=None)
-        ok = await asyncio.wait_for(
-            await_under_no_progress_bound(stdin.drain(), stdin, bound_secs=short_bound),
+        ok = await await_until(
+            asyncio.ensure_future(
+                await_under_no_progress_bound(stdin.drain(), stdin, bound_secs=short_bound)
+            ),
+            what="await_under_no_progress_bound to resolve",
             timeout=_OUTER_GUARD,
         )
         assert ok is False
@@ -468,8 +536,11 @@ class TestNoProgressBound:
         # A reader that consumes one byte per window would extend the window
         # forever; a drop under the progress floor is not consumption.
         stdin = _stdin_with_buffer([3_000_000, 2_999_999, 2_999_998], drain_after=None)
-        ok = await asyncio.wait_for(
-            await_under_no_progress_bound(stdin.drain(), stdin, bound_secs=short_bound),
+        ok = await await_until(
+            asyncio.ensure_future(
+                await_under_no_progress_bound(stdin.drain(), stdin, bound_secs=short_bound)
+            ),
+            what="await_under_no_progress_bound to resolve",
             timeout=_OUTER_GUARD,
         )
         assert ok is False
@@ -481,8 +552,11 @@ class TestNoProgressBound:
         stdin = _stdin_with_buffer(
             [3_000_000, 3_000_000 - floor, 3_000_000 - 2 * floor, 0], drain_after=3
         )
-        ok = await asyncio.wait_for(
-            await_under_no_progress_bound(stdin.drain(), stdin, bound_secs=short_bound),
+        ok = await await_until(
+            asyncio.ensure_future(
+                await_under_no_progress_bound(stdin.drain(), stdin, bound_secs=short_bound)
+            ),
+            what="await_under_no_progress_bound to resolve",
             timeout=_OUTER_GUARD,
         )
         assert ok is True
@@ -494,8 +568,11 @@ class TestNoProgressBound:
         floor = acp_client._RESPONSE_WRITE_MIN_PROGRESS_BYTES
         levels = [10 * floor - k * floor for k in range(11)]  # 10f, 9f, ..., 0
         stdin = _stdin_with_buffer(levels, drain_after=10)
-        ok = await asyncio.wait_for(
-            await_under_no_progress_bound(stdin.drain(), stdin, bound_secs=short_bound),
+        ok = await await_until(
+            asyncio.ensure_future(
+                await_under_no_progress_bound(stdin.drain(), stdin, bound_secs=short_bound)
+            ),
+            what="await_under_no_progress_bound to resolve",
             timeout=_OUTER_GUARD,
         )
         assert ok is True
@@ -516,8 +593,11 @@ class TestNoProgressBound:
         stdin.drain = AsyncMock(side_effect=_drain_at_the_edge)
         loop = asyncio.get_running_loop()
         loop.call_later(short_bound * 0.98, gate.set)
-        ok = await asyncio.wait_for(
-            await_under_no_progress_bound(stdin.drain(), stdin, bound_secs=short_bound),
+        ok = await await_until(
+            asyncio.ensure_future(
+                await_under_no_progress_bound(stdin.drain(), stdin, bound_secs=short_bound)
+            ),
+            what="await_under_no_progress_bound to resolve",
             timeout=_OUTER_GUARD,
         )
         assert ok is True
@@ -529,8 +609,11 @@ class TestNoProgressBound:
         stdin = MagicMock()
         stdin.transport = object()
         stdin.drain = AsyncMock(side_effect=_never_completes)
-        ok = await asyncio.wait_for(
-            await_under_no_progress_bound(stdin.drain(), stdin, bound_secs=short_bound),
+        ok = await await_until(
+            asyncio.ensure_future(
+                await_under_no_progress_bound(stdin.drain(), stdin, bound_secs=short_bound)
+            ),
+            what="await_under_no_progress_bound to resolve",
             timeout=_OUTER_GUARD,
         )
         assert ok is False
@@ -544,8 +627,11 @@ class TestNoProgressBound:
         rt, proc = _runtime_with_stdin(stalled=False)
         proc.stdin = _stdin_with_buffer([3_000_000, 2_000_000, 1_000_000, 0], drain_after=3)
         proc.stdin.write = MagicMock()
-        await asyncio.wait_for(
-            rt.send_response("req-r3", {"outcome": {"outcome": "cancelled"}}),
+        await await_until(
+            asyncio.ensure_future(
+                rt.send_response("req-r3", {"outcome": {"outcome": "cancelled"}})
+            ),
+            what="send_response to resolve",
             timeout=_OUTER_GUARD,
         )
         assert rt._dead is False
@@ -557,7 +643,11 @@ class TestNoProgressBound:
         proc.stdin = _stdin_with_buffer([3_000_000, 2_000_000, 1_000_000, 0], drain_after=3)
         proc.stdin.write = MagicMock()
         client._last_activity = 0.0
-        await asyncio.wait_for(client.reject_tool("req-c3"), timeout=_OUTER_GUARD)
+        await await_until(
+            asyncio.ensure_future(client.reject_tool("req-c3")),
+            what="reject_tool to resolve",
+            timeout=_OUTER_GUARD,
+        )
         assert client._last_activity > 0.0
 
 
@@ -597,8 +687,11 @@ class TestUnobservableProgress:
         stdin.drain = AsyncMock(side_effect=_drain)
         loop = asyncio.get_running_loop()
         loop.call_later(short_bound * 2, gate.set)  # a live reader, slower than one bound
-        ok = await asyncio.wait_for(
-            await_under_no_progress_bound(stdin.drain(), stdin, bound_secs=short_bound),
+        ok = await await_until(
+            asyncio.ensure_future(
+                await_under_no_progress_bound(stdin.drain(), stdin, bound_secs=short_bound)
+            ),
+            what="await_under_no_progress_bound to resolve",
             timeout=_OUTER_GUARD,
         )
         assert ok is True, "a flat proactor level was read as a stall"
@@ -614,8 +707,11 @@ class TestUnobservableProgress:
         stdin.transport.get_write_buffer_size = MagicMock(return_value=3_000_000)
         stdin.drain = AsyncMock(side_effect=_never_completes)
         started = time.monotonic()
-        ok = await asyncio.wait_for(
-            await_under_no_progress_bound(stdin.drain(), stdin, bound_secs=short_bound),
+        ok = await await_until(
+            asyncio.ensure_future(
+                await_under_no_progress_bound(stdin.drain(), stdin, bound_secs=short_bound)
+            ),
+            what="await_under_no_progress_bound to resolve",
             timeout=_OUTER_GUARD,
         )
         assert ok is False
@@ -638,8 +734,11 @@ class TestBoundedByConstruction:
         units = 8
         levels = [units * floor - k * floor for k in range(units + 1)]  # 8f ... 0
         stdin = _stdin_with_buffer(levels, drain_after=units)
-        ok = await asyncio.wait_for(
-            await_under_no_progress_bound(stdin.drain(), stdin, bound_secs=short_bound),
+        ok = await await_until(
+            asyncio.ensure_future(
+                await_under_no_progress_bound(stdin.drain(), stdin, bound_secs=short_bound)
+            ),
+            what="await_under_no_progress_bound to resolve",
             timeout=_OUTER_GUARD,
         )
         assert ok is True
@@ -655,8 +754,11 @@ class TestBoundedByConstruction:
         stdin = _stdin_with_buffer(
             [100 * floor, 99 * floor, 98 * floor, 98 * floor, 98 * floor], drain_after=None
         )
-        ok = await asyncio.wait_for(
-            await_under_no_progress_bound(stdin.drain(), stdin, bound_secs=short_bound),
+        ok = await await_until(
+            asyncio.ensure_future(
+                await_under_no_progress_bound(stdin.drain(), stdin, bound_secs=short_bound)
+            ),
+            what="await_under_no_progress_bound to resolve",
             timeout=_OUTER_GUARD,
         )
         assert ok is False
@@ -672,8 +774,11 @@ class TestBoundedByConstruction:
         floor = acp_client._RESPONSE_WRITE_MIN_PROGRESS_BYTES
         levels = [floor, 7 * floor] + [7 * floor - k * floor for k in range(1, 8)]
         stdin = _stdin_with_buffer(levels, drain_after=8)
-        ok = await asyncio.wait_for(
-            await_under_no_progress_bound(stdin.drain(), stdin, bound_secs=short_bound),
+        ok = await await_until(
+            asyncio.ensure_future(
+                await_under_no_progress_bound(stdin.drain(), stdin, bound_secs=short_bound)
+            ),
+            what="await_under_no_progress_bound to resolve",
             timeout=_OUTER_GUARD * 2,
         )
         assert ok is True
@@ -704,8 +809,11 @@ class TestCancelIsNeverSwallowedByTheLock:
         stdin.write = MagicMock()
         lock = asyncio.Lock()
         await lock.acquire()  # a prompt frame parked on a reader that stopped
-        outcome = await asyncio.wait_for(
-            write_notification_best_effort(stdin, lock, b"cancel\n", bound_secs=short_bound),
+        outcome = await await_until(
+            asyncio.ensure_future(
+                write_notification_best_effort(stdin, lock, b"cancel\n", bound_secs=short_bound)
+            ),
+            what="write_notification_best_effort to resolve",
             timeout=_OUTER_GUARD,
         )
         assert outcome == "appended_unlocked"
@@ -717,8 +825,11 @@ class TestCancelIsNeverSwallowedByTheLock:
         stdin = _stdin_with_buffer([0, 0], drain_after=0)
         stdin.write = MagicMock()
         lock = asyncio.Lock()
-        outcome = await asyncio.wait_for(
-            write_notification_best_effort(stdin, lock, b"cancel\n", bound_secs=short_bound),
+        outcome = await await_until(
+            asyncio.ensure_future(
+                write_notification_best_effort(stdin, lock, b"cancel\n", bound_secs=short_bound)
+            ),
+            what="write_notification_best_effort to resolve",
             timeout=_OUTER_GUARD,
         )
         assert outcome == "drained"
@@ -734,7 +845,11 @@ class TestCancelIsNeverSwallowedByTheLock:
         proc.stdin = _stdin_with_buffer([3_000_000, 3_000_000, 3_000_000], drain_after=None)
         proc.stdin.write = MagicMock()
         await client._stdin_write_lock().acquire()
-        await asyncio.wait_for(client.cancel_session(), timeout=_OUTER_GUARD)
+        await await_until(
+            asyncio.ensure_future(client.cancel_session()),
+            what="cancel_session to resolve",
+            timeout=_OUTER_GUARD,
+        )
         proc.stdin.write.assert_called_once()
         assert client._cancelled is True
 
@@ -750,7 +865,11 @@ class TestCancelIsNeverSwallowedByTheLock:
         proc.stdin = _stdin_with_buffer([3_000_000, 3_000_000, 3_000_000], drain_after=None)
         proc.stdin.write = MagicMock()
         await client._stdin_write_lock().acquire()
-        await asyncio.wait_for(client.cancel_session(), timeout=_OUTER_GUARD)
+        await await_until(
+            asyncio.ensure_future(client.cancel_session()),
+            what="cancel_session to resolve",
+            timeout=_OUTER_GUARD,
+        )
         assert client._last_activity == 0.0
 
         rt, rproc = _runtime_with_stdin(stalled=False)
@@ -758,8 +877,10 @@ class TestCancelIsNeverSwallowedByTheLock:
         rproc.stdin = _stdin_with_buffer([3_000_000, 3_000_000, 3_000_000], drain_after=None)
         rproc.stdin.write = MagicMock()
         await rt._stdin_write_lock().acquire()
-        await asyncio.wait_for(
-            rt.send_notification("session/cancel", {"sessionId": "s1"}), timeout=_OUTER_GUARD
+        await await_until(
+            asyncio.ensure_future(rt.send_notification("session/cancel", {"sessionId": "s1"})),
+            what="send_notification to resolve",
+            timeout=_OUTER_GUARD,
         )
         assert rt._last_activity == 0.0
 
@@ -767,8 +888,10 @@ class TestCancelIsNeverSwallowedByTheLock:
     async def test_drained_cancel_refreshes_the_activity_clock(self, short_bound: float) -> None:
         rt, rproc = _runtime_with_stdin(stalled=False)
         rt._last_activity = 0.0
-        await asyncio.wait_for(
-            rt.send_notification("session/cancel", {"sessionId": "s1"}), timeout=_OUTER_GUARD
+        await await_until(
+            asyncio.ensure_future(rt.send_notification("session/cancel", {"sessionId": "s1"})),
+            what="send_notification to resolve",
+            timeout=_OUTER_GUARD,
         )
         assert rt._last_activity > 0.0
 
@@ -780,8 +903,10 @@ class TestCancelIsNeverSwallowedByTheLock:
         proc.stdin = _stdin_with_buffer([3_000_000, 3_000_000, 3_000_000], drain_after=None)
         proc.stdin.write = MagicMock()
         await rt._stdin_write_lock().acquire()
-        await asyncio.wait_for(
-            rt.send_notification("session/cancel", {"sessionId": "s1"}), timeout=_OUTER_GUARD
+        await await_until(
+            asyncio.ensure_future(rt.send_notification("session/cancel", {"sessionId": "s1"})),
+            what="send_notification to resolve",
+            timeout=_OUTER_GUARD,
         )
         proc.stdin.write.assert_called_once()
         assert rt._dead is False
@@ -800,8 +925,11 @@ class TestWriteLock:
         stdin.write = MagicMock()
         lock = asyncio.Lock()
         await lock.acquire()  # a prior frame's drain is parked on a dead reader
-        ok = await asyncio.wait_for(
-            write_response_frame_bounded(stdin, lock, b"{}\n", bound_secs=short_bound),
+        ok = await await_until(
+            asyncio.ensure_future(
+                write_response_frame_bounded(stdin, lock, b"{}\n", bound_secs=short_bound)
+            ),
+            what="write_response_frame_bounded to resolve",
             timeout=_OUTER_GUARD,
         )
         assert ok is False
@@ -825,8 +953,11 @@ class TestWriteLock:
 
         holder = asyncio.ensure_future(_holder_releases_later())
         started = time.monotonic()
-        ok = await asyncio.wait_for(
-            write_response_frame_bounded(stdin, lock, b"{}\n", bound_secs=short_bound),
+        ok = await await_until(
+            asyncio.ensure_future(
+                write_response_frame_bounded(stdin, lock, b"{}\n", bound_secs=short_bound)
+            ),
+            what="write_response_frame_bounded to resolve",
             timeout=_OUTER_GUARD,
         )
         await holder
@@ -876,8 +1007,11 @@ class TestWriteLock:
             lock.release()
 
         holder = asyncio.ensure_future(_release_at_the_bound())
-        ok = await asyncio.wait_for(
-            write_response_frame_bounded(stdin, lock, b"{}\n", bound_secs=short_bound),
+        ok = await await_until(
+            asyncio.ensure_future(
+                write_response_frame_bounded(stdin, lock, b"{}\n", bound_secs=short_bound)
+            ),
+            what="write_response_frame_bounded to resolve",
             timeout=_OUTER_GUARD,
         )
         await holder
@@ -929,8 +1063,11 @@ class TestWriteLock:
 
         prompt = asyncio.ensure_future(rt.send_request("session/prompt", {"sessionId": "a"}))
         await asyncio.sleep(0)  # the prompt takes the lock and parks on its drain
-        await asyncio.wait_for(
-            rt.send_response("req-r4", {"outcome": {"outcome": "cancelled"}}),
+        await await_until(
+            asyncio.ensure_future(
+                rt.send_response("req-r4", {"outcome": {"outcome": "cancelled"}})
+            ),
+            what="send_response to resolve",
             timeout=_OUTER_GUARD,
         )
         prompt_drained_first = released.is_set()
@@ -1007,8 +1144,10 @@ class TestRequestWriteNoProgressBound:
         started = time.monotonic()
         with caplog.at_level(logging.WARNING, logger=acp_runtime.logger.name):
             with pytest.raises(AcpRuntimeDead, match=r"stdin stalled.* req=\d+") as ei:
-                await asyncio.wait_for(
-                    rt.send_request("session/prompt", {"sessionId": "s1"}), timeout=_OUTER_GUARD
+                await await_until(
+                    asyncio.ensure_future(rt.send_request("session/prompt", {"sessionId": "s1"})),
+                    what="send_request to resolve",
+                    timeout=_OUTER_GUARD,
                 )
         assert time.monotonic() - started < _OUTER_GUARD, "the bound did not fire"
         assert ei.value.ambiguous_delivery is True, "a buffered frame is an ambiguous delivery"
@@ -1039,8 +1178,11 @@ class TestRequestWriteNoProgressBound:
         try:
             with caplog.at_level(logging.WARNING, logger=acp_runtime.logger.name):
                 with pytest.raises(AcpRuntimeDead, match=r"stdin stalled.* req=\d+") as ei:
-                    await asyncio.wait_for(
-                        rt.send_request("session/prompt", {"sessionId": "s1"}),
+                    await await_until(
+                        asyncio.ensure_future(
+                            rt.send_request("session/prompt", {"sessionId": "s1"})
+                        ),
+                        what="send_request to resolve",
                         timeout=_OUTER_GUARD,
                     )
         finally:
@@ -1061,8 +1203,11 @@ class TestRequestWriteNoProgressBound:
         proc.stdin = _stdin_with_buffer([3_000_000, 3_000_000, 3_000_000], drain_after=None)
         proc.stdin.write = MagicMock()
         with pytest.raises(AcpRuntimeDead, match=r"stdin stalled"):
-            await asyncio.wait_for(
-                rt.send_request_for_answer("_session/steering", {"sessionId": "s1"}),
+            await await_until(
+                asyncio.ensure_future(
+                    rt.send_request_for_answer("_session/steering", {"sessionId": "s1"})
+                ),
+                what="send_request_for_answer to resolve",
                 timeout=_OUTER_GUARD,
             )
         assert rt._dead is True
@@ -1074,8 +1219,9 @@ class TestRequestWriteNoProgressBound:
         proc.stdin = _stdin_with_buffer([3_000_000, 3_000_000, 3_000_000], drain_after=None)
         proc.stdin.write = MagicMock()
         with pytest.raises(AcpRuntimeDead, match=r"stdin stalled"):
-            await asyncio.wait_for(
-                rt._send_and_await("session/new", {}, timeout=_OUTER_GUARD),
+            await await_until(
+                asyncio.ensure_future(rt._send_and_await("session/new", {}, timeout=_OUTER_GUARD)),
+                what="_send_and_await to resolve",
                 timeout=_OUTER_GUARD,
             )
         assert rt._dead is True
@@ -1092,8 +1238,11 @@ class TestRequestWriteNoProgressBound:
         client._kill_process = killed  # type: ignore[method-assign]
         with caplog.at_level(logging.WARNING, logger=acp_client.logger.name):
             with pytest.raises(AcpProcessDied, match=r"stdin stalled.* req=\d+"):
-                await asyncio.wait_for(
-                    client._send_request("session/prompt", {"sessionId": "s"}),
+                await await_until(
+                    asyncio.ensure_future(
+                        client._send_request("session/prompt", {"sessionId": "s"})
+                    ),
+                    what="_send_request to resolve",
                     timeout=_OUTER_GUARD,
                 )
         killed.assert_not_awaited(), "a write-path stall must NOT kill the child"
@@ -1117,8 +1266,10 @@ class TestRequestWriteNoProgressBound:
         client._work_dir = tmp_path
         client._work_dir_ready = True
         with pytest.raises(AcpProcessDied):
-            await asyncio.wait_for(
-                client._send_request("session/prompt", {"sessionId": "s"}), timeout=_OUTER_GUARD
+            await await_until(
+                asyncio.ensure_future(client._send_request("session/prompt", {"sessionId": "s"})),
+                what="_send_request to resolve",
+                timeout=_OUTER_GUARD,
             )
         assert client.is_responsive() is False
         assert client.has_active_turn() is False
@@ -1156,8 +1307,10 @@ class TestRequestWriteNoProgressBound:
         client._work_dir = tmp_path
         client._work_dir_ready = True
         with pytest.raises(AcpProcessDied):
-            await asyncio.wait_for(
-                client._send_request("session/prompt", {"sessionId": "s"}), timeout=_OUTER_GUARD
+            await await_until(
+                asyncio.ensure_future(client._send_request("session/prompt", {"sessionId": "s"})),
+                what="_send_request to resolve",
+                timeout=_OUTER_GUARD,
             )
         client._kill_process = AsyncMock()  # type: ignore[method-assign]
         client._spawn = AsyncMock()  # type: ignore[method-assign]
@@ -1178,8 +1331,10 @@ class TestRequestWriteNoProgressBound:
         rt._session_queues["s1"] = asyncio.Queue()
         proc.stdin = _stdin_with_buffer([3_000_000, 2_000_000, 1_000_000, 0], drain_after=3)
         proc.stdin.write = MagicMock()
-        req_id = await asyncio.wait_for(
-            rt.send_request("session/prompt", {"sessionId": "s1"}), timeout=_OUTER_GUARD
+        req_id = await await_until(
+            asyncio.ensure_future(rt.send_request("session/prompt", {"sessionId": "s1"})),
+            what="send_request to resolve",
+            timeout=_OUTER_GUARD,
         )
         assert rt._dead is False
         assert rt._routed_requests.get(req_id) == "s1"
@@ -1230,8 +1385,10 @@ class TestRequestWriteNoProgressBound:
         proc.stdin = _stdin_with_buffer([3_000_000, 3_000_000, 3_000_000], drain_after=None)
         proc.stdin.write = MagicMock()
         with pytest.raises(AcpRuntimeStdinStalled):
-            await asyncio.wait_for(
-                rt.send_request("session/prompt", {"sessionId": "c"}), timeout=_OUTER_GUARD
+            await await_until(
+                asyncio.ensure_future(rt.send_request("session/prompt", {"sessionId": "c"})),
+                what="send_request to resolve",
+                timeout=_OUTER_GUARD,
             )
         assert rt.stdin_stall_death is True
         # The answer is frozen at the death: a turn's teardown running first
@@ -1258,15 +1415,20 @@ class TestRequestWriteNoProgressBound:
         proc.stdin = _stdin_with_buffer([3_000_000, 3_000_000, 3_000_000], drain_after=None)
         proc.stdin.write = MagicMock()
         with pytest.raises(AcpRuntimeDead):
-            await asyncio.wait_for(
-                rt.send_request("session/prompt", {"sessionId": "sub"}), timeout=_OUTER_GUARD
+            await await_until(
+                asyncio.ensure_future(rt.send_request("session/prompt", {"sessionId": "sub"})),
+                what="send_request to resolve",
+                timeout=_OUTER_GUARD,
             )
         # Lock released by the stalled writer; the runtime is dead, so a peer's
         # write is refused at once (not blocked forever behind the lock).
         assert not rt._stdin_write_lock().locked()
         with pytest.raises(AcpRuntimeDead):
-            await asyncio.wait_for(
-                rt.send_response("parent-req", {"outcome": {"outcome": "selected"}}),
+            await await_until(
+                asyncio.ensure_future(
+                    rt.send_response("parent-req", {"outcome": {"outcome": "selected"}})
+                ),
+                what="send_response to resolve",
                 timeout=_OUTER_GUARD,
             )
 
@@ -1290,8 +1452,10 @@ class TestQueuedWriterAfterDeath:
         holder = asyncio.ensure_future(self._hold_then_die(rt, short_bound))
         await asyncio.sleep(0)
         with pytest.raises(AcpRuntimeDead):
-            await asyncio.wait_for(
-                rt.send_request("session/prompt", {"sessionId": "s1"}), timeout=_OUTER_GUARD
+            await await_until(
+                asyncio.ensure_future(rt.send_request("session/prompt", {"sessionId": "s1"})),
+                what="send_request to resolve",
+                timeout=_OUTER_GUARD,
             )
         await holder
         proc.stdin.write.assert_not_called()
@@ -1308,8 +1472,10 @@ class TestQueuedWriterAfterDeath:
         loop.set_exception_handler(lambda _l, ctx: unretrieved.append(str(ctx.get("message"))))
         try:
             with pytest.raises(AcpRuntimeDead):
-                await asyncio.wait_for(
-                    rt._send_and_await("initialize", {}, timeout=1.0), timeout=_OUTER_GUARD
+                await await_until(
+                    asyncio.ensure_future(rt._send_and_await("initialize", {}, timeout=1.0)),
+                    what="_send_and_await to resolve",
+                    timeout=_OUTER_GUARD,
                 )
             await holder
             proc.stdin.write.assert_not_called()
@@ -1333,7 +1499,9 @@ class TestQueuedWriterAfterDeath:
             else:
                 coro = rt.send_response(7, {"outcome": {"outcome": "cancelled"}})
             with pytest.raises(AcpRuntimeDead):
-                await asyncio.wait_for(coro, timeout=_OUTER_GUARD)
+                await await_until(
+                    asyncio.ensure_future(coro), what="the coro to resolve", timeout=_OUTER_GUARD
+                )
             await holder
             proc.stdin.write.assert_not_called(), coro_name
             assert not rt._stdin_write_lock().locked()
@@ -1359,8 +1527,10 @@ class TestOffLoopAutoAnswerKeepsItsAuditReason:
                 "params": {"sessionId": "child-1", "options": []},
             }
         )
-        await asyncio.wait_for(
-            rt._answer_unroutable_permission(msg, "child-1", reason="x"), timeout=_OUTER_GUARD
+        await await_until(
+            asyncio.ensure_future(rt._answer_unroutable_permission(msg, "child-1", reason="x")),
+            what="_answer_unroutable_permission to resolve",
+            timeout=_OUTER_GUARD,
         )
         assert audited == ["x:send_stalled_runtime_dead"]
         assert rt._dead is True

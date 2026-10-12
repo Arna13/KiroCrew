@@ -174,7 +174,6 @@
  1 test_decisions_points.py
  1 test_decisions_strands_launcher_wire.py
  2 test_denied_commands_security.py
-57 test_deny_bounded_write.py
  1 test_dependency_coordinator.py
 11 test_dev_fleet_app.py
  2 test_dev_fleet_gateway_routes.py
@@ -189,7 +188,6 @@
  2 test_e2e_ci_scheduling.py
  1 test_e2e_smoke.py
  5 test_eager_spawn.py
-29 test_early_approval_press_13578.py
  5 test_embedding_rebuild_generation.py
  1 test_embedding_rebuild_process.py
  2 test_embeddings.py
@@ -420,7 +418,6 @@
  1 test_spawn_approval_channel_governance_13491.py
  1 test_spawn_approval_mid_wait_deny_13559.py
  1 test_spawn_exec_shim.py
-21 test_spawn_floor_defaults.py
 12 test_spawn_followup.py
  4 test_spawn_reasoning_effort.py
  3 test_spawn_release_queued.py
