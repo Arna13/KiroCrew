@@ -38,6 +38,13 @@ NAME = f"{APP}/{SHORT}"
 
 
 def _manifest(cron: dict) -> AppManifest:
+    """A manifest that schedules *cron* and is otherwise valid.
+
+    ``permissions.cron`` is part of "otherwise valid": a manifest whose ``crons``
+    is non-empty without that grant is refused by ``AppManifest.validate``, so
+    without it every assertion below would read that refusal instead of the
+    timeout rule it is about.
+    """
     return AppManifest.from_dict(
         {
             "name": APP,
@@ -45,6 +52,7 @@ def _manifest(cron: dict) -> AppManifest:
             "displayName": "Test App",
             "description": "x",
             "author": "t",
+            "permissions": {"cron": True},
             "crons": [cron],
         }
     )
