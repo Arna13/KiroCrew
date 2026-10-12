@@ -205,6 +205,23 @@ class TestChannelApproveTrustTiers:
         assert agent._trusted_bases == set()
 
     @pytest.mark.asyncio
+    async def test_trust_base_refused_for_backslash_paths(self):
+        """``.\\deploy.bat`` derives ``.deploy.bat`` under POSIX tokenizing; the
+        endpoint must not record a base the user never typed, even from a
+        stale card. The exact-command tier still works for the same command."""
+        cmd = ".\\deploy.bat --go"
+        agent = _make_agent(pending_command=cmd)
+        resp, _ = await _call({"action": "trust_base", "pattern": ".deploy.bat *"}, agent)
+        assert resp.status == 400
+        assert json.loads(resp.body)["code"] == "pattern_underivable"
+        assert agent._trusted_bases == set()
+
+        agent = _make_agent(pending_command=cmd)
+        resp, _ = await _call({"action": "trust_command", "pattern": cmd}, agent)
+        assert resp.status == 200
+        assert _match_trusted_channel_command(cmd, agent)
+
+    @pytest.mark.asyncio
     async def test_trust_base_refused_for_quoted_executables(self):
         """Naive first-token slicing turned '"./my tool" --safe' into a
         './my'-prefixed grant covering different executables; shlex-aware

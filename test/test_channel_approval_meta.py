@@ -127,6 +127,28 @@ async def test_compound_command_has_no_derivable_base():
 
 
 @pytest.mark.asyncio
+async def test_backslash_path_offers_no_base_tier():
+    """POSIX tokenizing turns ``.\\deploy.bat`` into ``.deploy.bat``, a name the
+    user never typed, so the card must not offer "Trust all .deploy.bat
+    commands"; the exact tier still covers the command."""
+    meta = await _approval_meta(
+        _perm_event(tool_input=json.dumps({"command": ".\\deploy.bat --go"}), is_shell=True)
+    )
+    assert meta["command_grantable"] == "1"
+    assert meta["base_derivable"] == ""
+    assert meta["base_command"] == ""
+
+
+@pytest.mark.asyncio
+async def test_forward_slash_path_still_offers_its_base():
+    meta = await _approval_meta(
+        _perm_event(tool_input=json.dumps({"command": "./deploy.bat --go"}), is_shell=True)
+    )
+    assert meta["base_derivable"] == "1"
+    assert meta["base_command"] == "./deploy.bat"
+
+
+@pytest.mark.asyncio
 async def test_non_shell_tool_offers_no_per_command_tier():
     meta = await _approval_meta(
         _perm_event(
