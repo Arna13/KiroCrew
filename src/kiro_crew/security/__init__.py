@@ -1461,8 +1461,12 @@ def is_denied(
     # while the row is in the effective set so an operator opt-out disables both.
     # Reported under the row's own pattern, exactly as the self-protection floors
     # report theirs, so the refusal and its SEL event map back to the rule id.
+    # The original text goes along so the floor can tell ``-r`` from ``-R`` and ``x``
+    # from ``X`` where lowercasing erased the difference.
     chmod_pattern = _rules._CHMOD_WORLD_RWX_FLOOR_PATTERN
-    if chmod_pattern in regex_patterns and _submodule("chmod_floor")._is_chmod_world_rwx(lower):
+    if chmod_pattern in regex_patterns and _submodule("chmod_floor")._is_chmod_world_rwx(
+        lower, tool_name
+    ):
         _emit_deny_event(tool_name, chmod_pattern, lower)
         return _reason(
             chmod_pattern,

@@ -42,24 +42,31 @@ because ``argv_floor`` is held to a per-module line ceiling by
 ``test_no_single_module_grows_back_into_a_monolith``.
 """
 
+import contextvars
 import re
 
+from .argv_floor import _brace_expansions
 from .perm_verb_mention import _REDIRECT_AMP_RE
 from .shell_normalizer import (
     _CONTROL_OPERATOR_RE,
     _DATA_CONSUMER_PROGRAMS,
-    _NESTED_SHELL_PROGRAMS,
-    _NESTED_SHELL_VERBS,
     _REDIRECT_START_RE,
     _argv_programs,
-    _brace_pairs,
     _ends_argv,
-    _heredoc_marker,
     _program_basename,
-    _self_tokens,
     _shell_payload_walk,
-    _split_brace_alternatives,
 )
+
+#: What lowercasing erased, recovered from the gate's ORIGINAL text for the call in
+#: progress: ``(r_may_be_R, x_may_be_X)``.  The gate hands this floor lowercased
+#: text, so ``-r`` may be the option ``-R`` and ``x`` may be ``X`` (execute only for
+#: a directory or an already-executable file).  When the original holds no ``R``
+#: (or no ``X``) anywhere, the lowercase letter is certainly what was written.  The
+#: default -- no original known -- keeps both ambiguous, the fail-closed reading.
+_CASE_AMBIGUITY: "contextvars.ContextVar[tuple[bool, bool]]" = contextvars.ContextVar(
+    "chmod_floor_case_ambiguity", default=(True, True)
+)
+
 
 #: The program this floor is about.  Compared against ``_program_basename`` of a
 #: word, so ``/bin/chmod``, ``"chmod"``, ``ch''mod`` and ``chmod>/dev/null`` all
@@ -128,6 +135,7 @@ def _mode_grants_world_rwx(mode: str) -> bool:
         while i < len(clause) and clause[i] in _WHO_LETTERS:
             i += 1
         has_who = i > 0
+        who_end = i
         if i == len(clause):
             return False  # empty clause, or a who list with no action: invalid
         while i < len(clause):
@@ -153,9 +161,54 @@ def _mode_grants_world_rwx(mode: str) -> bool:
                 if i < len(clause):
                     return False
                 continue
+            start = i
             while i < len(clause) and clause[i] in _SYMBOLIC_PERMS:
                 i += 1
+            bits &= ~_symbolic_narrowing(clause[:who_end], op, clause[start:i])
     return bits & _WORLD_RWX_BITS == _WORLD_RWX_BITS
+
+
+_WHO_MASKS = {"u": 0o700, "g": 0o070, "o": 0o007, "a": 0o777}
+_PERM_MASKS = {"r": 0o444, "w": 0o222, "x": 0o111}
+
+
+def _symbolic_narrowing(who: str, op: str, letters: str) -> int:
+    """The bits a symbolic action is CERTAIN to clear, for an explicit *who*.
+
+    ``=777,go-w`` is ``755``, not a grant.  Only the part
+    of a letter action that is independent of the file and the umask is applied,
+    and only in the narrowing direction, so the floor never reads LESS grant than
+    ``chmod`` applies except through a symbolic grant -- the residual the issue
+    leaves alone:
+
+    * with no who, ``chmod`` masks the action with the umask, which the gate does
+      not know: nothing is certain, so nothing is cleared;
+    * ``-`` clears the named ``r``/``w`` bits of each who;
+    * ``=`` clears every ``r``/``w`` bit of each who the letters do not name;
+    * ``x`` is certain only when the original text holds no ``X``
+      (``_CASE_AMBIGUITY``): otherwise it may be a lowercased ``X`` (execute only
+      for a directory or an already-executable file) and is kept.  The copy letters
+      ``u``/``g``/``o`` depend on the file, so an action with one clears nothing;
+    * ``+`` clears nothing.
+
+    Measured against GNU ``chmod``: ``=777,go-w`` is ``755`` and ``=777,o=rx`` is
+    ``775`` (both read exactly); ``=777,a-x`` is ``666`` (read as ``777``,
+    over-strict).
+    """
+    if not who or op == "+":
+        return 0
+    if any(ch in "ugo" for ch in letters):
+        return 0
+    who_mask = 0
+    for ch in who:
+        who_mask |= _WHO_MASKS[ch]
+    named = 0
+    for ch in letters:
+        named |= _PERM_MASKS.get(ch, 0)
+    readable_writable = 0o666 if _CASE_AMBIGUITY.get()[1] else 0o777
+    if op == "-":
+        return who_mask & named & readable_writable
+    return who_mask & ~named & readable_writable
 
 
 #: The characters GNU ``chmod`` reads as the START of a mode when they follow a
@@ -185,7 +238,11 @@ def _is_dash_mode(word: str) -> bool:
         return False
     if word[1] in _DASH_MODE_FIRST:
         return True
-    return word[1] == "r" and len(word) > 2 and all(ch in _DASH_MODE_CHARS for ch in word[2:])
+    if word[1] != "r":
+        return False
+    if not _CASE_AMBIGUITY.get()[0]:
+        return True  # the original holds no ``R``: this is the mode letter ``r``
+    return len(word) > 2 and all(ch in _DASH_MODE_CHARS for ch in word[2:])
 
 
 #: Characters that make a word a pathname glob once braces are expanded.  A glob
@@ -194,79 +251,39 @@ def _is_dash_mode(word: str) -> bool:
 #: A glob among the FILE operands is a filename and is not read.
 _PATH_GLOB_RE = re.compile(r"[*?\[]")
 
-#: How many words one brace expansion may produce before the reader stops and
-#: refuses.  Past the cap a word reads as "could be anything", the fail-closed
-#: direction, as the shared glob translator's budgets do.
-_BRACE_EXPANSION_CAP = 64
-
-_NUMERIC_SEQUENCE_RE = re.compile(r"\A(-?\d+)\.\.(-?\d+)(?:\.\.(-?\d+))?\Z")
-_LETTER_SEQUENCE_RE = re.compile(r"\A([a-z])\.\.([a-z])(?:\.\.(-?\d+))?\Z")
-
-
-def _brace_sequence(body: str) -> "list[str] | None":
-    """The words bash makes of a ``{x..y[..step]}`` body, or None if it is not one."""
-    numeric = _NUMERIC_SEQUENCE_RE.match(body)
-    letters = _LETTER_SEQUENCE_RE.match(body)
-    if numeric is None and letters is None:
-        return None
-    match = numeric if numeric is not None else letters
-    assert match is not None
-    step = abs(int(match.group(3))) if match.group(3) else 1
-    step = step or 1
-    if numeric is not None:
-        lo, hi = int(numeric.group(1)), int(numeric.group(2))
-        # bash zero-pads every word to the wider endpoint when either is padded
-        padded = any(
-            len(g.lstrip("-")) > 1 and g.lstrip("-").startswith("0")
-            for g in (numeric.group(1), numeric.group(2))
-        )
-        width = max(len(numeric.group(1)), len(numeric.group(2))) if padded else 0
-        count = abs(hi - lo) // step + 1
-        if count > _BRACE_EXPANSION_CAP:
-            return []
-        values = range(lo, hi + (1 if hi >= lo else -1), step if hi >= lo else -step)
-        return [str(v).zfill(width) if width else str(v) for v in values]
-    lo_c, hi_c = ord(letters.group(1)), ord(letters.group(2))  # type: ignore[union-attr]
-    values = range(lo_c, hi_c + (1 if hi_c >= lo_c else -1), step if hi_c >= lo_c else -step)
-    return [chr(v) for v in values]
-
 
 def _expand_braces(word: str) -> "list[str] | None":
-    """The words bash's brace expansion makes of *word*, in order.
+    """The words bash's brace expansion makes of *word*; None past the cap.
 
-    ``{777,755}`` is ``777 755``, ``7{7,5}7`` is ``777 757``, ``{0..0}0777`` is
-    ``00777``, and a group with no top-level comma that is not a sequence
-    (``{state}``) or one opened by ``$`` (a parameter expansion) is left literal --
-    the same three shapes the shared glob translator mirrors.  Returns None when
-    the expansion would pass ``_BRACE_EXPANSION_CAP`` words, which the caller
-    refuses.
+    The package's one expander, ``argv_floor._brace_expansions`` (alternatives,
+    sequences, nesting, ``${...}`` left literal, a cap that fails closed).  It
+    expands innermost groups first, so its word ORDER can differ from bash's for
+    nested groups (``{{-v,777},644}`` comes back ``-v 644 777 644``; bash says
+    ``-v 777 644``), and it drops a sequence's zero padding, which cannot change
+    an octal value.  The caller therefore never relies on the order of a word that
+    expands to several: see :func:`_brace_word_may_grant`.
     """
     if "{" not in word:
         return [word]
-    pairs = _brace_pairs(word)
-    for start, ch in enumerate(word):
-        if ch != "{" or start not in pairs or (start > 0 and word[start - 1] == "$"):
-            continue
-        close = pairs[start]
-        body = word[start + 1 : close]
-        alternatives = _split_brace_alternatives(body)
-        if len(alternatives) < 2:
-            sequence = _brace_sequence(body)
-            if sequence is None:
-                continue
-            if not sequence:
-                return None
-            alternatives = sequence
-        out: list[str] = []
-        for alternative in alternatives:
-            expanded = _expand_braces(word[:start] + alternative + word[close + 1 :])
-            if expanded is None:
-                return None
-            out.extend(expanded)
-            if len(out) > _BRACE_EXPANSION_CAP:
-                return None
-        return out
-    return [word]
+    return _brace_expansions(word)
+
+
+def _brace_word_may_grant(words: "list[str]") -> bool:
+    """True if any word one brace word expands to would grant, read as the mode.
+
+    Asked only while the mode position is still open (no positional operand yet),
+    so a brace group among the FILES (``chmod 755 {bin,scripts}/*.sh``) is not.
+    Order-independent and fail closed: a brace word whose expansions include a
+    world-rwx mode (``{00777,0755}``, ``{-x,-+777}``) is refused,
+    including ``{755,777}``, whose first word is the mode ``755``.  Nobody spells a
+    mode as a brace group by accident.
+    """
+    for word in words:
+        # A dash-led mode word (``-+777``) is itself a mode-grammar string, so one
+        # evaluation covers both the positional and the dash-led reading.
+        if _PATH_GLOB_RE.search(word) or _mode_grants_world_rwx(word):
+            return True
+    return False
 
 
 #: The one ``chmod`` long option that takes a VALUE -- the file whose mode is
@@ -296,6 +313,21 @@ _GLUED_BOUNDARY_RE = re.compile(r"[;&|\n]")
 #: ``&`` can read as a command boundary; ``<&`` and ``<>`` likewise.
 _REDIRECT_OPERATOR_RE = re.compile(r"&>>?|>{1,2}[&|!]?|<<<|<<-?|<[&>]?")
 _DESCRIPTOR_PREFIX_RE = re.compile(r"\A(?:\d+|&|\{[A-Za-z_][A-Za-z0-9_]*\})\Z")
+
+
+def _ends_in_open_operator(token: str) -> bool:
+    """True if the LAST redirection operator in *token* ends the token.
+
+    Such an operator's target is the NEXT word: ``2>``, ``&>``, ``--recursive>``,
+    and a chain ``2>&1>`` alike, whose last ``>`` takes ``/dev/null`` as its
+    target so it is never the mode.  A
+    duplication that names its descriptor (``2>&1``) or a target in the same word
+    (``>out``) is closed.
+    """
+    last = None
+    for last in _REDIRECT_OPERATOR_RE.finditer(token):
+        pass
+    return last is not None and last.end() == len(token)
 
 
 def _split_word(token: str) -> "tuple[str, bool, bool]":
@@ -330,7 +362,7 @@ def _split_word(token: str) -> "tuple[str, bool, bool]":
         return word[: boundary.start()], True, False
     # A boundary inside the redirection's TARGET (``>out&echo x``) also ends the
     # command; the target itself is the shell's and is never a word here.
-    pending = redirect is not None and tail == ""
+    pending = redirect is not None and _ends_in_open_operator(token)
     return word, _GLUED_BOUNDARY_RE.search(tail) is not None, pending
 
 
@@ -349,6 +381,57 @@ def _is_reference_option(option: str) -> bool:
     return len(name) >= _REFERENCE_ABBREVIATION_MIN and _REFERENCE_OPTION.startswith(name)
 
 
+#: BSD ``chmod``'s ``getopt`` string is ``HLPRXfghorstuvwx`` (FreeBSD
+#: ``bin/chmod/chmod.c``; macOS ships the same tool).  Lowercased, as the gate
+#: hands text to this floor: ``x`` stands for ``X`` too, and ``r`` for both the
+#: option ``-R`` and the mode letter ``-r``.
+_BSD_FLAG_LETTERS = frozenset("hlpfv")
+_BSD_MODE_LETTERS = frozenset("gostuwx")
+
+
+def _bsd_mode_candidates(words: "list[str]") -> "list[str]":
+    """Every word BSD ``chmod`` could take as the MODE of *words*, per its source.
+
+    BSD ``getopt`` does not permute: it stops at the first word that is not an
+    option cluster, and that word is the mode.  Inside a cluster, a mode letter
+    (``-w``, ``-x``) ends option parsing: alone (``-x``) the word itself is the
+    mode; as the LAST letter of a cluster (``-Rw``) getopt has already stepped past
+    the word, so the NEXT word is the mode -- ``chmod -Rw 777 f`` sets ``777``
+    recursively on BSD while GNU refuses ``-Rw`` as an invalid mode; in the middle
+    of a cluster the cluster itself is the mode.  Any other letter, ``--`` long
+    options included, is a usage error and changes nothing.  ``r`` is read both as
+    ``-R`` (parsing continues) and as the mode letter, because lowercasing erased
+    the difference: every candidate is evaluated and any grant refuses.
+    """
+    out: list[str] = []
+    for index, word in enumerate(words):
+        following = words[index + 1] if index + 1 < len(words) else None
+        if word == "--":
+            if following is not None:
+                out.append(following)
+            return out
+        if not word.startswith("-") or word == "-":
+            out.append(word)
+            return out
+        cluster = word[1:]
+        for position, letter in enumerate(cluster):
+            last = position == len(cluster) - 1
+            r_is_mode_only = letter == "r" and not _CASE_AMBIGUITY.get()[0]
+            if letter in _BSD_MODE_LETTERS or letter == "r":
+                if len(cluster) == 1:
+                    out.append(word)
+                elif last:
+                    if following is not None:
+                        out.append(following)
+                else:
+                    out.append(word)
+                if letter != "r" or r_is_mode_only:
+                    return out
+            elif letter not in _BSD_FLAG_LETTERS:
+                return out
+    return out
+
+
 def _chmod_argv_sets_world_rwx(argv: "list[str]", target_pending: bool = False) -> bool:
     """True if *argv* (the words AFTER the ``chmod`` word) names a world-rwx mode.
 
@@ -360,8 +443,10 @@ def _chmod_argv_sets_world_rwx(argv: "list[str]", target_pending: bool = False) 
     hand ``chmod`` a ``777`` mode.  *target_pending* carries that state in from the
     ``chmod`` word itself (``chmod> /dev/null ...``).
 
-    Each word is then brace-expanded, as bash does before ``chmod`` runs
-    (``{00777,0755}`` is two words, ``00777`` first).  Of the words that remain,
+    Each word is then brace-expanded, as bash does before ``chmod`` runs, with the
+    package's shared expander; a brace word any of whose expansions would grant
+    as the mode is refused outright (``{00777,0755}``), so the expander's word
+    order never decides the verdict.  Of the words that remain,
     every ``--long`` and short option is an option wherever it sits (GNU
     permutes), ``--`` ends option parsing, ``--reference`` means the command
     carries NO mode operand, a ``-``-led MODE word (``-x``, ``-w,+777``,
@@ -371,13 +456,14 @@ def _chmod_argv_sets_world_rwx(argv: "list[str]", target_pending: bool = False) 
     the word it changes: ``chmod -v 777 --reference=t f`` copies ``t``'s mode, and
     ``chmod 777 -x f`` (GNU) removes ``x`` from the files ``777`` and ``f``.
 
-    BSD ``chmod`` (macOS) does NOT permute: its option parsing stops at the first
-    operand, so there the first mode-or-operand word is the mode and everything
-    after it is a file, including a ``-x`` or a ``--reference=t`` that GNU would
-    read as an option (measured shape: ``chmod 777 -x f`` is ``777`` on BSD and a
-    removal on GNU).  The argv is refused when EITHER reading grants, because the
-    gate does not know which ``chmod`` the line reaches.  That costs only odd GNU
-    orderings with an option after the mode (``chmod -v 777 --reference=t f``).
+    BSD ``chmod`` (macOS) does NOT permute: its ``getopt`` stops at the first word
+    that is not an option cluster, and a mode letter inside a cluster stops it too
+    (:func:`_bsd_mode_candidates`, read from FreeBSD's ``bin/chmod/chmod.c``).  So
+    there ``chmod -v 777 --reference=t f`` and ``chmod -v 777 -x f`` set ``777``, and
+    ``chmod -Rw 777 f`` sets ``777`` recursively while GNU calls ``-Rw`` invalid.
+    The argv is refused when EITHER reading grants, because the gate does not know
+    which ``chmod`` the line reaches.  BSD behaviour was read from source, not
+    measured on a BSD host.
 
     The mode is then evaluated by :func:`_mode_grants_world_rwx`.  A mode word
     that is still a pathname glob after brace expansion, or a brace word past the
@@ -390,13 +476,20 @@ def _chmod_argv_sets_world_rwx(argv: "list[str]", target_pending: bool = False) 
     reference = False
     positional: "str | None" = None
     dash_modes: list[str] = []
-    # BSD's reading: the first word that is a mode or an operand, unless an option
-    # BSD does not have (``--reference``) came first, which BSD refuses outright.
-    first_candidate: "str | None" = None
-    bsd_refuses = False
+    # Every word the program receives, in order, for BSD's non-permuting reading.
+    program_words: list[str] = []
     redirect_target_pending = target_pending
     reference_file_pending = False
     for token in argv:
+        if redirect_target_pending:
+            # This word is the previous operator's target, whatever it spells --
+            # a ``#``, a ``>`` or a ``;`` included: the shell hands it to the
+            # redirection, never to ``chmod``, and never reads it as a comment or a
+            # boundary.  The gate's tokens have lost their quotes, so a quoted
+            # ``'a;b'`` and an unquoted ``a;b`` look alike; reading on past both is
+            # the reading that cannot miss the mode.
+            redirect_target_pending = False
+            continue
         if token.startswith("#"):
             break
         # A word that IS a redirection (``2>/dev/null``, ``>``, ``&>/dev/null``) is
@@ -405,23 +498,30 @@ def _chmod_argv_sets_world_rwx(argv: "list[str]", target_pending: bool = False) 
         # previous word made on the next one.
         redirect = _REDIRECT_START_RE.match(token)
         if redirect is not None:
-            if redirect.end() == len(token):
+            if _ends_in_open_operator(token):
                 redirect_target_pending = True
             elif _GLUED_BOUNDARY_RE.search(token[redirect.end() :]):
                 break
             continue
         head, ends_command, opens_redirect = _split_word(token)
-        if redirect_target_pending:
-            # This word is the previous operator's target, whatever it spells.
-            redirect_target_pending = False
-            words: list[str] = []
-        elif not head:
+        words: list[str]
+        if not head:
             words = []
         else:
             expanded = _expand_braces(head)
             if expanded is None:
+                # Past the expander's cap the words are unknown.  That matters only
+                # where a word could still be the mode: the mode position is open,
+                # or options are open and the word could expand to a dash-led mode.
+                # A file list past the cap (``chmod 644 -- {1..300}``) is files.
+                mode_open = positional is None and not dash_modes
+                if mode_open or (options_open and "-" in head):
+                    return True
+                expanded = []
+            if len(expanded) > 1 and positional is None and _brace_word_may_grant(expanded):
                 return True
             words = expanded
+        program_words.extend(words)
         for word in words:
             if reference_file_pending:
                 reference = True
@@ -430,31 +530,23 @@ def _chmod_argv_sets_world_rwx(argv: "list[str]", target_pending: bool = False) 
                 options_open = False
             elif options_open and _is_dash_mode(word):
                 dash_modes.append(word)
-                if first_candidate is None:
-                    first_candidate = word
             elif options_open and word.startswith("-") and len(word) > 1:
                 if _PATH_GLOB_RE.search(word):
                     # ``-*`` can expand to a file named ``-x,+777``: unreadable.
                     return True
                 if word.startswith("--") and _is_reference_option(word):
-                    if first_candidate is None:
-                        bsd_refuses = True
                     if "=" in word:
                         reference = True
                     else:
                         reference_file_pending = True
-            else:
-                if positional is None:
-                    positional = word
-                if first_candidate is None:
-                    first_candidate = word
+            elif positional is None:
+                positional = word
         if opens_redirect:
             redirect_target_pending = True
         if ends_command or _ends_argv(token):
             break
     gnu_mode = None if reference else (",".join(dash_modes) if dash_modes else positional)
-    bsd_mode = None if bsd_refuses else first_candidate
-    for mode in (gnu_mode, bsd_mode):
+    for mode in [gnu_mode, *_bsd_mode_candidates(program_words)]:
         if mode is None:
             continue
         if _PATH_GLOB_RE.search(mode):
@@ -464,12 +556,13 @@ def _chmod_argv_sets_world_rwx(argv: "list[str]", target_pending: bool = False) 
     return False
 
 
-def _names_chmod_invocation(token: str, program: str) -> bool:
+def _names_chmod_invocation(token: str, program: str, at_program: bool = False) -> bool:
     """True if *token* is the ``chmod`` that RUNS in its command, not a mention.
 
-    *program* is what ``_argv_programs`` attributes the word to.  Three readings:
+    *program* is what ``_argv_programs`` attributes the word to, and *at_program*
+    says the word sits in program position.  Three readings:
 
-    * The word is its command's own program (``program`` is ``chmod``), or an
+    * The word is in program position, or an
       argument of a program that EXECUTES its arguments -- ``sudo``, ``env``,
       ``nice``, ``time``, ``xargs``, ``find -exec``, ``busybox``, ``ssh``, a
       ``docker exec``.  No such program is a data consumer, so the test is
@@ -493,10 +586,12 @@ def _names_chmod_invocation(token: str, program: str) -> bool:
     """
     if _program_basename(token) != _CHMOD_PROGRAM:
         return False
-    if program == _CHMOD_PROGRAM or program not in _DATA_CONSUMER_PROGRAMS:
+    if at_program or program not in _DATA_CONSUMER_PROGRAMS:
         # ``chmod`` is itself in the consumer vocabulary (its own arguments are
-        # paths), so program position is tested FIRST: the word that IS the
-        # program is the invocation, whatever vocabulary lists its name.
+        # paths), so program POSITION is tested first: the word that IS the
+        # program is the invocation, and a later ``chmod`` word owned by a chmod
+        # is that chmod's file operand (``chmod 755 -- chmod 0777`` sets 755 on
+        # two files).
         return True
     return _CONTROL_OPERATOR_RE.search(_REDIRECT_AMP_RE.sub("", token)) is not None
 
@@ -504,125 +599,70 @@ def _names_chmod_invocation(token: str, program: str) -> bool:
 def _frame_sets_world_rwx(tokens: "list[str]") -> bool:
     """True if one command in this frame's *tokens* is a world-rwx ``chmod``."""
     programs = _argv_programs(tokens)
+    expect_program = True
     for index, token in enumerate(tokens):
-        if not _names_chmod_invocation(token, programs[index]):
+        at_program = expect_program and _ASSIGNMENT_RE.match(token) is None
+        if _ends_argv(token):
+            expect_program = True
+        elif at_program:
+            expect_program = False
+        if not _names_chmod_invocation(token, programs[index], at_program):
             continue
+        if (
+            not at_program
+            and programs[index] == "git"
+            and _CONTROL_OPERATOR_RE.search(_REDIRECT_AMP_RE.sub("", token)) is None
+        ):
+            # A ``chmod`` word that is an argument of a git data subcommand
+            # (``git grep -n chmod``) is that subcommand's pattern or path.
+            words = _command_words(tokens, index)
+            if _subcommand(words[:-1]) in _GIT_DATA_SUBCOMMANDS:
+                continue
         if _chmod_argv_sets_world_rwx(tokens[index + 1 :], _ends_in_open_redirect(token)):
             return True
     return False
 
 
-# ── Heredoc bodies that a program only READS ──
-# The shared walk folds a heredoc body into its frame as more commands (a newline
-# is a ``;``), because it cannot tell ``bash <<EOF`` (runs the body) from ``cat
-# <<EOF`` (prints it).  Reading the body is the fail-closed direction, but it
-# refused every commit message, spec bullet and test fixture that MENTIONS a flag
-# spelling of the change -- ``git commit -F - <<'EOF'``, ``cat >> notes.md <<'EOF'``,
-# ``tee fixture.txt <<'EOF'``, ``git commit -m "$(cat <<'EOF' ...)"`` -- none of which
-# runs it.  So this floor, and only this floor, reads such a body as the data it
-# is, under two conditions that are each checked on structure, never on a
-# spelling:
-#
-# * the body's consumer (the program of the command carrying the ``<<``) is one
-#   whose stdin is DATA: the shared data-consumer vocabulary minus the programs
-#   that can run their stdin as a script (``sed -f -``, ``awk -f -``, the pagers'
-#   ``!command``), plus ``git`` and ``gh``, which read a message or a body from
-#   stdin and never execute it;
-# * nothing in the line can run PRINTED text: no shell, ``eval``, ``source``,
-#   ``.`` or ``xargs`` anywhere in any frame, and no expansion in a position
-#   where its OUTPUT would be a command -- program position, or an argument of a
-#   program outside that data vocabulary (``sudo "$(cat <<EOF ...)"``).  A
-#   substitution as an argument of ``git``/``gh``/``cat`` is a message or a path.
-#
-# Everything else is read exactly as before.  Substitutions INSIDE a body are
-# separate frames of the walk and are judged on their own either way.
-_HEREDOC_DATA_PROGRAMS = (_DATA_CONSUMER_PROGRAMS - {"sed", "awk", "less", "more"}) | {"git", "gh"}
-_PRINTED_TEXT_RUNNERS = _NESTED_SHELL_PROGRAMS | _NESTED_SHELL_VERBS | {"xargs"}
-
-#: A ``<<`` that opens a heredoc (not a ``<<<`` here-string), anywhere in a word.
-_HEREDOC_OPEN_RE = re.compile(r"(?<!<)<<(?!<)")
-_TAG_QUOTES = "'\"\\"
+# ── Argument ownership under git ──
+_GIT_OPTIONS_WITH_VALUE = frozenset({"-c", "--config-env", "--git-dir", "--work-tree"})
 
 
-def _heredoc_tag(tokens: "list[str]", index: int) -> "tuple[str, bool] | None":
-    """``(tag, strips_tabs)`` for a heredoc opened in ``tokens[index]``, else None."""
-    token = tokens[index]
-    found = _HEREDOC_OPEN_RE.search(token)
-    if found is None:
-        return None
-    marker = _heredoc_marker(token[found.start() :])
-    if marker is None:
-        return None
-    strips_tabs = token[found.start() :].startswith("<<-")
-    if marker == "":
-        if index + 1 >= len(tokens):
-            return None
-        marker = tokens[index + 1]
-    tag = re.split(r"[;&|]", marker)[0]
-    tag = "".join(ch for ch in tag if ch not in _TAG_QUOTES)
-    return (tag, strips_tabs) if tag else None
+#: ``git`` subcommands whose arguments are data -- patterns, paths, revisions,
+#: messages -- and never a command they run: ``git grep -n chmod -- '*.sh'``
+#: searches.  Subcommands that DO run their arguments (``bisect run``,
+#: ``submodule foreach``, ``difftool -x``) and every alias stay executing, the
+#: default for an unlisted program.  An alias never shadows a builtin.
+_GIT_DATA_SUBCOMMANDS = frozenset(
+    {"grep", "log", "show", "diff", "blame", "ls-files", "ls-tree", "status", "shortlog"}
+    | {"add", "rm", "mv", "commit", "tag", "notes", "cat-file", "rev-parse"}
+)
 
 
-def _without_data_heredoc_body(source: str, tokens: "list[str]") -> "list[str] | None":
-    """*tokens* re-read with a data consumer's heredoc body removed, else None.
-
-    Only the simple shape is handled: exactly one heredoc in the frame, opened on
-    one line of *source*.  The body runs from the line after it to the first line
-    that is exactly the tag (``<<-`` strips leading tabs first), as bash ends it; a
-    missing tag runs the body to the end, as bash does.  Every other shape keeps
-    its body, the fail-closed reading.
-    """
-    openers = [i for i, token in enumerate(tokens) if _HEREDOC_OPEN_RE.search(token)]
-    if len(openers) != 1 or len(_HEREDOC_OPEN_RE.findall(source)) != 1:
-        return None
-    index = openers[0]
-    if _argv_programs(tokens)[index] not in _HEREDOC_DATA_PROGRAMS:
-        return None
-    tag_info = _heredoc_tag(tokens, index)
-    if tag_info is None:
-        return None
-    tag, strips_tabs = tag_info
-    lines = source.split("\n")
-    opener_line = next(i for i, line in enumerate(lines) if _HEREDOC_OPEN_RE.search(line))
-    end = len(lines)
-    for i in range(opener_line + 1, len(lines)):
-        if (lines[i].lstrip("\t") if strips_tabs else lines[i]) == tag:
-            end = i
-            break
-    return _self_tokens("\n".join(lines[: opener_line + 1] + lines[end:]))
+def _subcommand(words: "list[str]") -> "str | None":
+    """The subcommand of the ``git``/``gh`` command *words* (program first)."""
+    rest = iter(words[1:])
+    for word in rest:
+        if word in _GIT_OPTIONS_WITH_VALUE:
+            next(rest, None)
+            continue
+        if word.startswith("-"):
+            continue
+        return word
+    return None
 
 
-#: A word that opens with an expansion once the quotes and parentheses the shell
-#: strips first are off: its OUTPUT is what the word becomes.
-_EXPANSION_LEAD_RE = re.compile(r"\A[\"'(]*[$`]")
+def _command_words(tokens: "list[str]", index: int) -> "list[str]":
+    """The words of the command *tokens[index]* belongs to, program first."""
+    start = index
+    while start > 0 and not _ends_argv(tokens[start - 1]):
+        start -= 1
+    while start < index and _ASSIGNMENT_RE.match(tokens[start]):
+        start += 1
+    return tokens[start : index + 1]
+
 
 #: A leading ``NAME=value`` word, which precedes the program instead of being it.
 _ASSIGNMENT_RE = re.compile(r"\A[a-z_][a-z0-9_]*=")
-
-
-def _can_run_printed_text(frames: "list[list[str]]") -> bool:
-    """True if any frame could execute text another command PRINTS.
-
-    A word counts when it sits where its text becomes a command: program position
-    (past any leading assignments), or an argument of a program outside the data
-    vocabulary (``sudo``, ``env``, ``find -exec``).  Such a word is a shell, an
-    evaluator or ``xargs`` by name, or an expansion whose output is the command.
-    """
-    for tokens in frames:
-        programs = _argv_programs(tokens)
-        expect_program = True
-        for index, token in enumerate(tokens):
-            at_program = expect_program and _ASSIGNMENT_RE.match(token) is None
-            if at_program or programs[index] not in _HEREDOC_DATA_PROGRAMS:
-                if _program_basename(token) in _PRINTED_TEXT_RUNNERS:
-                    return True
-                if _EXPANSION_LEAD_RE.match(token):
-                    return True
-            if _ends_argv(token):
-                expect_program = True
-            elif at_program:
-                expect_program = False
-    return False
 
 
 #: Characters without which no word can de-quote or expand into a spelling it
@@ -640,13 +680,12 @@ def _chmod_floor_can_fire(text_lower: str) -> bool:
     return _CHMOD_PROGRAM in text_lower or _GLUE_CHARS_RE.search(text_lower) is not None
 
 
-def _is_chmod_world_rwx(text_lower: str) -> bool:
+def _is_chmod_world_rwx(text_lower: str, original: "str | None" = None) -> bool:
     """True if *text_lower* runs ``chmod`` with a world-rwx numeric mode.
 
     Judged on the argv of the command itself and of every nested shell payload
     (``bash -c``, ``eval``, ``$( )``, heredocs), so a wrapper buys nothing.  A
-    heredoc body that a data consumer only reads is set aside first, when nothing
-    in the line can run printed text (see ``_HEREDOC_DATA_PROGRAMS``).  The
+    heredoc body is read as commands, the shared walk's fail-closed reading.  The
     contract is the floor's: callers pass already-lowercased text, as
     ``is_denied`` does.
 
@@ -657,23 +696,22 @@ def _is_chmod_world_rwx(text_lower: str) -> bool:
     """
     if not _chmod_floor_can_fire(text_lower):
         return False
+    if original is None:
+        return _read_frames(text_lower)
+    token = _CASE_AMBIGUITY.set(("R" in original, "X" in original))
+    try:
+        return _read_frames(text_lower)
+    finally:
+        _CASE_AMBIGUITY.reset(token)
+
+
+def _read_frames(text_lower: str) -> bool:
+    """The body of :func:`_is_chmod_world_rwx`, under the case reading in force."""
     try:
         frames = _shell_payload_walk(text_lower)
     except Exception:
         return False
-    views: list[list[str]] = []
-    for source, tokens in frames:
-        try:
-            stripped = _without_data_heredoc_body(source, tokens)
-        except Exception:
-            stripped = None
-        views.append(tokens if stripped is None else stripped)
-    try:
-        if _can_run_printed_text(views):
-            views = [tokens for _source, tokens in frames]
-    except Exception:
-        views = [tokens for _source, tokens in frames]
-    for tokens in views:
+    for _source, tokens in frames:
         try:
             if _frame_sets_world_rwx(tokens):
                 return True

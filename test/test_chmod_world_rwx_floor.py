@@ -127,19 +127,41 @@ FLAG_VARIANTS_DENIED = (
     # no file operand at all (xargs feeds it): still the mode change
     "chmod -R 777",
     # a redirection operator ATTACHED to an option or to the program word takes the
-    # NEXT word as its target, which never reaches chmod (GPT 6.1 on 13ee313636)
+    # NEXT word as its target, which never reaches chmod
     "chmod -R --recursive> /dev/null 777 ./project",
     "chmod -R --verbose>> log 777 ./project",
     "chmod -R -v2> /dev/null 777 ./project",
     "chmod> /dev/null -R 777 ./project",
     "chmod -R&> /dev/null 777 ./project",
     "chmod -R 777 ./project <&0",
+    # a CHAIN ending in an open operator also takes the next word
+    "chmod -R 2>&1> /dev/null 777 ./project",
+    "chmod -R -v2>&1> /dev/null 777 ./project",
+    "chmod 2>&1> /dev/null -R 777 ./project",
+    # a redirection's target is consumed before anything else reads it, so a
+    # target that looks like a comment, an operator or a boundary hides nothing
+    "chmod -R <<< '#ignored' 777 ./project",
+    "chmod -R > '#x' 777 ./project",
+    "chmod -R > '>' 777 ./project",
+    "chmod -R > ';' 777 ./project",
+    "chmod -R > 'a;b' 777 ./project",
+    # git subcommands that RUN their arguments, and a glued operator after a data
+    # subcommand, keep the invocation
+    "git bisect run chmod -R 777 ~",
+    "git submodule foreach chmod -R 777 .",
+    "git log x|chmod -R 777 ~",
     # brace expansion read as bash performs it, with any run of leading zeros
-    # (GPT 6.1 on 13ee313636: ``{00777,0755}`` puts ``00777`` first)
+    # (``{00777,0755}`` puts ``00777`` first)
     "chmod -R {00777,0755} ./project",
     "chmod -R 0{0,}777 ./project",
     "chmod -R {0..0}0777 ./project",
     "chmod -R {1..2000}777 ./project",
+    # a brace word ANY of whose words would grant is refused whatever its order --
+    # over-strict for these two (bash makes ``755``/``-x`` the mode), on purpose:
+    # the shared expander does not keep bash's order for nested groups
+    "chmod -R {755,777} ~",
+    "chmod {-x,+777} f",
+    "chmod -R {{-v,777},644} ./project",
     # a ``-``-led MODE word hands GNU the whole word as the mode, and a comma list
     # composes left to right (measured: each sets 777)
     "chmod -x,+777 ./project",
@@ -156,8 +178,12 @@ FLAG_VARIANTS_DENIED = (
     "chmod -v 777 -x ./project",
     "chmod -v 777 --reference=/srv/template f",
     "chmod -v 777 --reference /srv/template f",
-    # the gate hands the floor lowercased text, so ``-r`` may be ``-R``
-    "chmod -r 777 ./project",
+    # BSD getopt: a mode letter ending a cluster makes the NEXT word the mode
+    # (FreeBSD bin/chmod/chmod.c; not measured on a BSD host)
+    "chmod -Rw 777 ./project",
+    "chmod -vx 777 ./project",
+    # BSD ``-Rw`` makes the next word the mode: here a glob the filesystem fills
+    "chmod -Rw *",
 )
 
 #: The same change reached through a program that EXECUTES its arguments.
@@ -183,7 +209,7 @@ WRAPPED_DENIED = (
 NESTED_DENIED = (
     "bash -c 'chmod -R 777 ~'",
     'sh -c "chmod -R 777 ~"',
-    "bash -c \"chmod -Rv 777 '$HOME'\"",
+    "bash -c \"chmod -Rv 777 '/srv/www'\"",
     "eval 'chmod -R 777 ~'",
     "echo $(chmod -R 777 ~)",
     "cat <(chmod -R 777 ~)",
@@ -215,6 +241,26 @@ NESTED_DENIED = (
     "cat <<EOF\n$(chmod -R 777 ~)\nEOF",
     "cat <<EOF\nEOF\nchmod -R 777 ~\nEOF",
     "cat <<-EOF\n\tprose\n\tEOF\nchmod -R 777 ~",
+    # git and gh read a heredoc as data only through a builtin subcommand: an
+    # alias may be ``!sh``
+    "git -c alias.run='!sh' run <<'EOF'\nchmod -R 777 ./project\nEOF",
+    "git myalias <<'EOF'\nchmod -R 777 ~\nEOF",
+    "gh myalias <<'EOF'\nchmod -R 777 ~\nEOF",
+    # a QUOTED ``<<`` opens no heredoc, so the next line is a command
+    'git commit -m "note: use << here"\nchmod -R 777 ~',
+    "cat 'a << b'\nchmod -R 777 ~",
+    "cat '<<eof'\nchmod -R 777 ~\neof",
+    # a body with no closing tag line is kept
+    "cat <<EOF\nchmod -R 777 ~",
+    # bash starts a body only after the LOGICAL line ends, so a line continuation
+    # or a quote open across the newline leaves the next line a command
+    "cat <<EOF \\\n; chmod -R 777 ~\nx\nEOF",
+    'cat <<EOF "\n"; chmod -R 777 ~\nx\nEOF',
+    # a data heredoc piped into ANY program outside the data vocabulary keeps its
+    # body: an unlisted stdin executor runs it
+    "cat <<'EOF' | sudo -s\nchmod -R 777 /\nEOF",
+    "cat <<'EOF' | fish\nchmod -R 777 ~\nEOF",
+    "cat <<'EOF' | at now\nchmod -R 777 ~\nEOF",
 )
 
 DENIED_MATRIX = FLAG_VARIANTS_DENIED + WRAPPED_DENIED + NESTED_DENIED
@@ -305,33 +351,34 @@ ALLOWED_MATRIX = (
     "wsl chmod -R 755 ~/project",
     "chmod 755 /c/Users/dev/project/scripts/build.sh",
     # a ``-``-led symbolic REMOVAL is the mode, so the glob after it is the files
-    # (Security Scope on 13ee313636: each was newly refused, ``*`` read as a mode)
+    # (``*`` is a file operand, never a mode)
     "chmod -x *",
     "chmod -R -w *",
     "chmod -v -x -- *",
     "sudo chmod -x *",
     "bash -c 'chmod -x *'",
-    "chmod -rw *",
     "chmod 644 *",
     "chmod -x 777 f",
     "chmod -- -x 777",
-    "chmod {-x,+777} f",
-    # brace expansion read as bash performs it: ``755`` is the mode, ``777`` a file
-    "chmod -R {755,777} ~",
-    # a heredoc body that a data consumer only READS, with nothing that runs it
-    # (Security Scope on 13ee313636: each was newly refused)
-    "git commit -F - <<'EOF'\nfix(security): refuse chmod -R 777 in every option spelling\nEOF",
-    "git commit -m \"$(cat <<'EOF'\nfix(security): enforce the world-rwx chmod row on the argv\n\n"
-    "chmod -Rv 0777 ~ took the gate's ALLOW before this change.\nEOF\n)\"",
-    "cat >> docs/system-specs/modules/security.md <<'EOF'\n"
-    "- chmod -R 777 ~ is refused by the argv floor\nEOF",
-    "tee test/fixtures/denied_spellings.txt <<'EOF'\nchmod -R 777 ~\nchmod -Rv 0777 ~\nEOF",
-    "cat > notes.md <<'EOF'\nNever run chmod -R 777 ~\nEOF",
-    "git commit -F - <<EOF\nfix: deny chmod -R 777\nEOF",
-    "gh pr create --body \"$(cat <<'EOF'\nthis denies chmod -R 777 in any spelling\nEOF\n)\"",
-    "git add . && git commit -F - <<'EOF'\nfix: deny chmod -R 777\nEOF",
-    "cat <<EOF | grep x\nchmod -R 777 ~\nEOF",
-    "cat <<-EOF\n\tchmod -R 777 ~\n\tEOF",
+    # a file list past the brace cap is files; a ``chmod``
+    # word that is a chmod's FILE is not an invocation; a symbolic removal with an
+    # explicit who narrows the numeric bits (measured: each sets 755 / 644)
+    "chmod 644 -- {1..300}",
+    "chmod 644 f{1..300}",
+    "chmod 755 -- chmod 0777",
+    "chmod -R =777,go-w ./project",
+    "chmod =777,o=rx f",
+    "chmod +777,o-rw f",
+    # a ``chmod`` word under a git DATA subcommand is its pattern or path
+    "git grep -n chmod -- '*.sh'",
+    "git log -S chmod -- '*.py'",
+    "git -C repo grep -n chmod *",
+    # the original text holds no ``R``/``X``, so ``-r`` is the mode letter and ``x``
+    # is certain: ``-r`` removes read, ``=777,a-x`` is 666 (measured)
+    "chmod -r *",
+    "chmod -rw *",
+    "chmod -r 777 ./project",
+    "chmod =777,a-x f",
 )
 
 #: Spellings the floor does NOT read, pinned to the answer they get today.  Each
@@ -350,6 +397,9 @@ RESIDUAL_ALLOWED_TODAY = (
     # a filename the glob expands to is the filesystem's, not the line's: a file
     # named ``-x,+777`` under ``chmod 644 *`` is read by GNU as a mode
     "chmod 644 -- *",
+    # a command inside a git ``!`` alias VALUE is one config word, not an argv the
+    # walk descends: the shared data-consumer reading, outside this floor
+    "git -c 'alias.x=!chmod -R 777 ~' x",
     # a value that needs the line RUN to be known: arithmetic, a substitution's
     # output -- the documented limit of every static floor in this package
     "chmod -R $((777)) ~",
@@ -381,7 +431,7 @@ class TestFlagVariantsAreDenied:
     @pytest.mark.parametrize("cmd", DENIED_MATRIX)
     def test_the_floor_itself_reads_each_spelling(self, cmd: str) -> None:
         """The predicate, asked directly, on the lowered text ``is_denied`` hands it."""
-        assert _chmod_floor._is_chmod_world_rwx(cmd.lower()), cmd
+        assert _chmod_floor._is_chmod_world_rwx(cmd.lower(), cmd), cmd
 
     @pytest.mark.parametrize("cmd", DENIED_MATRIX)
     def test_the_pre_filter_is_a_necessary_condition_for_every_hit(self, cmd: str) -> None:
@@ -412,13 +462,13 @@ class TestOtherModesAndMentionsStayAllowed:
 
     @pytest.mark.parametrize("cmd", ALLOWED_MATRIX)
     def test_the_floor_does_not_read_an_allowed_command(self, cmd: str) -> None:
-        assert not _chmod_floor._is_chmod_world_rwx(cmd.lower()), cmd
+        assert not _chmod_floor._is_chmod_world_rwx(cmd.lower(), cmd), cmd
 
     @pytest.mark.parametrize("cmd", RESIDUAL_ALLOWED_TODAY)
     def test_a_documented_residual_is_pinned_to_its_current_answer(self, cmd: str) -> None:
         """Flips when the residual is closed -- deliberately, with its own test."""
         assert is_denied(cmd) is None, cmd
-        assert not _chmod_floor._is_chmod_world_rwx(cmd.lower()), cmd
+        assert not _chmod_floor._is_chmod_world_rwx(cmd.lower(), cmd), cmd
 
 
 class TestTheFloorIsAUnionWithTheRow:
@@ -440,7 +490,7 @@ class TestTheFloorIsAUnionWithTheRow:
     ) -> None:
         """A floor that REPLACED the regex would fail open on a reader hiccup; this
         one is a union, so the literal spelling is denied by the row alone."""
-        monkeypatch.setattr(_chmod_floor, "_is_chmod_world_rwx", lambda _text: False)
+        monkeypatch.setattr(_chmod_floor, "_is_chmod_world_rwx", lambda *_args: False)
         assert _denied_by("chmod 777 ~") == f"{_denied_rules.DENY_REASON_PREFIX}{ROW_PATTERN}"
         assert _denied_by("sudo chmod 777 /srv/www") is not None
 
@@ -505,35 +555,94 @@ class TestNonShellSubjectsReachTheFloor:
         assert policy.check_input_target(editor, None, "chmod --recursive 755 ~", cfg) is None
 
 
-class TestHeredocBodiesThatAreOnlyRead:
+class TestANestedPayloadThatGrowsWithHome:
+    """Residual of the SHARED walk, pinned: ``_shell_payload_walk`` descends a
+    payload only when it is shorter than its parent's text, which is what bounds
+    the walk.  ``$HOME`` is expanded per token before that comparison, so on a
+    host whose home path is long enough, ``bash -c "chmod -Rv 777 '$HOME'"`` hands
+    the walk a payload LONGER than the line, and the payload is not read.  The
+    regex row still refuses the literal spelling there.  This floor does not touch
+    the walk; the two answers below flip together when the walk's bound does."""
+
+    CMD = "bash -c \"chmod -rv 777 '$home'\""
+
+    def _home(self, monkeypatch: pytest.MonkeyPatch, home: str) -> None:
+        import os.path
+
+        real = os.path.expanduser
+
+        def fake(path: str) -> str:
+            return home + path[1:] if path.startswith("~") else real(path)
+
+        monkeypatch.setattr(os.path, "expanduser", fake)
+
+    def test_a_short_home_is_read(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._home(monkeypatch, "/home/u")
+        assert _chmod_floor._is_chmod_world_rwx(self.CMD)
+
+    def test_a_long_home_is_not_read_today(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._home(monkeypatch, "C:\\Users\\runneradmin")
+        assert not _chmod_floor._is_chmod_world_rwx(self.CMD)
+
+
+class TestWhatLowercasingErased:
+    """The gate lowercases the text it hands this floor.  The original text says
+    whether an ``R`` or an ``X`` was written anywhere; without one, ``-r`` is the
+    mode letter and ``x`` is certain.  With one, or with no original at all, both
+    stay ambiguous and the floor reads them the way that can refuse."""
+
+    floor = staticmethod(_chmod_floor._is_chmod_world_rwx)
+
+    def test_r_is_the_mode_letter_when_no_r_option_was_written(self) -> None:
+        assert not self.floor("chmod -r *", "chmod -r *")
+        assert not self.floor("chmod -r 777 f", "chmod -r 777 f")
+        assert self.floor("chmod -r 777 f", "chmod -R 777 f")
+        assert self.floor("chmod -r 777 f")  # no original: ambiguous
+
+    def test_x_is_certain_when_no_x_was_written(self) -> None:
+        assert not self.floor("chmod =777,a-x f", "chmod =777,a-x f")
+        assert self.floor("chmod =777,a-x f", "chmod =777,a-X f")
+        assert self.floor("chmod =777,a-x f")
+
+    def test_a_redirection_target_is_consumed_before_anything_reads_it(self) -> None:
+        reads = _chmod_floor._chmod_argv_sets_world_rwx
+        assert reads(["-r", "<<<", "#ignored", "777", "./p"])
+        assert reads(["-r", ">", ";", "777", "./p"])
+        assert reads(["-r", ">", "a;b", "777", "./p"])
+        assert not reads(["-r", ">", "777", "755", "./p"])
+
+    def test_a_chmod_word_under_a_git_data_subcommand_is_data(self) -> None:
+        frame = _chmod_floor._frame_sets_world_rwx
+        assert not frame(["git", "grep", "-n", "chmod", "--", "*.sh"])
+        assert not frame(["git", "-c", "repo", "log", "-s", "chmod", "*"])
+        assert frame(["git", "bisect", "run", "chmod", "-r", "777", "~"])
+        assert frame(["git", "log", "x|chmod", "-r", "777", "~"])
+
+
+class TestHeredocBodiesAreReadAsCommands:
     """A heredoc body's lines become commands of the frame that carries them: the
     shared walk folds a newline to ``;`` and cannot tell ``bash <<EOF`` (which runs
-    the body) from ``cat <<EOF`` (which prints it).  This floor sets the body aside
-    when its consumer only READS stdin and nothing in the line can run printed
-    text; every other shape keeps the walk's fail-closed reading.  The shared walk
-    is untouched, so the other floors keep their own reading."""
+    the body) from ``cat <<EOF`` (which prints it).  This floor keeps that reading,
+    so a heredoc that only MENTIONS a flag spelling in prose is refused,
+    over-strictly.  Pinned here so the fix lands with the shared walk and
+    flips these together with the other floors that read the walk the same way."""
 
     PROSE_HEREDOCS = (
         "cat > notes.md <<'EOF'\nNever run chmod -R 777 ~\nEOF",
         "git commit -F - <<EOF\nfix: deny chmod -R 777\nEOF",
         "gh pr create --body \"$(cat <<'EOF'\nthis denies chmod -R 777 in any spelling\nEOF\n)\"",
+        "tee test/fixtures/denied_spellings.txt <<'EOF'\nchmod -R 777 ~\nEOF",
     )
 
     @pytest.mark.parametrize("cmd", PROSE_HEREDOCS)
-    def test_prose_in_a_read_only_heredoc_is_allowed(self, cmd: str) -> None:
-        assert is_denied(cmd) is None, cmd
-
-    @pytest.mark.parametrize("cmd", PROSE_HEREDOCS)
-    def test_the_rows_literal_in_the_same_prose_is_unchanged(self, cmd: str) -> None:
-        """The row's own spelling in the same prose is refused by the regex tier,
-        exactly as on main: the floor only stops ADDING the flag spelling there."""
+    def test_prose_in_a_heredoc_is_refused_today(self, cmd: str) -> None:
+        assert _denied_by(cmd) == f"{_denied_rules.DENY_REASON_PREFIX}{ROW_PATTERN}", cmd
+        # The literal spelling in the same prose is refused by the row itself.
         literal = cmd.replace("chmod -R 777", "chmod 777")
         assert _denied_by(literal) == f"{_denied_rules.DENY_REASON_PREFIX}{ROW_PATTERN}", literal
 
     @pytest.mark.parametrize("cmd", PROSE_HEREDOCS)
-    def test_the_shared_walk_still_reads_the_body(self, cmd: str) -> None:
-        """The credential-mint floor keeps its own reading of the same prose: the
-        body is set aside in this floor alone."""
+    def test_the_credential_mint_floor_reads_the_same_prose_the_same_way(self, cmd: str) -> None:
         mint = cmd.replace("chmod -R 777", "kirocrew token")
         reason = is_denied(mint)
         assert reason is not None, mint
@@ -543,41 +652,8 @@ class TestHeredocBodiesThatAreOnlyRead:
         for cmd in ("bash <<'EOF'\nchmod -R 777 ~\nEOF", "sh <<EOF\nchmod -R 777 ~\nEOF"):
             assert _denied_by(cmd) == f"{_denied_rules.DENY_REASON_PREFIX}{ROW_PATTERN}", cmd
 
-    def test_a_nested_shell_named_in_prose_is_still_read(self) -> None:
-        """Pinned over-strictness: the walk descends a ``bash -c`` it finds anywhere,
-        including inside a read-only body, so naming one in prose is refused."""
-        cmd = "cat <<'EOF' > notes.md\nrun bash -c 'chmod -R 777 ~' to break things\nEOF"
-        assert _denied_by(cmd) == f"{_denied_rules.DENY_REASON_PREFIX}{ROW_PATTERN}"
-
-    def test_the_body_split_is_asked_directly(self) -> None:
-        strip = _chmod_floor._without_data_heredoc_body
-        source = "cat > n <<'eof'\nchmod -r 777 ~\neof"
-        tokens = _chmod_floor._self_tokens(source)
-        assert "chmod" in tokens
-        assert "chmod" not in (strip(source, tokens) or [])
-        # a shell consumer keeps its body
-        source = "bash <<'eof'\nchmod -r 777 ~\neof"
-        assert strip(source, _chmod_floor._self_tokens(source)) is None
-        # two heredocs in one frame keep both bodies
-        source = "cat <<a <<b\nchmod -r 777 ~\na\nb"
-        assert strip(source, _chmod_floor._self_tokens(source)) is None
-
-    def test_a_route_that_runs_printed_text_is_recognised(self) -> None:
-        runs = _chmod_floor._can_run_printed_text
-        assert runs([["cat", "<<eof", "|", "bash"]])
-        assert runs([["$(cat", "x)"]])
-        assert runs([["x=1", "$(cat"]])
-        assert runs([["sudo", "$(cat"]])
-        assert runs([["find", ".", "-exec", "sh", "-c", "x", ";"]])
-        assert not runs([["git", "commit", "-m", "$(cat <<eof)"]])
-        assert not runs([["cat", ">", "$home/x", "<<eof"]])
-        assert not runs([["git", "add", ".", "&&", "git", "commit"]])
-        assert not runs([["grep", "bash", "f"]])
-
     def test_a_quoted_message_is_data_and_stays_allowed(self) -> None:
-        """The same prose as ONE quoted word is an argument of ``git``, not a
-        command of its own: the shell hands it over as one token whose program
-        reading is not ``chmod``."""
+        """The same prose as ONE quoted word is an argument of ``git``."""
         assert is_denied("git commit -m 'never chmod -R 777 anything'") is None
 
 
@@ -607,7 +683,7 @@ class TestTheMatrixExercisesTheFloor:
     def test_stubbing_the_floor_reverts_the_spelling_to_allowed(
         self, cmd: str, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        monkeypatch.setattr(_chmod_floor, "_is_chmod_world_rwx", lambda _text: False)
+        monkeypatch.setattr(_chmod_floor, "_is_chmod_world_rwx", lambda *_args: False)
         reverted = is_denied(cmd)
         if cmd in self.CAUGHT_BY_THE_ROW_ALONE:
             assert reverted is not None, cmd
@@ -655,6 +731,24 @@ class TestTheArgvReader:
         assert not self.reads(["--reference", "2>/dev/null", "/srv/t", "777"])
         assert not self.reads(["--reference", ">", "/dev/null", "/srv/t", "777"])
 
+    def test_bsd_getopt_mode_letters_end_option_parsing(self) -> None:
+        """FreeBSD ``bin/chmod/chmod.c``: a mode letter as the last letter of a
+        cluster makes the NEXT word the mode (``-Rw 777`` sets 777 recursively),
+        alone it makes the word itself the mode, and a letter BSD lacks is a usage
+        error.  Read from source; not measured on a BSD host."""
+        bsd = _chmod_floor._bsd_mode_candidates
+        assert bsd(["-rw", "777", "f"]) == ["-rw", "777"]
+        assert bsd(["-vx", "777", "f"]) == ["777"]
+        assert bsd(["-x", "777", "f"]) == ["-x"]
+        assert bsd(["-xv", "777", "f"]) == ["-xv"]
+        assert bsd(["-r", "-v", "777", "f"]) == ["-r", "777"]
+        assert bsd(["--", "777", "f"]) == ["777"]
+        assert bsd(["--recursive", "777", "f"]) == []
+        assert bsd(["-v", "777", "--reference=t", "f"]) == ["777"]
+        assert self.reads(["-vx", "777", "f"])
+        assert self.reads(["-rw", "777", "f"])
+        assert not self.reads(["-vx", "755", "f"])
+
     def test_a_dash_led_mode_turns_every_operand_into_a_file(self) -> None:
         """``chmod -x 777 f`` removes ``x`` from the files ``777`` and ``f`` (GNU and
         BSD alike); ``-x,+777`` and ``-+777`` are modes that grant (measured)."""
@@ -667,11 +761,13 @@ class TestTheArgvReader:
         assert self.reads(["-x", "-+777", "f"])
         # ``-r`` may be the lowercased ``-R``: read as the option, fail closed
         assert self.reads(["-r", "777", "f"])
-        assert not self.reads(["-rw", "*"])
+        # lowercased ``-rw`` may be BSD's ``-Rw``, whose mode is the NEXT word -- here
+        # a glob the filesystem fills: refused, over-strictly for GNU's removal
+        assert self.reads(["-rw", "*"])
         assert self.reads(["-rwx,+777", "f"])
 
     def test_an_attached_redirection_operator_takes_the_next_word(self) -> None:
-        """GPT 6.1 on 13ee313636: ``--recursive>`` left ``/dev/null`` in the argv."""
+        """``--recursive>`` takes ``/dev/null`` as its target, out of the argv."""
         assert self.reads(["-R", "--recursive>", "/dev/null", "777", "./p"])
         assert self.reads(["-R", "-v2>", "/dev/null", "777", "./p"])
         assert self.reads(["-R&>", "/dev/null", "777", "./p"])
@@ -680,8 +776,25 @@ class TestTheArgvReader:
         assert not self.reads(["-R", "--recursive>", "777", "755", "./p"])
         assert _chmod_floor._ends_in_open_redirect("chmod>")
         assert _chmod_floor._ends_in_open_redirect("chmod&>")
+        assert _chmod_floor._ends_in_open_redirect("chmod2>&1>")
         assert not _chmod_floor._ends_in_open_redirect("chmod>/dev/null")
         assert not _chmod_floor._ends_in_open_redirect("chmod")
+        open_op = _chmod_floor._ends_in_open_operator
+        assert open_op("2>&1>") and open_op(">") and open_op("2>") and open_op("-r>>")
+        assert not open_op("2>&1") and not open_op(">out") and not open_op("&>/dev/null")
+        assert self.reads(["-R", "2>&1>", "/dev/null", "777", "./p"])
+
+    def test_a_symbolic_removal_with_an_explicit_who_narrows_the_bits(self) -> None:
+        """Measured on GNU coreutils 8.32 at mode 000, umask 022: ``=777,go-w`` is
+        755, ``=777,o=rx`` 775, ``=777,u-r`` 377, ``+777,o-rwx`` 770 -- all read
+        exactly.  ``=777,a-x`` is 666 and ``=777,-w`` 577, read as 777: ``x`` may be
+        a lowercased ``X`` and a who-less action depends on the umask, so neither is
+        certain, and the over-read refuses."""
+        grants = _chmod_floor._mode_grants_world_rwx
+        for mode in ("=777,go-w", "=777,o=rx", "=777,u-r", "+777,o-rwx", "=777,go="):
+            assert not grants(mode), mode
+        for mode in ("=777,a-x", "=777,-w", "=777,g=u", "=777,a+r"):
+            assert grants(mode), mode
 
     def test_a_redirection_is_not_an_operand(self) -> None:
         """Glued (``2>/dev/null``) or spaced (``> /dev/null``, operator then target),
@@ -826,19 +939,21 @@ class TestTheArgvReader:
         assert self.reads(["{777,755}", "f"])
         assert self.reads(["7{7,5}7", "f"])
         assert self.reads(["{7..7}77", "f"])
-        assert self.reads(["{00777,0755}", "f"])  # GPT 6.1 on 13ee313636
+        assert self.reads(["{00777,0755}", "f"])
         assert self.reads(["0{0,}777", "f"])
         assert self.reads(["{0..0}0777", "f"])
         assert self.reads(["7?7", "f"])  # a glob in the mode position: refused
-        assert not self.reads(["{755,777}", "f"])  # ``755`` is the mode, ``777`` a file
+        # a brace word ANY of whose words would grant is refused, whatever its order:
+        # the shared expander does not keep bash's order for nested groups
+        assert self.reads(["{755,777}", "f"])
+        assert self.reads(["{{-v,777},644}", "f"])
         assert not self.reads(["{755,750}", "f"])
         assert not self.reads(["7{5,0}7", "f"])
+        assert not self.reads(["{-v,-r}", "644", "f"])
         assert not self.reads(["644", "*"])
-        # past the expansion cap the word is refused rather than enumerated
+        # past the shared expander's cap the word is refused rather than enumerated
         assert self.reads(["{1..2000}777", "f"])
         assert _chmod_floor._expand_braces("{1..2000}") is None
-        assert _chmod_floor._expand_braces("{01..03}") == ["01", "02", "03"]
-        assert _chmod_floor._expand_braces("a{b,{c,d}}e") == ["abe", "ace", "ade"]
         assert _chmod_floor._expand_braces("${x}") == ["${x}"]
         assert _chmod_floor._expand_braces("{state}") == ["{state}"]
         # expansions whose value needs the line run stay literal
@@ -855,8 +970,11 @@ class TestWhichWordIsAnInvocation:
     names = staticmethod(_chmod_floor._names_chmod_invocation)
 
     def test_program_position_and_executing_wrappers(self) -> None:
-        assert self.names("chmod", "chmod")
-        assert self.names("/bin/chmod", "chmod")
+        assert self.names("chmod", "chmod", True)
+        assert self.names("/bin/chmod", "chmod", True)
+        # a ``chmod`` word OWNED by a chmod is that chmod's file operand
+        assert not self.names("chmod", "chmod", False)
+        assert self.names("f;chmod", "chmod", False)  # glued operator: a program
         assert self.names("chmod", "sudo")
         assert self.names("chmod", "xargs")
         assert self.names("chmod", "find")
