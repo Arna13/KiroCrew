@@ -282,13 +282,18 @@ class TestAWriteRefusesAPartiallyUnreadableLedger:
 class TestTwoWritersCannotLoseACrew:
     """The lane has two writers by design and they are in different processes.
 
-    The gateway writes this file as it serves the owner's clicks; the ``tick``
-    cron writes it on its own schedule in its own interpreter. ``publish``
-    replaces the WHOLE document, so an atomic rename makes each write indivisible
-    without making the pair of them ordered: both read the same document, each
-    adds its own change, and the second rename discards the first. What it
-    discards is a crew's row, and with it the archive ETag that is the only thing
-    that can condition the next write on that archive.
+    The gateway writes this file as it serves the owner's clicks; a ``kirocrew
+    cloud`` launch or teardown writes it from a terminal in its own interpreter,
+    and sweeps every other crew's wall as it goes. ``publish`` replaces the WHOLE
+    document, so an atomic rename makes each write indivisible without making the
+    pair of them ordered: both read the same document, each adds its own change,
+    and the second rename discards the first. What it discards is a crew's row,
+    and with it the control-secret reference and crew name a turn to that crew
+    needs -- the VM keeps running and billing and nothing can address it.
+
+    So the READ and the publish have to be inside one hold of the lock. A hold
+    taken only around the publish makes each write atomic and still loses the
+    row, which is why the read is asserted here as well.
     """
 
     @staticmethod
@@ -321,6 +326,49 @@ class TestTwoWritersCannotLoseACrew:
         store.publish = publish  # type: ignore[method-assign]
         store.put(CrewRecord(tag="kc-a"))
         assert held == [True], "the publish ran without the writer lock held"
+
+    def test_a_put_holds_the_lock_while_it_READS(self, tmp_path):
+        """The half the publish assertion above cannot see.
+
+        ``publish`` writes whatever the read produced, so a read taken outside
+        the lock is already stale when the publish lands inside it -- and the
+        publish then writes a document missing the row the other writer added
+        between the two. Locking around the publish alone buys atomicity and
+        loses the crew anyway, and that version of ``put`` passes every other
+        test in this class.
+        """
+        path = tmp_path / "crews.json"
+        store = CrewStore(path)
+        store.put(CrewRecord(tag="kc-first"))
+        held: list[bool] = []
+        original = store.load_for_write
+
+        def load_for_write():
+            held.append(self._cannot_be_locked(path))
+            return original()
+
+        store.load_for_write = load_for_write  # type: ignore[method-assign]
+        store.put(CrewRecord(tag="kc-a"))
+        assert held == [True], "the read ran without the writer lock held"
+        assert set(store.load()) == {"kc-first", "kc-a"}
+
+    def test_an_apply_event_holds_the_lock_while_it_READS(self, tmp_path):
+        """Same half, and here the read also decides the transition: an event
+        checked against a state read outside the lock is checked against a state
+        another writer may already have moved on from."""
+        path = tmp_path / "crews.json"
+        store = CrewStore(path)
+        store.put(CrewRecord(tag="kc-a", state=states.RUNNING))
+        held: list[bool] = []
+        original = store.load_for_write
+
+        def load_for_write():
+            held.append(self._cannot_be_locked(path))
+            return original()
+
+        store.load_for_write = load_for_write  # type: ignore[method-assign]
+        store.apply_event("kc-a", states.EVENT_TERMINATED)
+        assert held == [True], "the read ran without the writer lock held"
 
     def test_an_apply_event_holds_the_lock_while_it_publishes(self, tmp_path):
         """The transition is decided inside the lock too: the event's legality

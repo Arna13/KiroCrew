@@ -512,18 +512,23 @@ def microvm_status(
             microvm_id, profile=profile, region=region, endpoint_url=endpoint_url
         ).state
     except AWSError as exc:
-        if _is_not_found(exc):
+        if is_not_found(exc):
             return None
         raise
 
 
-def _is_not_found(exc: Exception) -> bool:
+def is_not_found(exc: Exception) -> bool:
     """Whether *exc* is the service saying the resource is gone.
 
     Matched on the error NAME in the message rather than on an HTTP status,
     because the CLI seam hands back stderr text and not a response object. The
     name is the service's own ``ResourceNotFoundException``, which the model
     declares for every operation this module calls.
+
+    Public rather than private to this module: ``engine.teardown`` reads it to
+    tell a terminate the platform refused from one answering about a VM it has
+    already taken, and those two outcomes need opposite handling -- the first
+    stops the teardown, the second is what the teardown was for.
     """
     return "ResourceNotFoundException" in str(exc)
 
@@ -782,7 +787,7 @@ def get_microvm_image(
             timeout=timeout,
         )
     except AWSError as exc:
-        if _is_not_found(exc):
+        if is_not_found(exc):
             return None
         raise
     return MicroVmImage.from_response(data)
@@ -862,7 +867,7 @@ def image_version_status(
             timeout=timeout,
         )
     except AWSError as exc:
-        if _is_not_found(exc):
+        if is_not_found(exc):
             return None
         raise
     return str(data.get("status", "")) if isinstance(data, dict) else None

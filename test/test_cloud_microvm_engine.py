@@ -404,6 +404,160 @@ class TestProvisionCleanup:
             built.provision(tag="kc-a", size_key="", profile="p", region="us-east-1")
 
 
+class SplitLauncher(VmLauncher):
+    """A launcher that keeps :class:`VmLauncher`'s own ``run`` and ``reconcile``.
+
+    ``FakeLauncher`` overrides both, which is what the ordering tests want and
+    exactly what these must not have: the thing under test is the split between
+    resolving an image and creating the VM, and that split lives in the base
+    class. So this one scripts the two halves and inherits the wiring.
+    """
+
+    def __init__(self, *, resolutions, create_outcomes):
+        #: One ``(identifier, version)`` per resolve, or an exception to raise.
+        #: A resolve this list has no entry for is an ``IndexError``, which is
+        #: how a second resolve nobody expected shows up as a failure.
+        self.resolutions = list(resolutions)
+        #: One per create: an exception to raise, or the id of the VM to answer.
+        self.create_outcomes = list(create_outcomes)
+        self.calls: list[str] = []
+        #: ``(identifier, version, client_token)`` per create, so a test can
+        #: assert the replay sent the same parameters as the first call.
+        self.creates: list[tuple[str, str, str]] = []
+
+    def create_activation(self, *, tag, profile, region):
+        self.calls.append("create_activation")
+        return Activation(activation_id="act-1", activation_code="code-1")
+
+    def resolve_image(self, *, profile, region):
+        self.calls.append("resolve_image")
+        answer = self.resolutions.pop(0)
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
+    def create_microvm(
+        self, *, image_identifier, image_version, payload, profile, region, client_token
+    ):
+        self.calls.append("create_microvm")
+        self.creates.append((image_identifier, image_version, client_token))
+        answer = self.create_outcomes.pop(0)
+        if isinstance(answer, Exception):
+            raise answer
+        return api.MicroVm(
+            microvm_id=answer, state="PENDING", endpoint=f"https://{answer}.example/"
+        )
+
+    def wait_online(self, *, activation_id, profile, region):
+        self.calls.append("wait_online")
+        return "mi-0123456789abcdef0"
+
+    def terminate(self, microvm_id, *, profile, region):
+        self.calls.append("terminate")
+
+    def wait_terminated(self, microvm_id, *, profile, region):
+        self.calls.append("wait_terminated")
+
+
+class TestTheReplayIsArmedAroundTheCreateAlone:
+    """``RunMicrovm`` is replayable under its token; resolving an image is not.
+
+    Resolving can BUILD a multi-minute image, and the version it answers is the
+    newest at the time it answers. So a replay that resolves again is a second
+    build on the failure path, and if it answers a different version the same
+    idempotency token goes out with different parameters -- while the VM the
+    first attempt may have created is still unrecorded.
+    """
+
+    @pytest.fixture()
+    def split(self, tmp_path, monkeypatch):
+        def build(*, resolutions, create_outcomes):
+            store = CrewStore(tmp_path / "crews.json")
+            launcher = SplitLauncher(resolutions=resolutions, create_outcomes=create_outcomes)
+            monkeypatch.setattr(
+                "kiro_crew.cloud.microvm.engine._delete_activation",
+                lambda activation_id, *, profile, region: launcher.calls.append(
+                    "delete_activation"
+                ),
+            )
+            built = MicroVmLaunchEngine(spec=SPEC, store=store, launcher=launcher)
+            return built, store, launcher
+
+        return build
+
+    def test_a_create_that_failed_is_replayed_and_the_image_is_resolved_once(self, split):
+        built, store, launcher = split(
+            resolutions=[("img-a", "7")],
+            create_outcomes=[RuntimeError("no answer from RunMicrovm"), "mvm-recovered"],
+        )
+        with pytest.raises(RuntimeError):
+            built.provision(tag="kc-a", size_key="", profile="p", region="us-east-1")
+        assert launcher.calls == [
+            "create_activation",
+            "resolve_image",
+            "create_microvm",
+            "create_microvm",
+            "terminate",
+            "wait_terminated",
+            "delete_activation",
+        ]
+        assert launcher.calls.count("resolve_image") == 1
+        assert store.get("kc-a").state == states.LAUNCH_FAILED
+
+    def test_the_replay_sends_the_image_the_attempt_already_resolved(self, split):
+        """Not whatever a fresh resolve would answer. The second entry here is
+        the version a rebuild would have produced, and the replay must not take
+        it: the token's two requests would then differ in their parameters."""
+        built, _store, launcher = split(
+            resolutions=[("img-a", "7"), ("img-a", "8")],
+            create_outcomes=[RuntimeError("no answer from RunMicrovm"), "mvm-recovered"],
+        )
+        with pytest.raises(RuntimeError):
+            built.provision(tag="kc-a", size_key="", profile="p", region="us-east-1")
+        identifiers = [(ident, version) for ident, version, _token in launcher.creates]
+        assert identifiers == [("img-a", "7"), ("img-a", "7")]
+        tokens = {token for _i, _v, token in launcher.creates}
+        assert len(tokens) == 1, "the replay is only a reconciliation under one token"
+        assert launcher.resolutions == [("img-a", "8")], "the replay resolved again"
+
+    def test_an_image_that_could_not_be_resolved_replays_nothing(self, split):
+        """No create was sent, so no VM can exist under this token and there is
+        nothing to ask the service about. A replay here would resolve again --
+        another build attempt -- and a build that succeeded the second time would
+        create a VM only to terminate it."""
+        built, store, launcher = split(
+            resolutions=[RuntimeError("the image build failed")], create_outcomes=[]
+        )
+        with pytest.raises(RuntimeError, match="image build failed"):
+            built.provision(tag="kc-a", size_key="", profile="p", region="us-east-1")
+        assert launcher.calls == ["create_activation", "resolve_image", "delete_activation"]
+        assert launcher.creates == []
+        assert store.get("kc-a").state == states.LAUNCH_FAILED
+
+    def test_a_later_attempts_resolve_failure_does_not_replay_the_earlier_image(self, split):
+        """The engine holds one launcher for its whole life, so the pair the
+        first attempt resolved is still on it when the second attempt starts."""
+        built, _store, launcher = split(
+            resolutions=[("img-a", "7"), RuntimeError("the image build failed")],
+            create_outcomes=["mvm-1"],
+        )
+        built.provision(tag="kc-a", size_key="", profile="p", region="us-east-1")
+        launcher.calls.clear()
+        with pytest.raises(RuntimeError, match="image build failed"):
+            built.provision(tag="kc-b", size_key="", profile="p", region="us-east-1")
+        assert "create_microvm" not in launcher.calls
+        assert len(launcher.creates) == 1
+
+    def test_reconcile_on_a_launcher_that_never_resolved_asks_nothing(self):
+        """The unit under the two tests above, with no engine around it."""
+        launcher = SplitLauncher(resolutions=[], create_outcomes=[])
+        assert (
+            launcher.reconcile(payload="p", profile="p", region="us-east-1", client_token="t")
+            is None
+        )
+        assert launcher.calls == []
+
+
 class TestSignin:
     def test_the_handle_is_already_done(self):
         handle = MicroVmSigninHandle("mi-1")
@@ -493,6 +647,107 @@ class TestTeardown:
         built.provision(tag="kc-a", size_key="", profile="p", region="us-east-1")
         built.teardown(tag="kc-a", profile="p", region="us-east-1")
         assert store.get("kc-a").state == states.TERMINATED
+
+
+class TestATerminateThatAnswersNotFoundIsACrewAlreadyGone:
+    """The wall takes the VM and tells the control plane nothing.
+
+    That is the case the wall sweep exists for, and a ``ResourceNotFoundException``
+    from the terminate is what it meets. Read as a failed teardown it released
+    nothing: the activation kept counting against the account's limits, the
+    managed node stayed listed with nothing behind it, the control secret stayed
+    readable, and the row stayed ``running`` -- so the next launch swept the same
+    row and failed the same way.
+    """
+
+    @pytest.fixture()
+    def walled(self, engine, monkeypatch):
+        from kiro_crew.cloud.microvm import engine as engine_mod
+
+        built, store, launcher = engine
+        released: list[tuple[str, str]] = []
+        monkeypatch.setattr(
+            engine_mod,
+            "_delete_activation",
+            lambda activation_id, *, profile, region: released.append(
+                ("activation", activation_id)
+            ),
+        )
+        monkeypatch.setattr(
+            engine_mod,
+            "_deregister_node",
+            lambda mi_id, *, profile, region: released.append(("node", mi_id)),
+        )
+        monkeypatch.setattr(
+            engine_mod.api, "delete_secret", lambda name, **kw: released.append(("secret", name))
+        )
+        store.put(
+            CrewRecord(
+                tag="kc-walled",
+                state=states.RUNNING,
+                microvm_id="mvm-walled",
+                mi_id="mi-walled",
+                activation_id="act-walled",
+                control_secret_ref="kirocrew/crew/kc-walled/CONTROL_SECRET",
+                profile="p",
+                region="us-east-1",
+                wall_at=100.0,
+            )
+        )
+        return built, store, launcher, released
+
+    @staticmethod
+    def _answer(message):
+        from kiro_crew.cloud.aws import AWSError
+
+        def terminate(microvm_id, *, profile, region):
+            raise AWSError(message, action="lambda:TerminateMicrovm")
+
+        return terminate
+
+    def test_the_release_is_finished_and_the_row_ends_terminated(self, walled):
+        built, store, launcher, released = walled
+        launcher.terminate = self._answer(  # type: ignore[method-assign]
+            "ResourceNotFoundException: no microvm mvm-walled"
+        )
+        assert built.teardown(tag="kc-walled", profile="p", region="us-east-1") is True
+        assert released == [
+            ("activation", "act-walled"),
+            ("node", "mi-walled"),
+            ("secret", "kirocrew/crew/kc-walled/CONTROL_SECRET"),
+        ]
+        assert store.get("kc-walled").state == states.TERMINATED
+
+    def test_the_confirmation_wait_is_skipped(self, walled):
+        """It polls the same service that just said the VM is gone, and the poll
+        runs for minutes before giving up."""
+        built, _store, launcher, released = walled
+        launcher.terminate = self._answer(  # type: ignore[method-assign]
+            "ResourceNotFoundException: no microvm mvm-walled"
+        )
+        assert built.teardown(tag="kc-walled", profile="p", region="us-east-1") is True
+        assert released, "the teardown stopped instead of reaching the release"
+        assert "wait_terminated" not in launcher.calls
+
+    def test_a_terminate_the_platform_refused_still_stops_the_teardown(self, walled):
+        """Non-vacuity. Any other error means the VM may well be running, and
+        releasing its activation, node and secret then would cut the owner off
+        from a crew that is still billing."""
+        built, store, launcher, released = walled
+        launcher.terminate = self._answer("AccessDeniedException: not authorized")  # type: ignore[method-assign]
+        assert built.teardown(tag="kc-walled", profile="p", region="us-east-1") is False
+        assert released == []
+        assert store.get("kc-walled").state == states.RUNNING
+
+    def test_the_sweep_releases_such_a_crew_instead_of_retrying_it(self, walled):
+        """The whole point of the wall sweep: this row is exactly what it looks
+        for, and before this it was the one row it could never clear."""
+        built, store, launcher, _released = walled
+        launcher.terminate = self._answer(  # type: ignore[method-assign]
+            "ResourceNotFoundException: no microvm mvm-walled"
+        )
+        assert built.reap(profile="p", region="us-east-1", now=1e9) == ["kc-walled"]
+        assert store.get("kc-walled").state == states.TERMINATED
 
 
 class TestActivationArguments:
@@ -763,6 +1018,64 @@ class TestResolveImage:
             build_digest=default_build_digest(),
         ).image_name()
         assert first != second
+
+
+class TestBothWheelStagingPathsDateTheWheelAlike:
+    """``_staged_wheel`` reads whatever staged the wheel, and the lane hashes it.
+
+    The wheel's bytes go into ``recipe.base_recipe_digest``, which is half this
+    lane's image cache key, so a wheel dated from the clock makes every restage
+    of unchanged code a cache miss and a full multi-minute image build. TWO
+    scripts stage that same wheel into ``runtime/vendor``:
+    ``scripts/build_microvm_image_zip.py``, whose build env is pinned and tested
+    in ``test_cloud_microvm_recipe.py``, and ``scripts/build_crew_base_image.sh``,
+    which was not -- so a wheel staged by the shell path missed the cache.
+
+    Pinned by READING the shell script, the way
+    ``test_crew_image_publish_contract.py`` pins the same file: running it needs
+    docker and a full wheel build, so the contract a test can hold it to is its
+    text.
+    """
+
+    @staticmethod
+    def _shell_text() -> str:
+        from pathlib import Path
+
+        path = Path(__file__).resolve().parents[1] / "scripts" / "build_crew_base_image.sh"
+        return path.read_text(encoding="utf-8")
+
+    @staticmethod
+    def _python_stager():
+        import importlib.util
+        from pathlib import Path
+
+        path = Path(__file__).resolve().parents[1] / "scripts" / "build_microvm_image_zip.py"
+        spec = importlib.util.spec_from_file_location("_build_microvm_image_zip", path)
+        assert spec and spec.loader
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    def test_the_shell_script_sets_the_epoch_before_it_builds_the_wheel(self):
+        text = self._shell_text()
+        assert "SOURCE_DATE_EPOCH" in text, "the shell path stages an unreproducible wheel"
+        assert text.index("SOURCE_DATE_EPOCH") < text.index(
+            "python3 -m build"
+        ), "the epoch is exported after the wheel is already built"
+
+    def test_it_is_the_constant_the_python_stager_uses(self):
+        """One wheel, two producers: a second constant would mean two sets of
+        bytes for the same source and a cache the two paths keep missing."""
+        assert f"SOURCE_DATE_EPOCH:-{self._python_stager().SOURCE_DATE_EPOCH}}}" in (
+            self._shell_text()
+        )
+
+    def test_an_operators_own_value_is_kept(self):
+        """The ``:-`` form, so an exported value survives -- any constant makes
+        the wheel reproducible, and theirs may be pinned to something they can
+        explain. The same choice ``_build_env``'s ``setdefault`` makes."""
+        text = self._shell_text()
+        assert 'export SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH:-' in text
 
 
 class TestPreflightChecksTheBundle:
@@ -1565,12 +1878,21 @@ class TestTheWallIsRecordedAndSwept:
         assert launcher.calls.index("terminate") < launcher.calls.index("create_activation")
 
     def test_one_stuck_crew_does_not_fail_the_launch_that_noticed_it(self, swept, monkeypatch):
+        """Stuck means the platform REFUSED the terminate, so the VM may still be
+        running. Not a terminate that answered ``ResourceNotFoundException``:
+        that one is a crew the wall already took, which is what this sweep is for
+        and which ``TestATerminateThatAnswersNotFoundIsACrewAlreadyGone`` covers.
+        """
+        from kiro_crew.cloud.aws import AWSError
+
         built, store, launcher = swept
 
-        def boom(microvm_id, *, profile, region):
-            raise RuntimeError("terminate refused")
+        def refused(microvm_id, *, profile, region):
+            raise AWSError(
+                "AccessDeniedException: not authorized", action="lambda:TerminateMicrovm"
+            )
 
-        launcher.terminate = boom  # type: ignore[method-assign]
+        launcher.terminate = refused  # type: ignore[method-assign]
         store.put(
             CrewRecord(
                 tag="kc-stuck",
@@ -1584,6 +1906,134 @@ class TestTheWallIsRecordedAndSwept:
         assert built.reap(profile="p", region="us-east-1", now=1e9) == []
         # The row keeps naming what it left behind, rather than being marked gone.
         assert store.get("kc-stuck").state == states.RUNNING
+
+    def test_a_release_that_raises_outright_does_not_fail_the_launch_either(self, swept):
+        """The other half: ``teardown`` answers ``False`` for a refused terminate,
+        and a release that raises instead must not reach the caller -- the caller
+        is the owner's launch."""
+        built, store, launcher = swept
+
+        def boom(microvm_id, *, profile, region):
+            raise RuntimeError("terminate blew up")
+
+        launcher.terminate = boom  # type: ignore[method-assign]
+        store.put(
+            CrewRecord(
+                tag="kc-stuck",
+                state=states.RUNNING,
+                microvm_id="mvm-stuck",
+                profile="p",
+                region="us-east-1",
+                wall_at=1.0,
+            )
+        )
+        assert built.reap(profile="p", region="us-east-1", now=1e9) == []
+        assert store.get("kc-stuck").state == states.RUNNING
+
+
+class TestASweepInsideALaunchIsTimeBounded:
+    """The sweep runs from ``provision``, so its cost is the owner's wait.
+
+    A teardown is not quick: the terminate confirmation polls for up to
+    ``ONLINE_TIMEOUT_SECONDS``. Unbounded, a launch waited on every expired crew
+    in turn -- one per expired row -- before it created anything of its own.
+    """
+
+    @pytest.fixture()
+    def slow(self, engine, monkeypatch):
+        """A sweep whose every teardown costs 100 seconds of the engine's clock."""
+        from kiro_crew.cloud.microvm import engine as engine_mod
+
+        built, store, launcher = engine
+        monkeypatch.setattr(engine_mod.api, "delete_secret", lambda name, **kw: None)
+        monkeypatch.setattr(engine_mod, "_delete_activation", lambda *a, **kw: None)
+        monkeypatch.setattr(engine_mod, "_deregister_node", lambda *a, **kw: None)
+        clock = [1_000.0]
+        built.now = lambda: clock[0]
+        original = launcher.wait_terminated
+
+        def wait_terminated(microvm_id, *, profile, region):
+            clock[0] += 100.0
+            original(microvm_id, profile=profile, region=region)
+
+        launcher.wait_terminated = wait_terminated  # type: ignore[method-assign]
+        for tag in ("kc-1", "kc-2", "kc-3"):
+            store.put(
+                CrewRecord(
+                    tag=tag,
+                    state=states.RUNNING,
+                    microvm_id=f"mvm-{tag}",
+                    mi_id=f"mi-{tag}",
+                    activation_id=f"act-{tag}",
+                    profile="p",
+                    region="us-east-1",
+                    wall_at=100.0,
+                )
+            )
+        return built, store, launcher
+
+    def test_the_sweep_stops_when_the_budget_is_spent(self, slow):
+        built, _store, _launcher = slow
+        assert built.reap(profile="p", region="us-east-1", now=1e9, budget_seconds=30.0) == ["kc-1"]
+
+    def test_the_rows_it_left_still_name_what_they_left_behind(self, slow):
+        """Left, not lost: the next launch or an explicit teardown releases them,
+        and until then the row is what names the node and the activation."""
+        built, store, _launcher = slow
+        built.reap(profile="p", region="us-east-1", now=1e9, budget_seconds=30.0)
+        for tag in ("kc-2", "kc-3"):
+            row = store.get(tag)
+            assert row.state == states.RUNNING
+            assert (row.microvm_id, row.mi_id, row.activation_id) == (
+                f"mvm-{tag}",
+                f"mi-{tag}",
+                f"act-{tag}",
+            )
+            assert row.wall_at == 100.0, "the deadline the next sweep reads"
+
+    def test_a_release_already_begun_is_not_interrupted(self, slow):
+        """Which is what bounds a launch at the budget PLUS one teardown, rather
+        than at the budget: the check is between rows and nothing cancels a
+        terminate that has been sent."""
+        built, store, _launcher = slow
+        built.reap(profile="p", region="us-east-1", now=1e9, budget_seconds=30.0)
+        assert store.get("kc-1").state == states.TERMINATED
+
+    def test_a_sweep_that_stays_inside_its_budget_releases_every_expired_row(
+        self, engine, monkeypatch
+    ):
+        """Non-vacuity for the three above: the cap is reached by the clock the
+        teardowns spend, not by the number of rows."""
+        from kiro_crew.cloud.microvm import engine as engine_mod
+
+        built, store, _launcher = engine
+        monkeypatch.setattr(engine_mod.api, "delete_secret", lambda name, **kw: None)
+        monkeypatch.setattr(engine_mod, "_delete_activation", lambda *a, **kw: None)
+        monkeypatch.setattr(engine_mod, "_deregister_node", lambda *a, **kw: None)
+        built.now = lambda: 1_000.0
+        for tag in ("kc-1", "kc-2", "kc-3"):
+            store.put(
+                CrewRecord(
+                    tag=tag,
+                    state=states.RUNNING,
+                    microvm_id=f"mvm-{tag}",
+                    profile="p",
+                    region="us-east-1",
+                    wall_at=100.0,
+                )
+            )
+        released = built.reap(profile="p", region="us-east-1", now=1e9, budget_seconds=30.0)
+        assert released == ["kc-1", "kc-2", "kc-3"]
+
+    def test_a_launch_uses_the_bounded_default(self, slow):
+        """``provision`` passes no budget, so the module default applies -- and a
+        launch behind three expired crews creates its own activation rather than
+        waiting on all three."""
+        built, store, launcher = slow
+        built.provision(tag="kc-new", size_key="", profile="p", region="us-east-1")
+        assert store.get("kc-1").state == states.TERMINATED
+        assert store.get("kc-2").state == states.RUNNING
+        assert "create_activation" in launcher.calls
 
 
 class TestTheAccountBakedIntoTheImageIsReadFromTheOperatorsOwnArns:

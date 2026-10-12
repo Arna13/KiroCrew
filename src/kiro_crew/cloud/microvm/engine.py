@@ -99,6 +99,25 @@ ONLINE_POLL_SECONDS = 5
 #: not taken yet.
 WALL_GRACE_SECONDS = 60
 
+#: How long one :meth:`MicroVmLaunchEngine.provision` may spend releasing OTHER
+#: crews' expired rows before it leaves the rest.
+#:
+#: A bound on the launch, not on the sweep's work. The sweep runs from a launch
+#: because that is the one moment this lane's code is certainly running, and a
+#: teardown inside it is not quick: the terminate confirmation polls for up to
+#: :data:`ONLINE_TIMEOUT_SECONDS`, so without a bound an owner's launch waits on
+#: every expired crew in turn.
+#:
+#: Thirty seconds. The budget is checked BEFORE each row and a release already
+#: begun is not interrupted, so a launch spends at most this plus one teardown --
+#: not one teardown per expired crew. What is left behind is each remaining row
+#: exactly as it was: still non-terminal, still naming the VM, node, activation
+#: and control secret, and still carrying the wall, so the next launch or an
+#: explicit teardown releases it. Until then the node stays listed by the
+#: account, the activation counts against its limits and the secret stays
+#: readable.
+REAP_BUDGET_SECONDS = 30
+
 
 def _client_token(tag: str, generation: int) -> str:
     """The idempotency key for one launch attempt of one crew generation.
@@ -383,6 +402,10 @@ class MicroVmLaunchEngine:
         # in its own provision: this is the one place a launch on this lane is
         # driven, so it is the only place a sweep is certain to run. Every other
         # crew's wall has passed or it has not, independently of this launch.
+        #
+        # Time-bounded, because this runs inside the owner's launch: see
+        # REAP_BUDGET_SECONDS for what the bound is and what a sweep that reaches
+        # it leaves for the next one.
         self.reap(profile=profile, region=region, skip_tag=tag)
         previous = store.get(tag)
         generation = (previous.generation + 1) if previous else 1
@@ -571,12 +594,18 @@ class MicroVmLaunchEngine:
         except Exception as exc:
             logger.error("microvm launch %s failed: %s", tag, exc)
             if not microvm_id and encoded_payload:
-                # ``RunMicrovm`` was called and this process never saw its answer.
-                # The service may well have created the VM -- a timeout is a
-                # failure of the ANSWER, not of the call -- and a VM with no id
+                # The launch may have called ``RunMicrovm`` and never seen its
+                # answer. The service may well have created the VM -- a timeout is
+                # a failure of the ANSWER, not of the call -- and a VM with no id
                 # here is a VM the cleanup below and every later teardown skip,
                 # billing to its wall with nothing naming it. The client token is
-                # deterministic, so the call can be replayed to learn the id.
+                # deterministic, so the create can be replayed to learn the id.
+                #
+                # Whether it WAS called is the launcher's to answer, not this
+                # function's: a failure to resolve or build the image fails
+                # ``launcher.run`` without a create having been sent, and
+                # ``reconcile`` answers ``None`` for that rather than replaying
+                # anything.
                 microvm_id = self._reconcile_run(
                     launcher,
                     tag=tag,
@@ -721,9 +750,12 @@ class MicroVmLaunchEngine:
         launched into, and nothing moves it: ``cloud.json`` can be edited, a
         dashboard can pass whatever the operator is looking at now, and a sweep
         acts on rows it did not launch. Against the wrong region the terminate
-        fails and the best-effort activation, node and secret deletes fail
-        quietly -- and the row is marked ``terminated`` all the same, so the VM
-        bills to its wall with a record saying it is gone.
+        answers that it does not know this VM and the best-effort activation, node
+        and secret deletes fail quietly -- and the row is marked ``terminated``
+        all the same, so the VM bills to its wall with a record saying it is
+        gone. That answer is also the one a VM the wall already took gives, and
+        this method cannot tell the two apart from the answer alone: it treats
+        both as gone, which is why the coordinates come from the row.
         """
         store = self._require_store()
         launcher = self._require_launcher()
@@ -740,8 +772,26 @@ class MicroVmLaunchEngine:
                 launcher.terminate(record.microvm_id, profile=profile, region=region)
                 launcher.wait_terminated(record.microvm_id, profile=profile, region=region)
             except AWSError as exc:
-                logger.error("could not terminate MicroVM %s: %s", record.microvm_id, exc)
-                return False
+                if not api.is_not_found(exc):
+                    logger.error("could not terminate MicroVM %s: %s", record.microvm_id, exc)
+                    return False
+                # The platform does not know this VM, which on this lane is the
+                # ORDINARY end of a crew rather than a failure: the wall took it
+                # and nothing told the control plane. Returning False here left
+                # the activation, the node and the control secret in place and
+                # the row reading ``running`` -- the exact state the wall sweep
+                # exists to clear, retried on every launch and failing the same
+                # way each time. So the terminate is treated as done and the rest
+                # of the release runs.
+                #
+                # The confirmation wait is skipped with it: it polls the same
+                # service that just said the VM is gone.
+                logger.info(
+                    "MicroVM %s for crew %s is already gone, so the teardown releases what it "
+                    "left behind",
+                    record.microvm_id,
+                    tag,
+                )
             # The wait above runs for minutes, so the row is re-read before
             # anything else is released. Two outcomes, and they are NOT the same.
             #
@@ -807,9 +857,16 @@ class MicroVmLaunchEngine:
         return True
 
     def reap(
-        self, *, profile: str, region: str, skip_tag: str = "", now: Optional[float] = None
+        self,
+        *,
+        profile: str,
+        region: str,
+        skip_tag: str = "",
+        now: Optional[float] = None,
+        budget_seconds: float = REAP_BUDGET_SECONDS,
     ) -> list[str]:
-        """Release every crew whose wall has passed. Returns the tags released.
+        """Release crews whose wall has passed, within *budget_seconds*. Returns the
+        tags released.
 
         The platform takes the VM at its wall whatever the control plane thinks,
         and nothing else on this lane notices: the row stays ``running``, the
@@ -829,16 +886,31 @@ class MicroVmLaunchEngine:
         *skip_tag* is the launch asking, which is mid-flight and not expired.
         Every release is best-effort and logged: a crew that cannot be released
         must not fail the launch that noticed it.
+
+        NOT every expired crew in one pass. A teardown waits for its terminate to
+        be confirmed, so the caller is the owner's launch and the cost is their
+        wait: *budget_seconds* is checked before each row and a release already
+        begun runs to its end, which bounds a launch at the budget plus one
+        teardown. Rows past the budget are LEFT, unchanged and still naming what
+        they left behind, for the next launch or teardown to release; the count
+        is logged, because until then those nodes stay listed, those activations
+        count against the account's limits and those secrets stay readable.
         """
         store = self._require_store()
         moment = self.now() if now is None else now
+        started = self.now()
         released: list[str] = []
+        deferred: list[str] = []
         for record in list(store.iter_records()):
             if record.tag == skip_tag or not record.tag:
                 continue
             if record.state in states.TERMINAL_STATES:
                 continue
             if not record.wall_at or moment < record.wall_at + WALL_GRACE_SECONDS:
+                continue
+            spent = self.now() - started
+            if spent >= budget_seconds:
+                deferred.append(record.tag)
                 continue
             logger.info(
                 "microvm crew %s passed its wall at %.0f and is still recorded %s; releasing "
@@ -860,6 +932,18 @@ class MicroVmLaunchEngine:
                     record.tag,
                     exc,
                 )
+        if deferred:
+            logger.info(
+                "%d microvm crew(s) past their wall were left for the next sweep after %.0fs "
+                "of a %.0fs budget: %s. Each row is unchanged and still names the node, "
+                "activation and control secret that crew left behind, so the next launch or "
+                "teardown releases it; until then the node stays listed and the activation "
+                "counts against the account's limits.",
+                len(deferred),
+                self.now() - started,
+                budget_seconds,
+                ", ".join(deferred),
+            )
         return released
 
     # ── internals ────────────────────────────────────────────────────────────
@@ -877,13 +961,19 @@ class MicroVmLaunchEngine:
     ) -> str:
         """The id of the VM this launch's token created, or ``""``.
 
-        Asked only after ``RunMicrovm`` failed with no id in hand, which is the
-        one case where the control plane and the account can disagree about
-        whether a VM exists. The replay is the SAME request with the SAME
-        idempotency token, so there are exactly two outcomes and both are the one
-        wanted: the service holds a VM for this token and answers with it, or it
-        holds none and creates one -- which this launch then terminates either
-        way, because the launch has already failed.
+        Asked only after the launch failed with no id in hand, which is the one
+        case where the control plane and the account can disagree about whether a
+        VM exists. The replay is the SAME ``RunMicrovm`` request with the SAME
+        idempotency token and the image this attempt already resolved, so there
+        are exactly two outcomes and both are the one wanted: the service holds a
+        VM for this token and answers with it, or it holds none and creates one --
+        which this launch then terminates either way, because the launch has
+        already failed.
+
+        ``""`` when the failure came before the create was ever sent -- an image
+        that could not be resolved or built. :meth:`VmLauncher.reconcile` answers
+        ``None`` there rather than replaying, because no request carrying this
+        token ever reached the service.
 
         The id is written to the record before the terminate is attempted, so a
         cleanup that also fails leaves the id somewhere a later teardown or sweep
@@ -987,27 +1077,89 @@ class VmLauncher:
     for a dead node.
     """
 
+    #: The image the attempt currently in :meth:`run` resolved, as
+    #: ``(identifier, version)``, or ``None`` when no attempt has got that far.
+    #: Read only by :meth:`reconcile`, which has nothing to replay without it.
+    _attempt_image: Optional[tuple[str, str]] = None
+
     def create_activation(self, *, tag: str, profile: str, region: str) -> Activation:
         raise NotImplementedError
 
-    def run(self, *, payload: str, profile: str, region: str, client_token: str) -> api.MicroVm:
+    def resolve_image(self, *, profile: str, region: str) -> tuple[str, str]:
+        """The image a launch runs, as ``(identifier, version)``. May BUILD one."""
         raise NotImplementedError
+
+    def create_microvm(
+        self,
+        *,
+        image_identifier: str,
+        image_version: str,
+        payload: str,
+        profile: str,
+        region: str,
+        client_token: str,
+    ) -> api.MicroVm:
+        """One ``RunMicrovm`` call, for an image already resolved."""
+        raise NotImplementedError
+
+    def run(self, *, payload: str, profile: str, region: str, client_token: str) -> api.MicroVm:
+        """Resolve this launch's image, then create the VM.
+
+        Two steps and not one, because only the second is replayable. Resolving
+        can BUILD a multi-minute image, and the version it answers is the newest
+        at the time it answers -- so a second resolve is neither free nor
+        guaranteed to agree with the first.
+
+        The resolved pair is remembered for :meth:`reconcile` and CLEARED first,
+        so a launcher reused by a later attempt cannot replay the earlier
+        attempt's image.
+        """
+        self._attempt_image = None
+        identifier, version = self.resolve_image(profile=profile, region=region)
+        self._attempt_image = (identifier, version)
+        return self.create_microvm(
+            image_identifier=identifier,
+            image_version=version,
+            payload=payload,
+            profile=profile,
+            region=region,
+            client_token=client_token,
+        )
 
     def reconcile(
         self, *, payload: str, profile: str, region: str, client_token: str
     ) -> Optional[api.MicroVm]:
         """The VM *client_token* already created, asked for after a failed :meth:`run`.
 
-        Implemented HERE rather than abstract, because there is one way to ask and
-        it is the same for a real VM and a local container: replay the identical
-        create with the identical idempotency token. A token the service is
-        holding a VM for answers with that VM; one it is not creates a fresh one,
-        which the caller terminates -- a failed launch wants no VM either way.
+        Replays ``RunMicrovm`` ALONE, with the identifier and version this attempt
+        already resolved. Implemented HERE rather than abstract, because there is
+        one way to ask and it is the same for a real VM and a local container: the
+        identical create under the identical idempotency token. A token the
+        service is holding a VM for answers with that VM; one it is not creates a
+        fresh one, which the caller terminates -- a failed launch wants no VM
+        either way.
 
-        ``RunMicrovm`` carries no tag, so there is no other handle: the list has
-        no attributable field and the id is precisely what was lost.
+        ``None`` when the attempt never reached the create, which is what an
+        unset :attr:`_attempt_image` means. There is then no accepted request for
+        the token to be asked about, and replaying :meth:`run` instead would
+        resolve the image again: a second build on the failure path, a second
+        chance to answer with a different version, and the token's parameters then
+        differing between the two calls.
+
+        ``RunMicrovm`` carries no tag, so the replay is the only handle: the list
+        has no attributable field and the id is precisely what was lost.
         """
-        return self.run(payload=payload, profile=profile, region=region, client_token=client_token)
+        image = self._attempt_image
+        if image is None:
+            return None
+        return self.create_microvm(
+            image_identifier=image[0],
+            image_version=image[1],
+            payload=payload,
+            profile=profile,
+            region=region,
+            client_token=client_token,
+        )
 
     def wait_online(self, *, activation_id: str, profile: str, region: str) -> str:
         raise NotImplementedError
@@ -1173,11 +1325,19 @@ class ApiVmLauncher(VmLauncher):
         )
         return resolved.image_identifier, resolved.image_version
 
-    def run(self, *, payload: str, profile: str, region: str, client_token: str) -> api.MicroVm:
-        identifier, version = self.resolve_image(profile=profile, region=region)
+    def create_microvm(
+        self,
+        *,
+        image_identifier: str,
+        image_version: str,
+        payload: str,
+        profile: str,
+        region: str,
+        client_token: str,
+    ) -> api.MicroVm:
         return api.run_microvm(
-            image_identifier=identifier,
-            image_version=version,
+            image_identifier=image_identifier,
+            image_version=image_version,
             run_hook_payload=payload,
             maximum_duration_in_seconds=self._spec.wall_seconds,
             client_token=client_token,
