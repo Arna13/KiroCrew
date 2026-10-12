@@ -40,7 +40,7 @@ __all__ = [
 KAS_PIN_VERSION = "0.66.33"
 
 #: sha256 of ``<base>/kas/<KAS_PIN_VERSION>/manifest.json`` as published.
-KAS_PIN_MANIFEST_SHA256 = "3d830401627799540a56483d01e1fae30b7b610ab4c314ede8a8b7d333252c33"
+KAS_PIN_MANIFEST_SHA256 = "9cbd8dd91092b056ef61893614f6e4deec8b5694a3f6dcfcf9dddc2f659f604a"
 
 #: Operator/developer override of the version the harness resolves.
 KAS_VERSION_OVERRIDE_ENV = "KIROCREW_KAS_VERSION"
