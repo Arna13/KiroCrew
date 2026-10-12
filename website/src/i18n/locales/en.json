@@ -4973,6 +4973,23 @@
       "highlighting_unavailable_content_readable_reload": "Syntax highlighting is unavailable until you reload. Content remains readable.",
       "highlighting_unavailable_reload": "Syntax highlighting is unavailable. Save or copy your draft, then reload to restore syntax highlighting; editing remains available."
     },
+    "projectAwsProfile": {
+      "bound_title": "AWS profile for this project: {{profile}}",
+      "inherited_from": "Set on parent folder {{dir}}",
+      "expired_title": "The SSO sign-in for {{profile}} has expired. Run aws sso login --profile {{profile}} in a terminal.",
+      "unavailable_title": "{{profile}} can't sign in to AWS right now. Check its credentials.",
+      "default_chain": "No profile (use the gateway's AWS sign-in)",
+      "none_short": "No profile",
+      "other_profile": "Other profile name",
+      "bind": "Use profile",
+      "invalid_name": "A profile name is up to 128 letters, digits, underscores, dots, plus signs or hyphens, and does not start with a hyphen.",
+      "inherited_note": "Set on parent folder {{dir}}. Picking a profile here overrides it for this folder only. To clear it, open a chat in that folder and choose No profile.",
+      "save_failed": "Could not save this AWS profile. Try again.",
+      "save_failed_typed": "Could not save this AWS profile. Check the name and try again.",
+      "applies_next": "Picking one runs nothing now. It only sets which AWS profile new chats in this folder use.",
+      "read_failed": "Could not read this project's AWS profile",
+      "row_title": "AWS profile for {{name}}"
+    },
     "projectPicker": {
       "add_favorite": "Add {{path}} to favorites",
       "all_drives": "All drives",

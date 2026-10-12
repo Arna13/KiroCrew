@@ -7934,6 +7934,23 @@
       "highlighting_unavailable_with_reason": "El resaltado de sintaxis no estará disponible hasta que recargues. El contenido seguirá siendo legible. Último error: {{classification}} (generación {{generation}}, intento {{attempt}}): {{reason}}",
       "highlighting_unavailable_reload": "El resaltado de sintaxis no está disponible. Guarda o copia tu borrador y luego recarga para restaurarlo; puedes seguir editando."
     },
+    "projectAwsProfile": {
+      "bound_title": "Perfil de AWS de este proyecto: {{profile}}",
+      "inherited_from": "Definido en la carpeta superior {{dir}}",
+      "expired_title": "El inicio de sesión SSO de {{profile}} ha caducado. Ejecuta aws sso login --profile {{profile}} en una terminal.",
+      "unavailable_title": "{{profile}} no puede iniciar sesión en AWS ahora. Revisa sus credenciales.",
+      "default_chain": "Sin perfil (usar el inicio de sesión de AWS del gateway)",
+      "none_short": "Sin perfil",
+      "other_profile": "Otro nombre de perfil",
+      "bind": "Usar perfil",
+      "invalid_name": "Un nombre de perfil tiene hasta 128 letras, dígitos, guiones bajos, puntos, signos más o guiones, y no empieza por un guion.",
+      "inherited_note": "Definido en la carpeta superior {{dir}}. Elegir un perfil aquí lo sustituye solo para esta carpeta. Para quitarlo, abre un chat en esa carpeta y elige Sin perfil.",
+      "save_failed": "No se pudo guardar este perfil de AWS. Vuelve a intentarlo.",
+      "save_failed_typed": "No se pudo guardar este perfil de AWS. Revisa el nombre y vuelve a intentarlo.",
+      "applies_next": "Elegir uno no ejecuta nada ahora. Solo define qué perfil de AWS usan los chats nuevos de esta carpeta.",
+      "read_failed": "No se pudo leer el perfil de AWS de este proyecto",
+      "row_title": "Perfil de AWS de {{name}}"
+    },
     "projectPicker": {
       "add_favorite": "Añadir {{path}} a favoritos",
       "all_drives": "Todas las unidades",

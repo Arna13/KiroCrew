@@ -7702,6 +7702,23 @@
       "highlighting_unavailable_with_reason": "重新加载前语法高亮不可用。内容仍可阅读。最近一次失败：{{classification}}（第 {{generation}} 代，第 {{attempt}} 次尝试）：{{reason}}",
       "highlighting_unavailable_reload": "语法高亮不可用。请保存或复制草稿，然后重新加载以恢复语法高亮；仍可继续编辑。"
     },
+    "projectAwsProfile": {
+      "bound_title": "此项目的 AWS 配置文件：{{profile}}",
+      "inherited_from": "在父文件夹 {{dir}} 上设置",
+      "expired_title": "{{profile}} 的 SSO 登录已过期。请在终端中运行 aws sso login --profile {{profile}}。",
+      "unavailable_title": "{{profile}} 目前无法登录 AWS。请检查其凭证。",
+      "default_chain": "不使用配置文件（使用网关的 AWS 登录）",
+      "none_short": "不使用配置文件",
+      "other_profile": "其他配置文件名称",
+      "bind": "使用配置文件",
+      "invalid_name": "配置文件名称最多 128 个字符，只能包含字母、数字、下划线、点、加号或连字符，且不能以连字符开头。",
+      "inherited_note": "在父文件夹 {{dir}} 上设置。在此选择配置文件只会覆盖此文件夹。要清除，请在该文件夹中打开聊天并选择“不使用配置文件”。",
+      "save_failed": "无法保存此 AWS 配置文件。请重试。",
+      "save_failed_typed": "无法保存此 AWS 配置文件。请检查名称后重试。",
+      "applies_next": "选择后不会立即运行任何内容，只会设置此文件夹中新聊天使用的 AWS 配置文件。",
+      "read_failed": "无法读取此项目的 AWS 配置文件",
+      "row_title": "{{name}} 的 AWS 配置文件"
+    },
     "projectPicker": {
       "add_favorite": "收藏 {{path}}",
       "all_drives": "所有驱动器",

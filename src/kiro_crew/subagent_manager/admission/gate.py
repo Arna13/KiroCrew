@@ -932,6 +932,9 @@ class _GateMixin(ManagerComponent):
         # runtime launches no process; the decision is the run's own
         # (``_sharing_plan``), and only a real True prices it shared -- an
         # unknown answer is the dedicated projection, since it may become one.
+        # The probe resolves no AWS profile binding (that reads paths, and this
+        # runs on the loop), so a start that may bind another profile than its
+        # parent (``aws.project_profiles``) is priced dedicated.
         candidate_price: float | None = None
         priced_shared = False
         # A nested start that will share its parent's runtime: its
@@ -956,6 +959,7 @@ class _GateMixin(ManagerComponent):
             "bare": bare,
             "keep": keep,
             "execution_context": execution,
+            "cwd": resolved_cwd,
         }
         if _dispatch_now:
             # The claim re-entry registers at the price its first half CHECKED;
@@ -1517,7 +1521,6 @@ class _GateMixin(ManagerComponent):
             approval_mode=approval_mode or "",
             silent=silent,
             max_turns=max_turns,
-            cwd=resolved_cwd,
             batch_id=batch_id,
             batch_total=max(0, int(batch_total)),
             conversation_key=conversation_key,

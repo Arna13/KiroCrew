@@ -7702,6 +7702,23 @@
       "highlighting_unavailable_with_reason": "다시 로드할 때까지 구문 강조 표시를 사용할 수 없습니다. 콘텐츠는 계속 읽을 수 있습니다. 마지막 실패: {{classification}}(세대 {{generation}}, 시도 {{attempt}}): {{reason}}",
       "highlighting_unavailable_reload": "구문 강조 표시를 사용할 수 없습니다. 초안을 저장하거나 복사한 다음, 구문 강조 표시를 복원하려면 다시 로드하세요. 편집은 계속할 수 있습니다."
     },
+    "projectAwsProfile": {
+      "bound_title": "이 프로젝트의 AWS 프로필: {{profile}}",
+      "inherited_from": "상위 폴더 {{dir}}에서 설정됨",
+      "expired_title": "{{profile}}의 SSO 로그인이 만료되었습니다. 터미널에서 aws sso login --profile {{profile}}을(를) 실행하세요.",
+      "unavailable_title": "{{profile}}이(가) 지금 AWS에 로그인할 수 없습니다. 자격 증명을 확인하세요.",
+      "default_chain": "프로필 없음 (게이트웨이의 AWS 로그인 사용)",
+      "none_short": "프로필 없음",
+      "other_profile": "다른 프로필 이름",
+      "bind": "프로필 사용",
+      "invalid_name": "프로필 이름은 문자, 숫자, 밑줄, 점, 더하기 기호, 하이픈으로 최대 128자이며 하이픈으로 시작할 수 없습니다.",
+      "inherited_note": "상위 폴더 {{dir}}에서 설정되었습니다. 여기서 프로필을 선택하면 이 폴더에만 덮어씁니다. 해제하려면 해당 폴더에서 채팅을 열고 프로필 없음을 선택하세요.",
+      "save_failed": "이 AWS 프로필을 저장할 수 없습니다. 다시 시도하세요.",
+      "save_failed_typed": "이 AWS 프로필을 저장할 수 없습니다. 이름을 확인하고 다시 시도하세요.",
+      "applies_next": "선택해도 지금은 아무것도 실행되지 않습니다. 이 폴더의 새 채팅이 사용할 AWS 프로필만 정합니다.",
+      "read_failed": "이 프로젝트의 AWS 프로필을 읽을 수 없습니다",
+      "row_title": "{{name}}의 AWS 프로필"
+    },
     "projectPicker": {
       "add_favorite": "{{path}}을(를) 즐겨찾기에 추가",
       "all_drives": "모든 드라이브",

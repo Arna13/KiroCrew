@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useRef, useCallback, RefObject } from 'react'
+import { useState, useEffect, useMemo, useRef, useCallback, RefObject, type ReactNode } from 'react'
 import { useImeGuard } from '../hooks/useImeGuard'
 import { createPortal } from 'react-dom'
 import { FolderOpen, FolderSearch, ChevronRight, ChevronLeft, Clock, Search, Star } from 'lucide-react'
@@ -184,10 +184,18 @@ interface Props {
    * move the listing under the user.
    */
   startPath?: string
+  /** Rendered below the listing, inside the popover (so a click there does not dismiss it):
+   *  ChatPage's AWS profile row for the chat's current project. */
+  footer?: ReactNode
 }
 
-export default function ProjectPicker({ open, onOpenChange, anchorRef, anchorRect, onSelect, errorHandoff = false, startPath = '' }: Props) {
+export default function ProjectPicker({ open, onOpenChange, anchorRef, anchorRect, onSelect, errorHandoff = false, startPath = '', footer }: Props) {
   const [tab, setTab] = useState<'favorites' | 'recent' | 'browse'>('recent')
+  // Focus inside the caller's footer (a field of its own) disarms the list navigators:
+  // their document-capture listeners claim Enter and Tab, which would pick a project and
+  // close the picker over whatever the footer was being used for.
+  const [footerFocused, setFooterFocused] = useState(false)
+  useEffect(() => { if (!open) setFooterFocused(false) }, [open])
   const [input, setInput] = useState('')
   const ime = useImeGuard()
   const [browsePath, setBrowsePath] = useState('')
@@ -565,7 +573,7 @@ export default function ProjectPicker({ open, onOpenChange, anchorRef, anchorRec
   // Skill/File pickers). The Browse tab has its own combobox input handler
   // below, so the hook is only armed on Recent to avoid double-handling keys.
   const recentNav = useListKeyboardNav({
-    open: open && tab === 'recent',
+    open: open && tab === 'recent' && !footerFocused,
     count: filteredRecent.length,
     onChoose: i => { const d = filteredRecent[i]; if (d) select(d) },
     // The star is a pointer target inside a listbox whose own document-capture listener
@@ -579,7 +587,7 @@ export default function ProjectPicker({ open, onOpenChange, anchorRef, anchorRec
   // Favourites tab: the same nav, armed on its own tab so the two listeners are never both
   // live. Alt/Option+Enter un-favourites the highlighted row, the mirror of Recent's add.
   const favoriteNav = useListKeyboardNav({
-    open: open && tab === 'favorites',
+    open: open && tab === 'favorites' && !footerFocused,
     count: filteredFavorites.length,
     onChoose: i => { const d = filteredFavorites[i]; if (d) select(d) },
     onAltEnter: i => { const d = filteredFavorites[i]; if (!d) return false; toggleFavorite(d); return true },
@@ -1061,6 +1069,16 @@ export default function ProjectPicker({ open, onOpenChange, anchorRef, anchorRec
             <FolderSearch size={13} className="shrink-0 text-accent" />
             <span className="truncate">{i18nT('components.projectPicker.system_folder_picker')}</span>
           </button>
+        </div>
+      )}
+      {footer && (
+        // eslint-disable-next-line jsx-a11y/no-static-element-interactions -- a focus tracker, not an activatable control: it only notes that focus is inside the footer so the list navigators stand down, and every control inside is the footer's own input or button.
+        <div
+          className="contents"
+          onFocus={() => setFooterFocused(true)}
+          onBlur={e => { if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setFooterFocused(false) }}
+        >
+          {footer}
         </div>
       )}
     </div>,

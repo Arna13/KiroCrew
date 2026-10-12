@@ -220,6 +220,7 @@ import { useListboxKeyboard } from '../hooks/useListboxKeyboard'
 import AgentDropdownList, { DefaultAgentRow, ManageAgentsFooter, defaultWriteKind, isCrewmateChat } from '../components/AgentDropdownList'
 import { agentSwitchFailureMessage } from '../utils/agentSwitchFeedback'
 import ProjectPicker from '../components/ProjectPicker'
+import { ProjectAwsProfileSection } from '../components/ProjectAwsProfile'
 import InboundLinkChip from '../components/InboundLinkChip'
 import ModelEffortDropdown from '../components/ModelEffortDropdown'
 
@@ -6725,6 +6726,9 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
               onSelect={path => { setProject(path); setProjectPickerOpen(false) }}
               startPath={_slotProject}
               errorHandoff
+              footer={_slotProject
+                ? <ProjectAwsProfileSection project={_slotProject} errorHandoff onHandoff={() => setProjectPickerOpen(false)} />
+                : undefined}
             />
             {/* App-contributed session control popover — triggered from input bar.
                 Only the open one is mounted, so an app's control costs nothing

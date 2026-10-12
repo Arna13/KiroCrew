@@ -7934,6 +7934,23 @@
       "highlighting_unavailable_with_reason": "La coloration syntaxique est indisponible jusqu’au rechargement. Le contenu reste lisible. Dernier échec : {{classification}} (génération {{generation}}, tentative {{attempt}}) : {{reason}}",
       "highlighting_unavailable_reload": "La coloration syntaxique est indisponible. Enregistrer ou copier le brouillon, puis recharger la page pour la restaurer ; la modification reste possible."
     },
+    "projectAwsProfile": {
+      "bound_title": "Profil AWS de ce projet : {{profile}}",
+      "inherited_from": "Défini sur le dossier parent {{dir}}",
+      "expired_title": "La connexion SSO de {{profile}} a expiré. Exécute aws sso login --profile {{profile}} dans un terminal.",
+      "unavailable_title": "{{profile}} ne peut pas se connecter à AWS pour le moment. Vérifie ses identifiants.",
+      "default_chain": "Aucun profil (utiliser la connexion AWS de la passerelle)",
+      "none_short": "Aucun profil",
+      "other_profile": "Autre nom de profil",
+      "bind": "Utiliser le profil",
+      "invalid_name": "Un nom de profil comporte jusqu'à 128 lettres, chiffres, traits de soulignement, points, signes plus ou traits d'union, et ne commence pas par un trait d'union.",
+      "inherited_note": "Défini sur le dossier parent {{dir}}. Choisir un profil ici le remplace pour ce dossier uniquement. Pour le retirer, ouvre une discussion dans ce dossier et choisis Aucun profil.",
+      "save_failed": "Impossible d'enregistrer ce profil AWS. Réessaie.",
+      "save_failed_typed": "Impossible d'enregistrer ce profil AWS. Vérifie le nom et réessaie.",
+      "applies_next": "Choisir un profil n'exécute rien maintenant. Cela définit seulement le profil AWS qu'utilisent les nouvelles discussions de ce dossier.",
+      "read_failed": "Impossible de lire le profil AWS de ce projet",
+      "row_title": "Profil AWS de {{name}}"
+    },
     "projectPicker": {
       "add_favorite": "Ajouter {{path}} aux favoris",
       "all_drives": "Tous les lecteurs",

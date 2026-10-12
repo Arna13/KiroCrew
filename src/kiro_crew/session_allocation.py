@@ -1452,6 +1452,49 @@ class SessionAllocationService:
             return False
         return getattr(session.provider, "is_session_sharing_eligible", False)
 
+    def _parent_aws_profile(self, parent_session_key: str) -> str | None:
+        """The profile ``aws.project_profiles`` set on the parent's process, if any."""
+        session = self._sessions.get(parent_session_key)
+        recorded = getattr(session, "aws_project_profile", None)
+        return recorded if isinstance(recorded, str) else None
+
+    def aws_profile_split_possible(self, parent_session_key: str) -> bool:
+        """Whether a subagent of the parent could need another AWS profile than it.
+
+        A subagent on the shared arm runs inside the parent's process (or a
+        companion runtime that mirrors the parent's environment), so it carries
+        whatever profile ``aws.project_profiles`` set on the parent at its cold
+        start; the dedicated arm sets the profile bound to the subagent's own
+        ``cwd``. Those can differ only while the map holds a binding or the
+        parent carries one. Reads no path, so a synchronous caller may ask.
+        """
+        if configured_project_profiles(self._owner._cfg):
+            return True
+        return self._parent_aws_profile(parent_session_key) is not None
+
+    def project_aws_profile(self, cwd: str) -> str | None:
+        """The profile ``aws.project_profiles`` binds *cwd* to, or ``None``.
+
+        Resolves every mapped directory with ``realpath``, so a directory on a
+        mount that stops answering blocks the calling thread: an async caller
+        runs this off the event loop.
+        """
+        project_profiles = configured_project_profiles(self._owner._cfg)
+        if not project_profiles or not cwd:
+            return None
+        return resolve_project_profile(project_profiles, cwd)
+
+    def aws_profile_differs_from_parent(
+        self, parent_session_key: str, child_profile: str | None
+    ) -> bool:
+        """Whether a subagent bound to *child_profile* differs from the parent's profile.
+
+        *child_profile* is the subagent's own binding, already resolved
+        (:meth:`project_aws_profile`); a bound parent with an unbound child
+        differs, and so does the reverse. Reads no path.
+        """
+        return child_profile != self._parent_aws_profile(parent_session_key)
+
     @staticmethod
     def _runtime_pid(runtime: Any) -> int | None:
         pid = getattr(runtime, "pid", None)
@@ -2387,16 +2430,20 @@ class SessionAllocationService:
         # Set before the pool decision so a bound session never takes a pooled
         # process spawned without it. An empty map leaves extra_env untouched.
         project_profiles = configured_project_profiles(owner._cfg)
+        # Stamped on the session this call registers, so a subagent asking to
+        # share its process can compare against the profile the process holds.
+        bound_profile: str | None = None
         if project_profiles and effective_cwd:
             bound_env = await asyncio.to_thread(
                 bound_profile_env, project_profiles, effective_cwd, extra_env
             )
             if bound_env is not extra_env and bound_env is not None:
+                bound_profile = bound_env[AWS_PROFILE_ENV]
                 # The profile NAME only: the binding never holds a credential.
                 self._deps.logger.info(
                     "session %s: AWS profile %r from aws.project_profiles",
                     key,
-                    bound_env[AWS_PROFILE_ENV],
+                    bound_profile,
                 )
             extra_env = bound_env
 
@@ -2847,6 +2894,7 @@ class SessionAllocationService:
                     # what keeps the id sent and the id read identical.
                     session.requested_model = model or ""
                     session.backend_override = extra_factory_kwargs.get("backend_override")
+                    session.aws_project_profile = bound_profile
                     session.loaded_capabilities = stamp
                     self.state.capability_failures.pop(key, None)
                     replay_needed = getattr(provider, "_history_replay_needed", False) is True

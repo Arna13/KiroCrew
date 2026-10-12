@@ -59,6 +59,7 @@ from kiro_crew.execution_context import read_session_execution
 from kiro_crew.executors import run_in_embed_pool
 
 if TYPE_CHECKING:
+    from kiro_crew.aws_project_profiles import ResolvedAwsProfile
     from kiro_crew.execution_context import ExecutionContext
     from kiro_crew.acp.runtime import AcpRuntime
     from kiro_crew.providers.base import LLMProvider
@@ -6487,8 +6488,16 @@ class SubagentManager:
     def _should_use_session_sharing(self, info: SubagentInfo) -> bool:
         return self._run_events._should_use_session_sharing_impl(info)
 
-    def _sharing_plan(self, info: SubagentInfo, *, cfg: Any = None) -> _SharingPlan:
-        return self._run_events._sharing_plan_impl(info, cfg=cfg)
+    def _sharing_plan(
+        self,
+        info: SubagentInfo,
+        *,
+        cfg: Any = None,
+        child_aws_profile: ResolvedAwsProfile | None = None,
+    ) -> _SharingPlan:
+        return self._run_events._sharing_plan_impl(
+            info, cfg=cfg, child_aws_profile=child_aws_profile
+        )
 
     async def _ensure_dedicated_start_priced(self, info: SubagentInfo) -> None:
         return await self._run_events._ensure_dedicated_start_priced_impl(info)

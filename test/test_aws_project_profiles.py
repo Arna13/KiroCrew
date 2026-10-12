@@ -16,12 +16,14 @@ safe to ship as an opt-in:
 
 from __future__ import annotations
 
+import asyncio
 import builtins
 import io
 import json
 import logging
 import os
 import pathlib
+import threading
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -129,9 +131,23 @@ class TestBoundProfileEnv:
         proj = _project(tmp_path, "proj")
         caller = {"FOO": "bar"}
         result = app.bound_profile_env({str(proj): "dev"}, str(proj), caller)
-        assert result == {"FOO": "bar", "AWS_PROFILE": "dev"}
+        assert result == {"FOO": "bar", "AWS_PROFILE": "dev", "AWS_DEFAULT_PROFILE": "dev"}
         assert caller == {"FOO": "bar"}
-        assert app.bound_profile_env({str(proj): "dev"}, str(proj), None) == {"AWS_PROFILE": "dev"}
+        assert app.bound_profile_env({str(proj): "dev"}, str(proj), None) == {
+            "AWS_PROFILE": "dev",
+            "AWS_DEFAULT_PROFILE": "dev",
+        }
+
+    @pytest.mark.parametrize("name", ["AWS_PROFILE", "AWS_DEFAULT_PROFILE"])
+    def test_a_selector_the_gateway_inherited_cannot_outrank_the_binding(
+        self, tmp_path: Path, name: str
+    ) -> None:
+        """The launcher layers ``extra_env`` over the gateway's own environment."""
+        proj = _project(tmp_path, "proj")
+        overlay = app.bound_profile_env({str(proj): "dev"}, str(proj), None)
+        child_env = {name: "prod", **(overlay or {})}
+        assert child_env["AWS_PROFILE"] == "dev"
+        assert child_env["AWS_DEFAULT_PROFILE"] == "dev"
 
     @pytest.mark.parametrize("name", ["AWS_PROFILE", "AWS_DEFAULT_PROFILE"])
     def test_a_profile_the_caller_chose_wins(self, tmp_path: Path, name: str) -> None:
@@ -174,7 +190,10 @@ class TestNoFileIsRead:
 
         assert unbound is None, "a repo file must never bind a profile"
         assert elsewhere is None
-        assert bound == {"AWS_PROFILE": "dev"}, "only the operator's map binds"
+        assert bound == {
+            "AWS_PROFILE": "dev",
+            "AWS_DEFAULT_PROFILE": "dev",
+        }, "only the operator's map binds"
 
 
 class TestCoerce:
@@ -413,7 +432,11 @@ class TestSessionSpawn:
             await mgr.get_or_create("chat-6332", cwd=str(proj / "src"), extra_env=caller)
         finally:
             await mgr.close_all()
-        assert calls[0]["extra_env"] == {"FOO": "bar", "AWS_PROFILE": "dev"}
+        assert calls[0]["extra_env"] == {
+            "FOO": "bar",
+            "AWS_PROFILE": "dev",
+            "AWS_DEFAULT_PROFILE": "dev",
+        }
         assert caller == {"FOO": "bar"}
 
     @pytest.mark.asyncio
@@ -432,7 +455,10 @@ class TestSessionSpawn:
                 await mgr.get_or_create("chat-6332", cwd=str(proj))
         finally:
             await mgr.close_all()
-        assert calls[0]["extra_env"] == {"AWS_PROFILE": "zq-acct-7"}
+        assert calls[0]["extra_env"] == {
+            "AWS_PROFILE": "zq-acct-7",
+            "AWS_DEFAULT_PROFILE": "zq-acct-7",
+        }
         elsewhere = [k for k, v in calls[0].items() if k != "extra_env" and "zq-acct-7" in repr(v)]
         assert elsewhere == [], "the profile name travels only as the AWS_PROFILE value"
         applied = [r.getMessage() for r in caplog.records if "zq-acct-7" in r.getMessage()]
@@ -493,7 +519,7 @@ class TestSessionSpawn:
             await mgr.close_all()
         mgr._drain_and_claim.assert_not_awaited()
         assert decisions == ["bypass_env"]
-        assert calls[0]["extra_env"] == {"AWS_PROFILE": "dev"}
+        assert calls[0]["extra_env"] == {"AWS_PROFILE": "dev", "AWS_DEFAULT_PROFILE": "dev"}
 
 
 class TestTaskRunStep:
@@ -550,3 +576,336 @@ class TestTaskRunStep:
                 )
         finally:
             await mgr.close_all()
+
+
+class TestHotReload:
+    @pytest.mark.asyncio
+    async def test_a_binding_change_reaches_the_next_spawn_without_a_restart(
+        self, tmp_path: Path
+    ) -> None:
+        """The manager subscribes to ``aws``, so an edit alone is adopted into ``_cfg``."""
+        from kiro_crew.config.live import ConfigChange
+        from kiro_crew.session import SessionManager
+
+        proj = _project(tmp_path, "proj")
+        calls: list[dict] = []
+        mgr = SessionManager(_cfg({}), provider_factory=_recording_factory(calls))
+        mgr.refresh_defaults = AsyncMock()  # type: ignore[method-assign]
+        try:
+            assert "aws" in mgr._config_sub.prefixes
+            edited = _cfg({str(proj): "dev"})
+            await mgr._on_config_change(
+                ConfigChange(old=None, new=edited, changed=frozenset({"aws.project_profiles"}))
+            )
+            mgr.refresh_defaults.assert_not_awaited()
+            await mgr.get_or_create("chat-6332", cwd=str(proj))
+        finally:
+            await mgr.close_all()
+        assert calls[0]["extra_env"] == {"AWS_PROFILE": "dev", "AWS_DEFAULT_PROFILE": "dev"}
+
+
+_PARENT_KEY = "dashboard:parent6332"
+_CHILD_KEY = "subagent:sub6332"
+
+
+async def _bound_parent(sm, cwd: Path, extra_env: dict | None = None) -> None:
+    """Start the parent session in *cwd* on *sm*, on a backend that hosts shared sessions."""
+    await sm.get_or_create(_PARENT_KEY, cwd=str(cwd), extra_env=extra_env)
+    sm.get_provider(_PARENT_KEY).is_session_sharing_eligible = True
+
+
+def _sharing_cfg() -> KiroCrewConfig:
+    """The config the subagent manager loads: session sharing on."""
+    cfg = _cfg({})
+    cfg.agent.session_sharing = True
+    return cfg
+
+
+def _sharing_runner(sm):
+    """A subagent manager on *sm*, its message builder a double."""
+    from kiro_crew.subagent import SubagentManager
+
+    ctx = MagicMock()
+    ctx.build_message = MagicMock(return_value=("msg", None))
+    ctx.hooks.auto_approve_subagent_tools = False
+    return SubagentManager(sessions=sm, ctx_builder=ctx)
+
+
+def _child_info(cwd: str):
+    """One template subagent of the parent, in *cwd*."""
+    from kiro_crew.execution_context import execution_for_store
+    from kiro_crew.subagent import SubagentInfo
+
+    return SubagentInfo(
+        execution_context=execution_for_store(""),
+        id="sub6332",
+        task="test",
+        parent_session_key=_PARENT_KEY,
+        cwd=cwd,
+    )
+
+
+async def _start_subagent(sm, cwd: str) -> AsyncMock:
+    """Run one template subagent of the parent with *cwd*; returns the shared-arm double.
+
+    The dedicated arm goes through ``sm.get_or_create`` for real, so the spawn's
+    environment lands in the recording factory; the run itself then streams on
+    a plain double, which keeps the turn out of these tests.
+    """
+    import kiro_crew.subagent as subagent_mod
+    from kiro_crew.providers.base import EVENT_COMPLETE, LLMEvent
+
+    client = MagicMock()
+
+    async def _stream(_msg):
+        yield LLMEvent(kind=EVENT_COMPLETE)
+
+    client.stream = _stream
+    real_get_or_create = sm.get_or_create
+
+    async def _get_or_create(key, *args, **kwargs):
+        provider, _, _ = await real_get_or_create(key, *args, **kwargs)
+        # The turn's identity step calls this synchronously; the recording
+        # factory's async double would leave an unawaited coroutine behind.
+        provider.client.reclaim = MagicMock()
+        return client, True, False
+
+    async def _unchanged(shared_client, *_args):
+        return shared_client
+
+    cfg = _sharing_cfg()
+    runner = _sharing_runner(sm)
+    shared = AsyncMock(return_value=client)
+    info = _child_info(cwd)
+    runner._log_spawned(info)
+    with (
+        patch.object(sm, "get_or_create", _get_or_create),
+        patch.object(runner, "_create_shared_session", shared),
+        patch.object(subagent_mod, "replace_stale_shared_session", _unchanged),
+        patch("kiro_crew.config.loader.KiroCrewConfig.load", classmethod(lambda c: cfg)),
+    ):
+        await runner._run_inner(info, _CHILD_KEY)
+    return shared
+
+
+class TestSubagentSharing:
+    """A subagent shares its parent's process only when both bind the same AWS profile."""
+
+    @pytest.mark.asyncio
+    async def test_a_child_bound_to_another_profile_gets_its_own_process_and_profile(
+        self, tmp_path: Path
+    ) -> None:
+        from kiro_crew.session import SessionManager
+
+        billing = _project(tmp_path, "billing")
+        sandbox = _project(tmp_path, "sandbox")
+        calls: list[dict] = []
+        sm = SessionManager(
+            _cfg({str(billing): "billing-prod", str(sandbox): "dev"}),
+            provider_factory=_recording_factory(calls),
+        )
+        try:
+            await _bound_parent(sm, billing)
+            shared = await _start_subagent(sm, str(sandbox))
+        finally:
+            await sm.close_all()
+        shared.assert_not_awaited()
+        assert [c["extra_env"] for c in calls] == [
+            {"AWS_PROFILE": "billing-prod", "AWS_DEFAULT_PROFILE": "billing-prod"},
+            {"AWS_PROFILE": "dev", "AWS_DEFAULT_PROFILE": "dev"},
+        ]
+
+    @pytest.mark.asyncio
+    async def test_an_unbound_child_of_a_bound_parent_does_not_inherit_its_profile(
+        self, tmp_path: Path
+    ) -> None:
+        from kiro_crew.session import SessionManager
+
+        billing = _project(tmp_path, "billing")
+        scratch = _project(tmp_path, "scratch")
+        calls: list[dict] = []
+        sm = SessionManager(
+            _cfg({str(billing): "billing-prod"}), provider_factory=_recording_factory(calls)
+        )
+        try:
+            await _bound_parent(sm, billing)
+            shared = await _start_subagent(sm, str(scratch))
+        finally:
+            await sm.close_all()
+        shared.assert_not_awaited()
+        assert len(calls) == 2
+        assert calls[1]["extra_env"] is None
+
+    @pytest.mark.asyncio
+    async def test_a_bound_child_of_an_unbound_parent_gets_its_own_profile(
+        self, tmp_path: Path
+    ) -> None:
+        from kiro_crew.session import SessionManager
+
+        home = _project(tmp_path, "home")
+        sandbox = _project(tmp_path, "sandbox")
+        calls: list[dict] = []
+        sm = SessionManager(_cfg({str(sandbox): "dev"}), provider_factory=_recording_factory(calls))
+        try:
+            await _bound_parent(sm, home)
+            shared = await _start_subagent(sm, str(sandbox))
+        finally:
+            await sm.close_all()
+        shared.assert_not_awaited()
+        assert calls[0]["extra_env"] is None
+        assert calls[1]["extra_env"] == {"AWS_PROFILE": "dev", "AWS_DEFAULT_PROFILE": "dev"}
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("child_dir", ["billing/src", "billing-mirror"])
+    async def test_a_child_bound_to_the_same_profile_still_shares(
+        self, tmp_path: Path, child_dir: str
+    ) -> None:
+        from kiro_crew.session import SessionManager
+
+        billing = _project(tmp_path, "billing")
+        mirror = _project(tmp_path, "billing-mirror")
+        child = _project(tmp_path, child_dir)
+        calls: list[dict] = []
+        sm = SessionManager(
+            _cfg({str(billing): "billing-prod", str(mirror): "billing-prod"}),
+            provider_factory=_recording_factory(calls),
+        )
+        try:
+            await _bound_parent(sm, billing)
+            shared = await _start_subagent(sm, str(child))
+        finally:
+            await sm.close_all()
+        shared.assert_awaited_once()
+        assert len(calls) == 1, "the child starts no process of its own"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("child_cwd", ["", "sandbox"])
+    async def test_an_empty_map_keeps_sharing_and_reads_no_path(
+        self, tmp_path: Path, child_cwd: str
+    ) -> None:
+        from kiro_crew.session import SessionManager
+
+        home = _project(tmp_path, "home")
+        cwd = str(_project(tmp_path, child_cwd)) if child_cwd else ""
+        calls: list[dict] = []
+        sm = SessionManager(_cfg({}), provider_factory=_recording_factory(calls))
+        try:
+            await _bound_parent(sm, home)
+            with patch.object(app, "_dir_parts", side_effect=AssertionError("no path resolved")):
+                shared = await _start_subagent(sm, cwd)
+        finally:
+            await sm.close_all()
+        shared.assert_awaited_once()
+        assert len(calls) == 1, "the child starts no process of its own"
+
+    @pytest.mark.asyncio
+    async def test_an_unbound_child_keeps_sharing_a_profile_the_parents_caller_chose(
+        self, tmp_path: Path
+    ) -> None:
+        from kiro_crew.session import SessionManager
+
+        billing = _project(tmp_path, "billing")
+        scratch = _project(tmp_path, "scratch")
+        calls: list[dict] = []
+        sm = SessionManager(
+            _cfg({str(billing): "billing-prod"}), provider_factory=_recording_factory(calls)
+        )
+        try:
+            await _bound_parent(sm, billing, extra_env={"AWS_PROFILE": "from-cron"})
+            shared = await _start_subagent(sm, str(scratch))
+        finally:
+            await sm.close_all()
+        shared.assert_awaited_once()
+        assert [c["extra_env"] for c in calls] == [{"AWS_PROFILE": "from-cron"}]
+
+    @pytest.mark.asyncio
+    async def test_the_childs_profile_is_resolved_off_the_event_loop(self, tmp_path: Path) -> None:
+        """A mapped directory on a mount that stops answering stalls the run, not the loop."""
+        from kiro_crew import session_allocation
+        from kiro_crew.session import SessionManager
+        from kiro_crew.testing.wait import LoopHop, await_until, default_timeout
+
+        billing = _project(tmp_path, "billing")
+        sandbox = _project(tmp_path, "sandbox")
+        calls: list[dict] = []
+        sm = SessionManager(
+            _cfg({str(billing): "billing-prod", str(sandbox): "dev"}),
+            provider_factory=_recording_factory(calls),
+        )
+        loop_thread = threading.get_ident()
+        hop = LoopHop(asyncio.get_running_loop())
+        release = threading.Event()
+        reached = asyncio.Event()
+        # (resolved on the loop thread, answer), one per call of the resolver.
+        resolved: list[tuple[bool, str | None]] = []
+        real_resolve = session_allocation.resolve_project_profile
+
+        async def _loop_turn() -> None:
+            reached.set()
+
+        def _blocking_resolve(mapping, cwd):
+            if threading.get_ident() == loop_thread:
+                # Blocking here would freeze this test along with the loop.
+                resolved.append((True, real_resolve(mapping, cwd)))
+                reached.set()
+                return resolved[-1][1]
+            # The loop runs a coroutine while this thread is still held.
+            hop.run(_loop_turn(), "a loop turn while the resolver was blocked")
+            release.wait(default_timeout())
+            resolved.append((False, real_resolve(mapping, cwd)))
+            return resolved[-1][1]
+
+        try:
+            await _bound_parent(sm, billing)
+            with patch.object(session_allocation, "resolve_project_profile", _blocking_resolve):
+                start = asyncio.ensure_future(_start_subagent(sm, str(sandbox)))
+                try:
+                    await await_until(reached, what="the child's profile lookup")
+                    hop.check()
+                    assert resolved == [], "the child's profile was resolved on the event loop"
+                    assert not start.done(), "the run went on before its profile was resolved"
+                    release.set()
+                    shared = await await_until(start, what="the subagent start")
+                finally:
+                    release.set()
+                    await await_until(asyncio.gather(start, return_exceptions=True))
+        finally:
+            await sm.close_all()
+        assert resolved == [(False, "dev")]
+        shared.assert_not_awaited()
+        assert calls[1]["extra_env"] == {"AWS_PROFILE": "dev", "AWS_DEFAULT_PROFILE": "dev"}
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("binding", "shared"),
+        [
+            pytest.param("mapped", False, id="a-map-is-configured"),
+            pytest.param("parent-only", False, id="only-the-parent-carries-one"),
+            pytest.param("none", True, id="no-binding-anywhere"),
+        ],
+    )
+    async def test_the_admission_probe_resolves_no_path(
+        self, tmp_path: Path, binding: str, shared: bool
+    ) -> None:
+        """The synchronous probe prices a possible split dedicated without a ``realpath``."""
+        from kiro_crew.session import SessionManager
+
+        billing = _project(tmp_path, "billing")
+        child = _project(billing, "src")
+        mapping = {} if binding == "none" else {str(billing): "billing-prod"}
+        sm = SessionManager(_cfg(mapping), provider_factory=_recording_factory([]))
+        cfg = _sharing_cfg()
+        try:
+            await _bound_parent(sm, billing)
+            if binding == "parent-only":
+                # The binding was removed after the parent started with it.
+                sm._cfg.aws.project_profiles = {}
+            runner = _sharing_runner(sm)
+            with (
+                patch.object(app, "_dir_parts", side_effect=AssertionError("a path was resolved")),
+                patch("kiro_crew.config.loader.KiroCrewConfig.load", classmethod(lambda c: cfg)),
+            ):
+                plan = runner._sharing_plan(_child_info(str(child)), cfg=cfg)
+        finally:
+            await sm.close_all()
+        assert plan.shared is shared

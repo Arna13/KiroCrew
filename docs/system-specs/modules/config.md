@@ -36,7 +36,7 @@ representative seams of each kind.
 | `config/fields.py` | `_meta` field metadata, the `_safe_*` value coercers every section shares, and `field_default`, the one reader of a DTO field's declared default (`SectionReader` reads through it). An integer coercer keeps a legacy numeric string or integral float already in a config file (`"5"` -> 5, `5.0` -> 5) and rejects booleans and non-integral, malformed or non-finite values in favour of the default. A leaf: it imports nothing from `kiro_crew`. |
 | `config/sections.py` | The DTOs other specs and tests anchor here: agent, crew record, workspace, session, dashboard (with `TailscaleConfig` and its parser), the messaging channels, `wakatime`, speech-to-text and its degradation rules, telemetry, decisions, resource limits, and the bounds constants. It is also the facade for the three section owners below. It also holds `SectionReader`, which resolves a builder's omitted key and coercer fallback to the DTO field's declared default. |
 | `config/memory_sections.py` | `memory`, `knowledge`, `skills`, `session_summary` and the named `memory_stores` records. |
-| `config/integration_sections.py` | `mcp`, `mcp_gateway` (with the MCP stub roster readers the gateway seed shares), `instances`, `tunnel`, `publish`, `computer_use` and the external app `registries`. |
+| `config/integration_sections.py` | `mcp`, `mcp_gateway` (with the MCP stub roster readers the gateway seed shares), `instances`, `tunnel`, `publish`, `computer_use`, `aws` and the external app `registries`. |
 | `config/service_sections.py` | `taskrunner`, `messaging`, `cron_history`, `monitoring`, `heartbeat` and `watchdog`. |
 | `config/section_builders.py` | The `_build_*` helper of 27 sections, grouped by the module that owns each section's DTO. Each reads its section through `sections.SectionReader`, so an omitted key builds the DTO field's default and a `read()` coercer falls back to it; the values a builder keeps of its own and the deliberate departures are listed under "Defaults come from the DTO fields". Four `_build_*` helpers stay in the loader (agent, session, telemetry, dashboard). Sections with no helper are built inline in the loader's `build_config` (`heartbeat`, the external app `registries`, `memory_stores`, the `agents` crew roster, `workspaces`) or by their DTO (`DecisionsConfig.from_raw`, `ResourceLimitsConfig.from_raw`, `ChannelConfig.from_dict` for `slack_channels`). |
 | `config/migration.py` | The write-back migration ids, the document transform `apply_document_migrations`, the one-shot `connections_ui` marker name, the legacy `skills.lazy_load` cohort test, superseded-default reporting, and the in-memory half of an adoption. |
@@ -2882,6 +2882,10 @@ class ComputerUseConfig:
     cursor_motion: bool = False         # macOS-only cosmetic overlay; draws a fake cursor and grants no capability
 
 @dataclass
+class AwsConfig:
+    project_profiles: dict[str, str] = {}   # absolute project dir -> AWS named profile; see "Project AWS profiles" below
+
+@dataclass
 class MessagingConfig:
     use_transport: bool = True     # route inbound Slack through SlackTransport → TurnDriver → SlackRenderer (the canonical path); false falls back to the native handle_message monolith
 
@@ -2941,6 +2945,7 @@ class KiroCrewConfig:
     knowledge: KnowledgeConfig
     stt: SttConfig
     computer_use: ComputerUseConfig
+    aws: AwsConfig
     hooks: dict                    # raw hooks from config.json
     dashboard: DashboardConfig     # dashboard.url, e.g. "http://my-host.example.com:8080"
     auto_update: bool = True
@@ -3137,6 +3142,76 @@ path is that the model must NAME the method (`auto` never resolves onto it) and 
 use is SEL-audited under its own `tool_kind`. Do not re-document the flag without
 re-implementing it. See [security.md](security.md), [governance.md](governance.md)
 and [computer-use.md](computer-use.md).
+
+### Project AWS profiles (`aws.project_profiles`)
+
+`aws.project_profiles` is an operator-owned map from an absolute project
+directory to an AWS named profile (`aws_project_profiles.py`). It guards against
+running a command on the wrong account. It is not isolation: the agent can still
+pass `--profile`.
+
+- **Validation.** Keys must be absolute paths, and values must match
+  `constants.AWS_PROFILE_NAME_RE`.
+  - At load, `coerce_project_profiles` drops a bad entry with a warning that names
+    the directory only. It normalizes keys with `os.path.normpath`, and the first
+    of two keys naming one directory wins.
+  - At save, `write_config_atomically` refuses a write that introduces a bad entry
+    (`_refuse_aws_project_profiles` raises `ConfigWriteRefused`), scoped like the
+    `deepseek_env` floor: a bad entry already on disk, in a mapping the write leaves
+    unchanged, publishes with a warning.
+  - The refusal never carries the profile value.
+- **Match.** `resolve_project_binding` runs `os.path.realpath` (plus `normcase`)
+  on the session cwd and on every key, then compares them component by component.
+  The deepest containing key wins. `/a/proj` never matches `/a/project2`, and a
+  symlink is judged by its target.
+- **Injection.** `SessionAllocation._get_or_create_impl` resolves the binding
+  against the final `effective_cwd`. This happens after capability preparation and
+  before the warm-pool decision. `bound_profile_env` sets both `AWS_PROFILE` and
+  `AWS_DEFAULT_PROFILE` in `extra_env` to the bound name, unless the caller's
+  `extra_env` already names either one. Setting both matters because botocore and
+  the AWS CLI v1 read `AWS_DEFAULT_PROFILE` first, so an inherited one would
+  otherwise outrank the binding.
+  - When nothing binds (an empty map, no cwd, or an unmapped directory), the
+    caller's `extra_env` object is handed through as-is, so the spawn environment
+    and pool decision are unchanged.
+  - A bound session takes `bypass_env` rather than a pooled process spawned
+    without the profile.
+  - `open_task_session` sends a step in a bound directory to `get_or_create`,
+    because the run's shared runtime has one environment.
+  - The profile the binding set is stamped on the registered `_Session` as
+    `aws_project_profile` (`None` when it set none). A subagent run resolves its
+    own `cwd`'s binding off the event loop (`SessionManager.project_aws_profile`
+    through `asyncio.to_thread`, since `realpath` over the keys can block on a
+    stalled mount) and hands it to `_sharing_plan`, which reads
+    `SessionManager.aws_profile_differs_from_parent(parent_key, child_profile)`
+    (no path) and takes the dedicated arm when the child binds another profile,
+    or none, than the binding set on the parent, so `get_or_create` sets the
+    child's own profile. A caller-chosen profile on the parent is not stamped, so
+    its unbound children keep sharing it. An empty map with an unstamped parent
+    (`aws_profile_split_possible` False) resolves no path and takes no thread
+    hop. The synchronous admission probe resolves no path either: while a split
+    is possible it prices the start dedicated.
+  - The applied profile is logged by name only.
+  - The name reaches the child only as the `AWS_PROFILE` / `AWS_DEFAULT_PROFILE` value. It is never put in
+    an argv or a shell string. `scrub_agent_subprocess_env` still strips
+    `AWS_SECRET*` / `AWS_SESSION*`.
+- **Sources.** Only `config.json` is read. No file inside the project checkout
+  and no credential material is consulted. A repository-supplied binding was
+  rejected because it would let a cloned repo choose credentials.
+- **Live.** `SessionManager` subscribes to `aws`, so an edit is adopted into
+  `_cfg` and reaches the next spawn. A running session keeps its environment.
+- **Dashboard.** `GET/PUT /api/aws/project-profile`
+  (`dashboard/handlers/aws_project_profile.py`) backs the read-only profile shown
+  in the composer's project pill and the AWS profile row of the project picker.
+  - Both verbs are owner-only, through the audited
+    `require_owner_dashboard_request` gate.
+  - The GET returns the binding (`profile`, `boundDir`), the picker's names
+    (AWS Control registry names plus mapped values, charset-checked) and a health
+    word. The health word is `ok`, `expired` (an SSO profile whose
+    `aws_consent.probe_identity` fails) or `unavailable`. No account id, ARN or CLI
+    text is returned.
+  - The PUT binds exactly the given directory, or unbinds it with `profile: ""`,
+    through `update_config_locked` under `run_config_write`.
 
 ### Decisions: no `enabled` field here either
 

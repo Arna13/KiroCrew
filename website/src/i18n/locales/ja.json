@@ -7702,6 +7702,23 @@
       "highlighting_unavailable_with_reason": "再読み込みするまで構文ハイライトを利用できません。内容は引き続き読めます。最後の失敗: {{classification}}（世代 {{generation}}、試行 {{attempt}}）: {{reason}}",
       "highlighting_unavailable_reload": "構文ハイライトを利用できません。下書きを保存またはコピーしてから、構文ハイライトを復元するために再読み込みしてください。編集は続けられます。"
     },
+    "projectAwsProfile": {
+      "bound_title": "このプロジェクトの AWS プロファイル: {{profile}}",
+      "inherited_from": "親フォルダー {{dir}} で設定",
+      "expired_title": "{{profile}} の SSO サインインの有効期限が切れています。ターミナルで aws sso login --profile {{profile}} を実行してください。",
+      "unavailable_title": "{{profile}} は現在 AWS にサインインできません。認証情報を確認してください。",
+      "default_chain": "プロファイルなし（ゲートウェイの AWS サインインを使用）",
+      "none_short": "プロファイルなし",
+      "other_profile": "別のプロファイル名",
+      "bind": "プロファイルを使用",
+      "invalid_name": "プロファイル名は英字、数字、アンダースコア、ドット、プラス記号、ハイフンで最大 128 文字、ハイフンで始めることはできません。",
+      "inherited_note": "親フォルダー {{dir}} で設定されています。ここでプロファイルを選ぶと、このフォルダーだけ上書きされます。解除するには、そのフォルダーでチャットを開き「プロファイルなし」を選んでください。",
+      "save_failed": "この AWS プロファイルを保存できませんでした。もう一度お試しください。",
+      "save_failed_typed": "この AWS プロファイルを保存できませんでした。名前を確認して、もう一度お試しください。",
+      "applies_next": "選んでも今は何も実行されません。このフォルダーの新しいチャットが使う AWS プロファイルを設定するだけです。",
+      "read_failed": "このプロジェクトの AWS プロファイルを読み取れませんでした",
+      "row_title": "{{name}} の AWS プロファイル"
+    },
     "projectPicker": {
       "add_favorite": "{{path}} をお気に入りに追加",
       "all_drives": "すべてのドライブ",

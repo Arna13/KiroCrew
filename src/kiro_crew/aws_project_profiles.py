@@ -2,9 +2,9 @@
 
 The operator maps absolute project directories to profile names in
 ``config.json``; a session whose working directory falls inside a mapped
-directory starts its agent with ``AWS_PROFILE`` set to that profile. This is a
-guard against running a command on the wrong account, not an isolation boundary:
-the agent can still name another profile itself.
+directory starts its agent with ``AWS_PROFILE`` and ``AWS_DEFAULT_PROFILE`` set
+to that profile. This is a guard against running a command on the wrong account,
+not an isolation boundary: the agent can still name another profile itself.
 
 The map lives in the operator's own configuration and nowhere else. Nothing here
 reads a file inside the project checkout, so a cloned repository cannot choose
@@ -24,6 +24,7 @@ import logging
 import os
 from collections.abc import Mapping
 from pathlib import PurePath
+from typing import NamedTuple
 
 from kiro_crew.constants import AWS_PROFILE_NAME_RE
 
@@ -35,9 +36,13 @@ PROJECT_PROFILES_KEY = "aws.project_profiles"
 #: The variable a bound project sets on its agent process.
 AWS_PROFILE_ENV = "AWS_PROFILE"
 
+#: The older selector. The AWS CLI v1 and botocore read it BEFORE ``AWS_PROFILE``,
+#: so a gateway started with it exported would otherwise outrank the binding.
+AWS_DEFAULT_PROFILE_ENV = "AWS_DEFAULT_PROFILE"
+
 #: Variables through which a caller has already chosen a profile. Either one in
 #: the caller's ``extra_env`` means the binding stays out of the way.
-CALLER_PROFILE_VARS = (AWS_PROFILE_ENV, "AWS_DEFAULT_PROFILE")
+CALLER_PROFILE_VARS = (AWS_PROFILE_ENV, AWS_DEFAULT_PROFILE_ENV)
 
 #: Longest directory key accepted, in characters.
 PROJECT_DIR_MAX_LEN = 4096
@@ -48,15 +53,23 @@ _PROFILE_RULE = (
 )
 
 
+def _shown(path: str) -> str:
+    """*path* quoted for a message: as typed, with only unprintable characters escaped.
+
+    Not ``repr``, which doubles every backslash and so misprints a Windows path.
+    """
+    return "'" + "".join(c if c.isprintable() else repr(c)[1:-1] for c in path) + "'"
+
+
 def _entry_refusal(key: object, value: object) -> str | None:
     """Why one ``directory -> profile`` entry is unusable, or ``None``."""
     if not isinstance(key, str) or not key or len(key) > PROJECT_DIR_MAX_LEN or "\x00" in key:
         return "the key must be an absolute directory path"
     if not os.path.isabs(key):
-        return f"{key!r}: the key must be an absolute directory path"
+        return f"{_shown(key)}: the key must be an absolute directory path"
     if not isinstance(value, str) or not AWS_PROFILE_NAME_RE.match(value):
         # The value is never echoed: a mistyped entry may hold anything.
-        return f"{key!r}: {_PROFILE_RULE}"
+        return f"{_shown(key)}: {_PROFILE_RULE}"
     return None
 
 
@@ -101,9 +114,9 @@ def coerce_project_profiles(raw: object) -> dict[str, str]:
         directory = os.path.normpath(key)
         if directory in out:
             logger.warning(
-                "%s: ignoring %r, it names the same directory as an earlier entry",
+                "%s: ignoring %s, it names the same directory as an earlier entry",
                 PROJECT_PROFILES_KEY,
-                key,
+                _shown(key),
             )
             continue
         out[directory] = value
@@ -115,8 +128,8 @@ def _dir_parts(path: str) -> tuple[str, ...]:
     return PurePath(os.path.normcase(os.path.realpath(path))).parts
 
 
-def resolve_project_profile(mapping: Mapping[str, str], cwd: str) -> str | None:
-    """The profile bound to *cwd*, or ``None`` when no mapped directory contains it.
+def resolve_project_binding(mapping: Mapping[str, str], cwd: str) -> tuple[str, str] | None:
+    """``(mapped directory, profile)`` that binds *cwd*, or ``None`` when none does.
 
     A mapped directory contains *cwd* when it is *cwd* itself or one of its
     ancestors, compared whole component by component after resolving symlinks
@@ -127,14 +140,20 @@ def resolve_project_profile(mapping: Mapping[str, str], cwd: str) -> str | None:
     if not mapping or not cwd:
         return None
     target = _dir_parts(cwd)
-    best: str | None = None
+    best: tuple[str, str] | None = None
     best_depth = -1
     for directory, profile in mapping.items():
         parts = _dir_parts(directory)
         depth = len(parts)
         if depth > best_depth and target[:depth] == parts:
-            best, best_depth = profile, depth
+            best, best_depth = (directory, profile), depth
     return best
+
+
+def resolve_project_profile(mapping: Mapping[str, str], cwd: str) -> str | None:
+    """The profile bound to *cwd* (:func:`resolve_project_binding`), or ``None``."""
+    binding = resolve_project_binding(mapping, cwd)
+    return binding[1] if binding else None
 
 
 def bound_profile_env(
@@ -142,12 +161,16 @@ def bound_profile_env(
     cwd: str | None,
     extra_env: dict[str, str] | None,
 ) -> dict[str, str] | None:
-    """*extra_env* with ``AWS_PROFILE`` set for a bound *cwd*, else *extra_env* itself.
+    """*extra_env* with the bound profile set, else *extra_env* itself.
+
+    A bound *cwd* sets both selectors (:data:`CALLER_PROFILE_VARS`) to the bound
+    name, so neither an ``AWS_PROFILE`` nor an ``AWS_DEFAULT_PROFILE`` the
+    gateway inherited can outrank the binding, whichever one the tool reads first.
 
     The same object comes back, untouched, whenever nothing is bound: an empty
     map, no *cwd*, a directory no entry contains, or a caller whose *extra_env*
-    already names a profile (:data:`CALLER_PROFILE_VARS`). Otherwise a new
-    mapping is returned and the caller's dict is not mutated.
+    already names a profile. Otherwise a new mapping is returned and the caller's
+    dict is not mutated.
     """
     if not mapping or not cwd:
         return extra_env
@@ -156,7 +179,18 @@ def bound_profile_env(
     profile = resolve_project_profile(mapping, cwd)
     if profile is None:
         return extra_env
-    return {**(extra_env or {}), AWS_PROFILE_ENV: profile}
+    return {**(extra_env or {}), **{name: profile for name in CALLER_PROFILE_VARS}}
+
+
+class ResolvedAwsProfile(NamedTuple):
+    """A directory's binding, already resolved: ``name`` is ``None`` when unbound.
+
+    Resolving reads the filesystem, so an async caller does it off the event loop
+    and hands this value to code that must not; ``None`` in its place means not
+    resolved yet, which a reader must treat as "may be bound to anything".
+    """
+
+    name: str | None
 
 
 def configured_project_profiles(cfg: object) -> Mapping[str, str]:

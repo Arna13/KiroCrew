@@ -7818,6 +7818,23 @@
       "highlighting_unavailable_with_reason": "Die Syntaxhervorhebung ist bis zum Neuladen nicht verfügbar. Der Inhalt bleibt lesbar. Letzter Fehler: {{classification}} (Generation {{generation}}, Versuch {{attempt}}): {{reason}}",
       "highlighting_unavailable_reload": "Die Syntaxhervorhebung ist nicht verfügbar. Speichern oder kopieren Sie Ihren Entwurf und laden Sie dann neu, um sie wiederherzustellen; Bearbeiten bleibt möglich."
     },
+    "projectAwsProfile": {
+      "bound_title": "AWS-Profil dieses Projekts: {{profile}}",
+      "inherited_from": "Im übergeordneten Ordner {{dir}} festgelegt",
+      "expired_title": "Die SSO-Anmeldung für {{profile}} ist abgelaufen. Führe aws sso login --profile {{profile}} in einem Terminal aus.",
+      "unavailable_title": "{{profile}} kann sich gerade nicht bei AWS anmelden. Prüfe seine Anmeldedaten.",
+      "default_chain": "Kein Profil (AWS-Anmeldung des Gateways verwenden)",
+      "none_short": "Kein Profil",
+      "other_profile": "Anderer Profilname",
+      "bind": "Profil verwenden",
+      "invalid_name": "Ein Profilname besteht aus bis zu 128 Buchstaben, Ziffern, Unterstrichen, Punkten, Pluszeichen oder Bindestrichen und beginnt nicht mit einem Bindestrich.",
+      "inherited_note": "Im übergeordneten Ordner {{dir}} festgelegt. Ein hier gewähltes Profil ersetzt es nur für diesen Ordner. Zum Entfernen öffne einen Chat in diesem Ordner und wähle Kein Profil.",
+      "save_failed": "Dieses AWS-Profil konnte nicht gespeichert werden. Versuche es erneut.",
+      "save_failed_typed": "Dieses AWS-Profil konnte nicht gespeichert werden. Prüfe den Namen und versuche es erneut.",
+      "applies_next": "Die Auswahl führt jetzt nichts aus. Sie legt nur fest, welches AWS-Profil neue Chats in diesem Ordner verwenden.",
+      "read_failed": "Das AWS-Profil dieses Projekts konnte nicht gelesen werden",
+      "row_title": "AWS-Profil für {{name}}"
+    },
     "projectPicker": {
       "add_favorite": "{{path}} zu den Favoriten hinzufügen",
       "all_drives": "Alle Laufwerke",

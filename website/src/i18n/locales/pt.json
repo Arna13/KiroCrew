@@ -7934,6 +7934,23 @@
       "highlighting_unavailable_with_reason": "O realce de sintaxe ficará indisponível até você recarregar. O conteúdo continua legível. Última falha: {{classification}} (geração {{generation}}, tentativa {{attempt}}): {{reason}}",
       "highlighting_unavailable_reload": "O realce de sintaxe está indisponível. Salve ou copie seu rascunho e recarregue para restaurá-lo; você pode continuar editando."
     },
+    "projectAwsProfile": {
+      "bound_title": "Perfil da AWS deste projeto: {{profile}}",
+      "inherited_from": "Definido na pasta pai {{dir}}",
+      "expired_title": "O login SSO de {{profile}} expirou. Execute aws sso login --profile {{profile}} em um terminal.",
+      "unavailable_title": "{{profile}} não consegue entrar na AWS agora. Verifique as credenciais dele.",
+      "default_chain": "Sem perfil (usar o login da AWS do gateway)",
+      "none_short": "Sem perfil",
+      "other_profile": "Outro nome de perfil",
+      "bind": "Usar perfil",
+      "invalid_name": "Um nome de perfil tem até 128 letras, dígitos, sublinhados, pontos, sinais de mais ou hifens, e não começa com hífen.",
+      "inherited_note": "Definido na pasta pai {{dir}}. Escolher um perfil aqui o substitui só para esta pasta. Para remover, abra um chat nessa pasta e escolha Sem perfil.",
+      "save_failed": "Não foi possível salvar este perfil da AWS. Tente novamente.",
+      "save_failed_typed": "Não foi possível salvar este perfil da AWS. Verifique o nome e tente novamente.",
+      "applies_next": "Escolher um não executa nada agora. Só define qual perfil da AWS os novos chats desta pasta usam.",
+      "read_failed": "Não foi possível ler o perfil da AWS deste projeto",
+      "row_title": "Perfil da AWS de {{name}}"
+    },
     "projectPicker": {
       "add_favorite": "Favoritar {{path}}",
       "all_drives": "Todas as unidades",

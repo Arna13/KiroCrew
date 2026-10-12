@@ -9,6 +9,7 @@ import time as _time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, cast
 
+from ..aws_project_profiles import ResolvedAwsProfile
 from ..constants import DENY_CAUSE_SURFACE_POLICY
 from ..hooks import permission_pre_tool_block
 from ..metrics import events as metric_events
@@ -2299,7 +2300,9 @@ class RunEventCoordinator(ManagerComponent):
         # sharing plan, which reads the routed model as a pin: a routed model
         # cannot be applied to the parent's already-started runtime.
         await _route_unpinned_start(info, kind, self._manager._sessions)
-        plan = self._manager._sharing_plan(info)
+        plan = self._manager._sharing_plan(
+            info, child_aws_profile=await self._resolve_child_aws_profile(info)
+        )
         eff_model = plan.eff_model
         # Record the EFFECTIVE pin (per-spawn OR the role_models['subagent']
         # config pin, via ``_subagent_default_model()``) as the requested side of
@@ -4215,7 +4218,13 @@ class RunEventCoordinator(ManagerComponent):
             return False
         return self._manager._sessions.is_session_sharing_eligible(info.parent_session_key)
 
-    def _sharing_plan_impl(self, info: SubagentInfo, *, cfg: Any = None) -> _SharingPlan:
+    def _sharing_plan_impl(
+        self,
+        info: SubagentInfo,
+        *,
+        cfg: Any = None,
+        child_aws_profile: ResolvedAwsProfile | None = None,
+    ) -> _SharingPlan:
         """Decide how *info* will start: the ONE decision behind both callers.
 
         ``_run_inner`` takes the shared-runtime arm exactly when ``shared`` is
@@ -4228,6 +4237,17 @@ class RunEventCoordinator(ManagerComponent):
         where the override reaches the provider factory. Eligibility is the
         backend's opt-in membership (``is_session_sharing_eligible``); nothing
         here names a harness. *cfg* is a config the caller already loaded.
+
+        A run whose ``cwd`` binds another AWS profile (``aws.project_profiles``)
+        than the binding set on the parent also takes the dedicated arm, where
+        the spawn sets the run's own profile: the shared arm would run it with
+        the parent's. Resolving that binding reads the filesystem, so it is never
+        done here: the run resolves it off the event loop and passes it as
+        *child_aws_profile*. Without it -- the admission probe -- a split that is
+        possible at all (a binding in the map, or one on the parent) is read as
+        dedicated, the price the run may need. Only a real ``True`` from the
+        session manager's answers rules sharing out, so a double that cannot
+        answer them keeps the decision above.
         """
         kind = _selection_kind(info)
         eff_model = info.model or _subagent_default_model(cfg) or info.routed_model
@@ -4241,7 +4261,37 @@ class RunEventCoordinator(ManagerComponent):
             and not (eff_model or eff_effort)
             and self._manager._should_use_session_sharing(info)
         )
+        if shared and self._aws_profile_split_possible(info):
+            if child_aws_profile is None:
+                shared = False
+            else:
+                differs = getattr(self._manager._sessions, "aws_profile_differs_from_parent", None)
+                if (
+                    differs is not None
+                    and differs(info.parent_session_key, child_aws_profile.name) is True
+                ):
+                    shared = False
         return _SharingPlan(eff_model, eff_effort, shared)
+
+    def _aws_profile_split_possible(self, info: SubagentInfo) -> bool:
+        """Whether *info* could bind another AWS profile than its parent; reads no path."""
+        possible = getattr(self._manager._sessions, "aws_profile_split_possible", None)
+        return possible is not None and possible(info.parent_session_key) is True
+
+    async def _resolve_child_aws_profile(self, info: SubagentInfo) -> ResolvedAwsProfile | None:
+        """*info*'s own ``aws.project_profiles`` binding, resolved off the event loop.
+
+        ``realpath`` over every mapped directory: one on a mount that stops
+        answering stalls this run's thread, not the gateway's loop. ``None`` when
+        no split is possible, so a run with no binding anywhere takes no thread hop.
+        """
+        if not self._aws_profile_split_possible(info):
+            return None
+        resolve = getattr(self._manager._sessions, "project_aws_profile", None)
+        if resolve is None:
+            return None
+        name = await asyncio.to_thread(resolve, info.cwd)
+        return ResolvedAwsProfile(name if isinstance(name, str) else None)
 
     async def _ensure_dedicated_start_priced_impl(self, info: SubagentInfo) -> None:
         """Reserve a dedicated process for a start admitted at the shared price.

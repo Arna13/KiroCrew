@@ -7934,6 +7934,23 @@
       "highlighting_unavailable_with_reason": "L'evidenziazione della sintassi non sarà disponibile fino al ricaricamento. Il contenuto resta leggibile. Ultimo errore: {{classification}} (generazione {{generation}}, tentativo {{attempt}}): {{reason}}",
       "highlighting_unavailable_reload": "L'evidenziazione della sintassi non è disponibile. Salva o copia la bozza, quindi ricarica per ripristinarla; puoi continuare a modificare."
     },
+    "projectAwsProfile": {
+      "bound_title": "Profilo AWS di questo progetto: {{profile}}",
+      "inherited_from": "Impostato sulla cartella superiore {{dir}}",
+      "expired_title": "L'accesso SSO di {{profile}} è scaduto. Esegui aws sso login --profile {{profile}} in un terminale.",
+      "unavailable_title": "{{profile}} al momento non riesce ad accedere ad AWS. Controlla le sue credenziali.",
+      "default_chain": "Nessun profilo (usa l'accesso AWS del gateway)",
+      "none_short": "Nessun profilo",
+      "other_profile": "Altro nome di profilo",
+      "bind": "Usa profilo",
+      "invalid_name": "Un nome di profilo ha fino a 128 lettere, cifre, trattini bassi, punti, segni più o trattini, e non inizia con un trattino.",
+      "inherited_note": "Impostato sulla cartella superiore {{dir}}. Scegliere un profilo qui lo sostituisce solo per questa cartella. Per rimuoverlo, apri una chat in quella cartella e scegli Nessun profilo.",
+      "save_failed": "Impossibile salvare questo profilo AWS. Riprova.",
+      "save_failed_typed": "Impossibile salvare questo profilo AWS. Controlla il nome e riprova.",
+      "applies_next": "Sceglierne uno non esegue nulla ora. Imposta solo il profilo AWS usato dalle nuove chat in questa cartella.",
+      "read_failed": "Impossibile leggere il profilo AWS di questo progetto",
+      "row_title": "Profilo AWS di {{name}}"
+    },
     "projectPicker": {
       "add_favorite": "Aggiungi {{path}} ai preferiti",
       "all_drives": "Tutte le unità",
