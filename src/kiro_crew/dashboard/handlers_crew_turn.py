@@ -237,12 +237,18 @@ _AUDIT_OP = "crew_turn"
 #: forwarded, so a crew that has been made to serve active content cannot have it
 #: land on the authenticated hub origin. The same pair the peer proxy allows,
 #: split per path here because this route knows which of the two it asked for.
+#:
+#: The gate covers the replies this route FORWARDS. A crew's 4xx/5xx is not
+#: forwarded at all -- both paths answer their own ``crew_refused`` carrying a
+#: bounded, redacted slice of it -- so the type of a refusal body is not checked
+#: and not sent on.
 _TURN_JSON_CONTENT_TYPE = "application/json"
 _TURN_SSE_CONTENT_TYPE = "text/event-stream"
 
-#: Longest slice of a crew's refusal body the stream's error frame carries. The
-#: body is redacted WHOLE before it is cut -- see the streamed path -- so this
-#: bounds the frame rather than the redactor's input.
+#: Longest slice of a crew's refusal body either path carries: the streamed
+#: path's error frame and the non-streamed path's ``crew_refused`` body. The
+#: body is redacted WHOLE before it is cut -- see ``_refusal_detail`` -- so this
+#: bounds what is reported rather than the redactor's input.
 _REFUSAL_DETAIL_CHARS = 400
 
 
@@ -293,7 +299,7 @@ async def _redacted_body(raw: bytes) -> str:
 
 
 async def _refusal_detail(resp: Any, instance_id: str) -> str:
-    """A bounded, redacted slice of the crew's refusal body for the error frame.
+    """A bounded, redacted slice of the crew's refusal body for the refusal.
 
     Capped, redacted, THEN cut, in that order, and every other order is a leak.
     Reading first without a cap hands the far end this process's memory; cutting
@@ -303,8 +309,12 @@ async def _refusal_detail(resp: Any, instance_id: str) -> str:
     ``\\uXXXX`` escape.
 
     A body past the cap, or one the redactor refuses, becomes a sentence saying
-    so rather than an empty detail, because the frame is all the pane gets and
-    "no detail" and "detail withheld" are different things to a reader.
+    so rather than an empty detail, because this detail is all the pane gets of
+    the refusal and "no detail" and "detail withheld" are different things to a
+    reader.
+
+    Used by both paths: the streamed path's ``crew_refused`` frame and the
+    non-streamed path's ``crew_refused`` body.
     """
     raw = await _read_capped(resp)
     if raw is None:
@@ -546,6 +556,33 @@ async def api_crew_turn(request: web.Request) -> web.StreamResponse:
         try:
             async with aiohttp.ClientSession(timeout=_TURN_TIMEOUT) as session:
                 async with session.post(target, json=payload, headers=headers) as resp:
+                    if resp.status >= 400:
+                        # The crew refused, so the refusal is reported as one
+                        # rather than being read as an answer. Reported before
+                        # the content-type gate, which applies to a reply this
+                        # route would otherwise FORWARD: a refusal body is the
+                        # crew's own choice of type, is never forwarded, and
+                        # reaches the pane only as the bounded ``detail`` below.
+                        # The crew's status is passed through, and the body is
+                        # capped, redacted, then cut, in that order -- the same
+                        # slice and the same order as the streamed path's
+                        # ``crew_refused`` frame.
+                        detail = await _refusal_detail(resp, instance_id)
+                        _audit(
+                            _AUDIT_OP,
+                            "declined",
+                            request_id=instance_id,
+                            error=f"crew refused with {resp.status}",
+                        )
+                        return web.json_response(
+                            {
+                                "code": "crew_refused",
+                                "status": resp.status,
+                                "detail": detail,
+                            },
+                            status=resp.status,
+                            headers={"X-Content-Type-Options": "nosniff"},
+                        )
                     # What TYPE the crew answered with, before a byte of it is
                     # buffered. A reply this gateway would not forward is not
                     # worth reading, and refusing on the header costs nothing.

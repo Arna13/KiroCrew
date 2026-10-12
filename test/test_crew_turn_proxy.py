@@ -921,14 +921,23 @@ class TestTheTurnHandlerForwardsToTheCrew:
 
     @pytest.mark.asyncio
     async def test_a_non_streamed_turn_passes_the_crews_own_status_through(self, monkeypatch):
-        """A crew that answers 4xx/5xx is relayed with its own status, not masked."""
+        """A crew that answers 4xx/5xx keeps its own status, not a masked one.
+
+        The crew's words reach the caller as the refusal's bounded ``detail``
+        rather than as the body, which is what ``crew_refused`` is.
+        """
+        import json as _json
+
         _wire_handler(monkeypatch, status=_connected())
         calls = []
         _install_session(monkeypatch, calls, resp=_FakeResp(status=503, text="busy"))
         body = {"message": "hi", "thread": "t", "stream": False}
         resp = await mod.api_crew_turn(_turn_request(body))
         assert resp.status == 503
-        assert resp.body == b"busy"
+        payload = _json.loads(resp.body)
+        assert payload["code"] == "crew_refused"
+        assert payload["status"] == 503
+        assert payload["detail"] == "busy"
 
     @pytest.mark.asyncio
     async def test_a_non_streamed_turn_to_an_unreachable_crew_is_a_gateway_error(self, monkeypatch):
@@ -1833,6 +1842,107 @@ class TestTheCrewsRefusalIsRedactedBeforeItIsCut:
         assert error["detail"] == "no such crew"
 
 
+class TestANonStreamedCrewErrorIsARefusalNotAContentTypeComplaint:
+    """A crew's 4xx/5xx on the non-streamed path is reported as what it is.
+
+    The content-type gate is for a reply this route would FORWARD. A refusal body
+    is never forwarded, so gating it by type reported the crew's error as
+    ``crew_content_type_refused`` -- which names the gateway's own check and
+    hides the status and the words the crew actually sent. Both types of refusal
+    body now become ``crew_refused``, carrying the crew's status and the same
+    capped, redacted slice the streamed frame carries.
+    """
+
+    _KEY = "AKIAIOSFODNN7EXAMPLE"
+
+    @staticmethod
+    def _payload(resp):
+        import json as _json
+
+        return _json.loads(resp.body)
+
+    async def _turn(self, monkeypatch, resp):
+        _wire_handler(monkeypatch, status=_connected())
+        _install_session(monkeypatch, [], resp=resp)
+        return await mod.api_crew_turn(
+            _turn_request({"message": "hi", "thread": "t", "stream": False})
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_json_error_is_the_crews_refusal(self, monkeypatch):
+        resp = await self._turn(
+            monkeypatch,
+            _FakeResp(status=400, text='{"detail": "no such slot"}'),
+        )
+        payload = self._payload(resp)
+        assert resp.status == 400
+        assert payload["code"] == "crew_refused"
+        assert payload["status"] == 400
+        assert "no such slot" in payload["detail"]
+
+    @pytest.mark.asyncio
+    async def test_a_text_plain_error_is_the_crews_refusal_too(self, monkeypatch):
+        """The type of a refusal body no longer decides which refusal is reported."""
+        resp = await self._turn(
+            monkeypatch,
+            _FakeResp(status=429, text="slow down", content_type="text/plain"),
+        )
+        payload = self._payload(resp)
+        assert payload["code"] == "crew_refused"
+        assert payload["code"] != "crew_content_type_refused"
+        assert payload["status"] == 429
+        assert payload["detail"] == "slow down"
+
+    @pytest.mark.asyncio
+    async def test_a_text_plain_200_is_still_refused_for_its_type(self, monkeypatch):
+        """Non-vacuity: the gate still holds for a reply this route would forward."""
+        resp = await self._turn(
+            monkeypatch,
+            _FakeResp(status=200, text="not json at all", content_type="text/plain"),
+        )
+        assert resp.status == 502
+        assert _code(resp) == "crew_content_type_refused"
+        assert b"not json at all" not in resp.body
+
+    @pytest.mark.asyncio
+    async def test_the_detail_is_redacted_before_it_is_cut(self, monkeypatch):
+        """Same order as the streamed frame: capped, redacted whole, then cut.
+
+        Cut first and a credential straddling the cut is two fragments the
+        redactor does not recognise, and the leading one is forwarded.
+        """
+        body = "refused: " + "x" * 381 + self._KEY + " trailing"
+        assert (
+            body.index(self._KEY)
+            < mod._REFUSAL_DETAIL_CHARS
+            < body.index(self._KEY) + len(self._KEY)
+        ), "the fixture no longer straddles the cut"
+        resp = await self._turn(monkeypatch, _FakeResp(status=403, text=body))
+        payload = self._payload(resp)
+        assert payload["code"] == "crew_refused"
+        detail = payload["detail"]
+        assert self._KEY not in detail
+        assert self._KEY[:10] not in detail, "the cut split the key and forwarded its head"
+        assert len(detail) <= mod._REFUSAL_DETAIL_CHARS
+
+    @pytest.mark.asyncio
+    async def test_an_oversized_error_body_is_not_buffered_whole(self, monkeypatch):
+        """And the detail says it was withheld rather than carrying nothing."""
+        _wire_handler(monkeypatch, status=_connected())
+        monkeypatch.setattr(mod, "PROXY_REDACT_BUFFER_MAX_BYTES", 32)
+        _install_session(
+            monkeypatch,
+            [],
+            resp=_FakeResp(status=500, chunks=[b"z" * 20, b"w" * 20], content_type="text/plain"),
+        )
+        resp = await mod.api_crew_turn(
+            _turn_request({"message": "hi", "thread": "t", "stream": False})
+        )
+        detail = self._payload(resp)["detail"]
+        assert "wwww" not in detail
+        assert "too large" in detail
+
+
 class TestEveryTurnIsAudited:
     """A turn sends this crew's control secret down a tunnel, so the SEL trail has
     to hold the turns that WORKED and not only the ones that were refused.
@@ -1870,6 +1980,21 @@ class TestEveryTurnIsAudited:
         )
         assert resp.status == 200
         assert ("crew_turn", "success", "i1", "") in events
+
+    @pytest.mark.asyncio
+    async def test_a_non_streamed_crew_error_is_not_audited_as_a_success(self, monkeypatch):
+        """The crew answered, so the turn did not fail -- but it did not succeed
+        either, and a trail that calls a 500 a success cannot be read for which
+        turns the crew actually took. Audited as ``declined``, the same outcome
+        the streamed path records for the same refusal."""
+        _wire_handler(monkeypatch, status=_connected())
+        events = self._record(monkeypatch)
+        _install_session(monkeypatch, [], resp=_FakeResp(status=500, text='{"detail": "boom"}'))
+        await mod.api_crew_turn(_turn_request({"message": "hi", "thread": "t", "stream": False}))
+
+        outcomes = [outcome for _, outcome, _, _ in events]
+        assert "success" not in outcomes
+        assert ("crew_turn", "declined", "i1", "crew refused with 500") in events
 
     @pytest.mark.asyncio
     async def test_a_successful_streamed_turn_is_audited(self, monkeypatch):
