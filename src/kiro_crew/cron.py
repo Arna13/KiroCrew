@@ -2294,6 +2294,12 @@ class CronService:
         # instead of resurrecting state the operator withdrew.
         expect_active = kwargs.pop("expect_secret_env", None)
         expect_active_pin = kwargs.pop("expect_secret_env_pin", None)
+        # The app bridge's manifest stamp: its re-sync computes WHICH fields to
+        # send from the stamp it read off a loop-side snapshot, several awaited
+        # steps before this lock. A stamp that moved meanwhile means another
+        # registrar already applied a manifest to this job, and fields computed
+        # against the old one would overwrite whatever has been written since.
+        expect_stamp = kwargs.pop("expect_app_manifest_digest", None)
         # Optional OUT-parameter, owned by the caller: a dict this pass fills with
         # ``{"chat_folder_was": <prior folder, possibly "">}`` when the update
         # actually changes ``chat_folder_id``.
@@ -2324,8 +2330,24 @@ class CronService:
                     raise CronPendingMismatch("active grant changed concurrently")
                 if expect_active_pin is not None and job.secret_env_pin != expect_active_pin:
                     raise CronPendingMismatch("active grant pin changed concurrently")
+                if expect_stamp is not None and job.app_manifest_digest != expect_stamp:
+                    raise CronPendingMismatch("manifest stamp changed concurrently")
+                # The cached record is published to every reader the moment it
+                # is mutated (``list_jobs`` hands out these very objects), so a
+                # save that fails must put it back: otherwise the cache says the
+                # update landed while crons.json still holds the old values, and
+                # a caller that compares the two -- the app bridge's manifest
+                # stamp -- stops retrying a write that never happened. Restored
+                # onto the SAME object (identity is what readers hold), and the
+                # reload-on-change in ``_sync_for_write`` cannot do this, since a
+                # failed save changes nothing on disk.
+                before = copy.copy(job)
                 apply_job_update(job, kwargs, chat_folder_out)
-                self._save()
+                try:
+                    self._save()
+                except BaseException:
+                    job.__dict__.update(before.__dict__)
+                    raise
                 logger.info("Updated cron job %s", job_id)
                 return job
         return None
