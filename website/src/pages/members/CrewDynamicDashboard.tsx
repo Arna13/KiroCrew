@@ -12,6 +12,7 @@ import { i18nT } from '../../i18n/t'
 import { apiErrorCode } from '../../api/apiError'
 import { useLanguage } from '../../i18n/LanguageProvider'
 import { MEMBER_DASHBOARD_QUERY_PREFIX, SESSION_DASHBOARD_QUERY_PREFIX } from '../../hooks/useWebSocket'
+import { DASHBOARD_FALLBACK_REFETCH_MS } from './dashboardRefetch'
 
 /**
  * The sandbox grants for a crewmate's dynamic dashboard, and the ONE line of
@@ -81,20 +82,7 @@ export function actText(data: unknown): string | null {
  */
 const READY_TIMEOUT_MS = 6000
 
-/**
- * How long an open Dashboard tab may go without re-reading, when no WebSocket
- * frame has told it to.
- *
- * The tab's liveness is the two frames `handleDashboardMoved` listens for -- a
- * crewmate's own write, and a fold advancing. This number is only the floor under
- * them, for a frame that never arrived because the socket dropped or the tab was
- * closed when it was sent.
- *
- * Exported so a test can assert it is FINITE: a missing or infinite interval looks
- * identical to a working one in every case where a frame does arrive, which is
- * every case anybody writes.
- */
-export const DASHBOARD_FALLBACK_REFETCH_MS = 60_000
+export { DASHBOARD_FALLBACK_REFETCH_MS }
 
 interface Loaded {
   html: string

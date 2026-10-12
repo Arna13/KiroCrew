@@ -139,10 +139,13 @@ def _state(item: WorkBoardItem) -> str:
 
 
 def _step(item: WorkBoardItem) -> str:
+    """The pipeline segment the item has reached; empty when no worker has started it."""
     if item.get("state") == "accepted":
         return "Done"
     if isinstance(item.get("pr"), int):
         return "CI" if item.get("status") == "done" else "PR"
+    if _state(item) == "waiting":
+        return ""
     return "Code"
 
 

@@ -109,6 +109,7 @@
     transition:width .9s cubic-bezier(.2,.8,.2,1)}
   .next{margin:0; font-size:13px; overflow-wrap:anywhere}
   .next .k{color:var(--c-mute)}
+  .next.stale{color:var(--c-mute)}
 
   /* ---------- task cards ---------- */
   .grid{list-style:none; margin:0; padding:0; display:grid; gap:10px;
@@ -257,10 +258,10 @@
 
   var nx = str(d.next);
   if (nx){
-    var np = el("p", "next");
-    /* an agent-written line older than the ledger says when it was written */
+    /* an agent-written line older than the ledger is shown muted, as the last plan */
     var from = str(d.next_from);
-    np.appendChild(el("span", "k", from ? "Next (from " + from + "): " : "Next: "));
+    var np = el("p", from ? "next stale" : "next");
+    np.appendChild(el("span", "k", from ? "Last plan (" + from + "): " : "Next: "));
     np.appendChild(document.createTextNode(nx));
     page.appendChild(np);
   }

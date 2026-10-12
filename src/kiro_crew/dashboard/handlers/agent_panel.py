@@ -782,8 +782,10 @@ def _panel_record(
     """
     record = _published_record(slot, slug, owner_key)
     if record is None:
+        # Named positively: every crew carries a work ledger, so only the crew whose
+        # default template IS the conductor board gets one drawn from it.
         if member and (
-            agent_panel.template_for_crew(member) != pipeline_board_contract.BOARD_TEMPLATE_ID
+            agent_panel.template_for_crew(member) == conductor_board_contract.BOARD_TEMPLATE_ID
         ):
             return _with_conductor_board(slot, None, member=member)
         return record

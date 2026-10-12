@@ -13,16 +13,7 @@ import { buildSrcdoc, readThemeVars } from "../../lib/widgetSrcdoc";
 import { i18nT } from "../../i18n/t";
 import { fmtDateTime, fmtRelative, toDate } from "../../i18n/format";
 import CrewDashboardEmpty from "./CrewDashboardEmpty";
-
-/**
- * How long an open panel may go without re-reading when no frame told it to.
- *
- * A conductor's board is derived from its work ledger on every read, and a
- * ledger entry sends no frame that names this query, so the read itself has to
- * come round. The same floor the Dynamic Dashboard
- * tab keeps; paused while the window is in the background.
- */
-export const PANEL_FALLBACK_REFETCH_MS = 60_000;
+import { panelFallbackRefetch } from "./dashboardRefetch";
 
 /**
  * The sandbox grants for a crew's webview, and the ONE line of this file that is
@@ -417,7 +408,7 @@ function CrewWebviewView({ slug, member, onSetUp, onLiveFrameChange }: CrewWebvi
     // server refuses to hand this crew a record another crew owns.
     queryFn: () => api.memberPanel(slug, member),
     enabled: Boolean(slug) && Boolean(member),
-    refetchInterval: PANEL_FALLBACK_REFETCH_MS,
+    refetchInterval: (query) => panelFallbackRefetch(slug, query.state.data?.panel?.template),
     refetchIntervalInBackground: false,
   });
 
@@ -1078,7 +1069,7 @@ function CrewDashboardFrameView({ slug, member, displayName, avatar, onAct, onOp
     queryKey: ["member-panel", slug, member],
     queryFn: () => api.memberPanel(slug, member),
     enabled: Boolean(slug) && Boolean(member),
-    refetchInterval: PANEL_FALLBACK_REFETCH_MS,
+    refetchInterval: (query) => panelFallbackRefetch(slug, query.state.data?.panel?.template),
     refetchIntervalInBackground: false,
   });
   // Whether this crewmate ADOPTED a dynamic dashboard, which this tab does not draw

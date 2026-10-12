@@ -135,6 +135,26 @@ def test_needs_you_is_derived_from_a_question_or_a_block() -> None:
     assert states["U: quiet"] != "needs you"
 
 
+def test_a_waiting_item_has_reached_no_step() -> None:
+    """Only an item a worker has started sits on Code; a queued one lights nothing."""
+    view: Any = {
+        "conductor": {"last_entry_at": "", "entries": 3},
+        "items": [
+            {"item_id": "it_q", "title": "queued", "state": "open"},
+            {"item_id": "it_w", "title": "started", "state": "open", "status": "progress"},
+            {"item_id": "it_p", "title": "with pr", "state": "open", "status": "progress", "pr": 7},
+        ],
+        "omitted": 0,
+    }
+
+    tasks = {t["task"]: t for t in build_conductor_board(view, None, "")["tasks"]}
+
+    assert tasks["queued"]["state"] == "waiting"
+    assert tasks["queued"]["step"] == ""
+    assert tasks["started"]["step"] == "Code"
+    assert tasks["with pr"]["step"] == "PR"
+
+
 def test_a_stale_extra_is_labelled_with_its_own_time() -> None:
     view: Any = {
         "conductor": {"last_entry_at": "2026-10-10T18:00:00+00:00", "entries": 3},
@@ -207,3 +227,14 @@ def test_a_published_board_on_a_shared_slot_never_takes_the_ledgers_tasks() -> N
 
     assert served is not None
     assert served["data"] == record["data"]
+
+
+def test_a_crew_that_is_not_the_conductor_gets_no_board_from_its_ledger() -> None:
+    _unit()
+    _work(action="goal", goal="g", round=0)
+    _create("it_00000001", "T")
+
+    assert agent_panel.template_for_crew("security-worker") != BOARD_TEMPLATE_ID
+    assert _read(member="security-worker") is None
+    # The conductor reading the same ledger still gets its board.
+    assert _read() is not None
