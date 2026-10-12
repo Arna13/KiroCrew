@@ -2868,6 +2868,8 @@ class SttConfig:
     transcribe_region: str = "us-east-1"   # transcribe provider only
     transcribe_profile: str = ""           # transcribe provider only; empty = default credential chain
     transcribe_vocabulary: str = ""        # transcribe provider only; custom vocabulary name, empty = none; an unusable stored name degrades to none
+    custom_model_path: str = ""            # ggml file in models/whisper to run when model == "custom"
+    custom_model_sha256: str = ""          # its 64-hex sha256; without both, "custom" degrades to the default
 
 @dataclass
 class ComputerUseConfig:

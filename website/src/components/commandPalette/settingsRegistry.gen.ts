@@ -2529,6 +2529,16 @@ export const SETTINGS_REGISTRY: SettingEntry[] =
     "occurrence": 1
   },
   {
+    "id": "voice.custom-model-file",
+    "label": "Custom model file",
+    "labelKey": "pages.settings.sttSettings.custom_model_path",
+    "description": "A wrong name is refused and nothing else changes. Only whisper.cpp .bin model files work.",
+    "tab": "voice",
+    "type": "input",
+    "occurrence": 1,
+    "configKey": "stt.custom_model_path"
+  },
+  {
     "id": "voice.custom-vocabulary",
     "label": "Custom vocabulary",
     "labelKey": "pages.settings.sttSettings.transcribe_vocabulary",
@@ -2564,6 +2574,16 @@ export const SETTINGS_REGISTRY: SettingEntry[] =
     "tab": "voice",
     "type": "select",
     "occurrence": 1
+  },
+  {
+    "id": "voice.file-fingerprint-sha-256",
+    "label": "File fingerprint (SHA-256)",
+    "labelKey": "pages.settings.sttSettings.custom_model_sha256",
+    "description": "A wrong value is refused and nothing else changes. Checks the file is the one you downloaded. Paste the SHA256 value shown on its download page. A wrong value is refused; nothing else changes.",
+    "tab": "voice",
+    "type": "input",
+    "occurrence": 1,
+    "configKey": "stt.custom_model_sha256"
   },
   {
     "id": "voice.how-the-key-works",

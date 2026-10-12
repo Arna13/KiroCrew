@@ -25,6 +25,8 @@ export function createVoiceEndpoints({ post, put, j, jfetch: fetch }: ClientTran
       transcribe_region?: string
       transcribe_profile?: string
       transcribe_vocabulary?: string
+      custom_model_path?: string
+      custom_model_sha256?: string
       language_code?: string
       polish?: boolean
     }) => put('/api/config/stt', body).then(j),
