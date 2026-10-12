@@ -128,7 +128,7 @@ export function createFilesEndpoints({ post, put, del, j, jfetch: fetch, checkSe
 
   const fileOps = {
     pickFiles: () => post('/api/upload').then(j) as Promise<{ paths: string[] }>,
-    fileDiff: (path: string) => fetch('/api/file-diff?path=' + encodeURIComponent(path)).then(j) as Promise<{ diff: string; original: string; status?: 'clean' | 'modified' | 'untracked' | 'not_git' | 'error' }>,
+    fileDiff: (path: string, opts?: { exact?: boolean }) => fetch('/api/file-diff?path=' + encodeURIComponent(path) + (opts?.exact ? '&exact=1' : '')).then(j) as Promise<{ diff: string; original: string; status?: 'clean' | 'modified' | 'untracked' | 'not_git' | 'error' }>,
     /** Fuzzy file search for @-mention picker. `kind` distinguishes folder hits from files.
      *  `kinds` narrows the result set server-side — 'files' or 'dirs'; omitted returns both.
      *  Filtering server-side rather than dropping unwanted hits here matters because the

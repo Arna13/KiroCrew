@@ -7,7 +7,7 @@ import { noteStaleOwnerResponse } from '../api/staleOwnerSignal'
 import { clearInlineDraft, getInlineDraft, type usePanelTabs } from './usePanelTabs'
 import { i18nT } from '../i18n/t'
 import type { Artifact } from '../types'
-import { fetchFileRead, fileReadQueryKey, FILE_READ_STALE_MS, isPartialRead } from '../utils/fileReadQuery'
+import { EXACT_REFUSED_STATUS, fetchFileRead, fileReadQueryKey, FILE_READ_STALE_MS, isPartialRead, type FileReadResult } from '../utils/fileReadQuery'
 import { dashboardPreviewTargetFromRef } from '../utils/dashboardPreview'
 import { errMessage } from '../utils/thunkError'
 import { optsForReplace } from '../pages/chat/replaceGuard'
@@ -48,9 +48,33 @@ export function usePanelDocumentActions({ tabsCtl, slotRef, queryClient, showAct
   // placeholder tab; any other failure is REPORTED rather than shown as the
   // file's text. Bypassed entirely when the IntelliJ plugin handles file opens
   // — the user wanted IDE-native, not in-dashboard.
-  const openFile = useCallback(async (filePath: string, opts?: { replaceId?: string; line?: number; endLine?: number; diffMode?: boolean; canReplace?: () => boolean; slot?: string | null }) => {
-    try { window.dispatchEvent(new CustomEvent('kirocrew-file-open', { detail: { path: filePath } })) } catch { /* the IDE bridge is optional; the dashboard path below still runs */ }
-    if ((window as unknown as { __kirocrewPluginHandlesFiles?: boolean }).__kirocrewPluginHandlesFiles) return
+  const openFile = useCallback(async (filePath: string, opts?: { replaceId?: string; line?: number; endLine?: number; diffMode?: boolean; canReplace?: () => boolean; slot?: string | null; sourceOnly?: boolean; exact?: boolean }) => {
+    // `exact`: an open made on the agent's behalf (the open-file marker). The
+    // gateway is asked first, with `exact=1`, and opens only a regular file at
+    // exactly this path; for anything else nothing happens at all -- no tab, no
+    // notice, and no IDE hand-off, which would open the path by name.
+    let exactRead: FileReadResult | undefined
+    if (opts?.exact) {
+      const [readR, diffR] = await Promise.allSettled([
+        fetchFileRead(filePath, undefined, { exact: true }),
+        queryClient.fetchQuery({
+          queryKey: ['file-diff', filePath],
+          queryFn: () => api.fileDiff(filePath, { exact: true }),
+          staleTime: 0,
+        }),
+      ])
+      if (readR.status === 'rejected') {
+        showActionError(i18nT('pages.chatPage.could_not_read_file_reason', { path: filePath, reason: errMessage(readR.reason) || i18nT('pages.chatPage.unknown_error') }))
+        return
+      }
+      if (readR.value.status === EXACT_REFUSED_STATUS) return
+      if (readR.value.ok && diffR.status === 'rejected') return
+      exactRead = readR.value
+    }
+    if (!exactRead || exactRead.ok) {
+      try { window.dispatchEvent(new CustomEvent('kirocrew-file-open', { detail: { path: filePath } })) } catch { /* the IDE bridge is optional; the dashboard path below still runs */ }
+      if ((window as unknown as { __kirocrewPluginHandlesFiles?: boolean }).__kirocrewPluginHandlesFiles) return
+    }
     // Capture the slot BEFORE awaiting the read — the same discipline as
     // `saveFile`. `tabsCtl` was bound at the click, so the tab lands in the
     // INITIATING slot's bucket; stamping it with whatever slot is active once
@@ -64,7 +88,7 @@ export function usePanelDocumentActions({ tabsCtl, slotRef, queryClient, showAct
     // "no slot" and is honoured.
     const slot = opts?.slot !== undefined ? opts.slot : (slotRef.current ?? null)
     try {
-      const [read] = await Promise.all([
+      const [read] = exactRead ? [exactRead] : await Promise.all([
         queryClient.fetchQuery({
           queryKey: fileReadQueryKey(filePath),
           // The shared fetch carries the backend's binary verdict with the text

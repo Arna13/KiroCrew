@@ -25,6 +25,14 @@ describe('fileReadUrl', () => {
     expect(url).toBe('/api/file-read?path=' + encodeURIComponent('src/main.py') + '&resolve=1')
   })
 
+  it('appends exact=1 only when asked, and never resolve=1 with it', () => {
+    expect(fileReadUrl('/home/user/notes.md', { exact: true })).toBe(
+      '/api/file-read?path=' + encodeURIComponent('/home/user/notes.md') + '&exact=1',
+    )
+    expect(fileReadUrl('src/main.py', { exact: true })).not.toContain('resolve=1')
+    expect(fileReadUrl('/home/user/notes.md')).not.toContain('exact=1')
+  })
+
   it('a rootless absolute-looking path is treated as relative — callers must not strip the slash', () => {
     // This is the mangled shape from issue #2493. fileReadUrl cannot know the
     // caller meant `/home/user/x`; it faithfully marks it relative. The fix

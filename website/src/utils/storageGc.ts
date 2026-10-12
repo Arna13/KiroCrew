@@ -39,6 +39,8 @@ const SESSION_PREFIXES = [
   'mc-webpreview-url:',
   'mc-webpreview-pending:',
   'mc-webpreview-applied:',
+  // Writer: `AGENT_OPEN_FILE_APPLIED_PREFIX` in `pages/chat/page/eventBridges.ts`.
+  'mc-agent-open-file-applied:',
   'mc-busy-send-mode:',
   // No live writer: the one-time Dashboard hint card wrote this flag before the
   // dock became persistent. Kept so a browser that already carries the keys

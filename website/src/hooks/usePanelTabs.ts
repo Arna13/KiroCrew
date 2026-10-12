@@ -146,6 +146,12 @@ export interface PanelTab {
   /** Last selected working-tree diff view for file tabs. Persisted with the
    *  tab so leaving and returning to a chat does not re-enable auto-diff. */
   diffMode?: boolean
+  /** The tab opens in its source view, never its rendered preview, until the
+   *  user picks Preview. Set for a file an agent's open-file marker opened:
+   *  the preview runs a Markdown file's interactive widgets, so it waits for
+   *  that click. Persisted with the tab, so a reload or remount keeps it, and
+   *  cleared by the panel once the user chooses Preview. */
+  sourceOnly?: boolean
   /**
    * A source line — or line RANGE — the panel should scroll to and flash, set
    * when the tab is opened from a `file.py:447` or `file.md:10-16` reference.
@@ -906,7 +912,7 @@ export function usePanelTabs(
     })
   }, [update, leadingIds])
 
-  const openFile = useCallback((path: string, content: string, slot: string | null = null, opts?: { replaceId?: string; line?: number; endLine?: number; diffMode?: boolean; binary?: boolean; partial?: boolean }) => {
+  const openFile = useCallback((path: string, content: string, slot: string | null = null, opts?: { replaceId?: string; line?: number; endLine?: number; diffMode?: boolean; binary?: boolean; partial?: boolean; sourceOnly?: boolean }) => {
     // `revealLine` is always present in the object, `undefined` when absent:
     // `upsert` merges onto an existing tab with a spread, which only overwrites
     // keys the incoming object HAS. Omitting it would leave a previous chip's
@@ -942,6 +948,7 @@ export function usePanelTabs(
           id: `file:${path}`, kind: 'file', title: basename(path), path, slot,
           revealLine: reveal,
           ...(opts?.diffMode != null ? { diffMode: opts.diffMode } : {}),
+          ...(opts?.sourceOnly ? { sourceOnly: true } : {}),
         }, opts?.replaceId)
       }
       return upsertInBucket(b, {
@@ -954,6 +961,7 @@ export function usePanelTabs(
         partial: opts?.partial,
         revealLine: reveal,
         ...(opts?.diffMode != null ? { diffMode: opts.diffMode } : {}),
+        ...(opts?.sourceOnly ? { sourceOnly: true } : {}),
       }, opts?.replaceId)
     })
   }, [key])

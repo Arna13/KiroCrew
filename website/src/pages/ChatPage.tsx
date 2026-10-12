@@ -84,7 +84,7 @@ import { useChatPageResourcesController } from './chat/useChatPageResourcesContr
 import { useComposerDraftLifecycle, useComposerDraftStores, useStagedDraftPersistence } from './chat/page/composerDrafts'
 import { useComposerStaging, useStagedFolderRefs } from './chat/page/composerStaging'
 import { useFileMentionActions } from './chat/page/composerFileMentions'
-import { useChatEventBridges, useColdFileTabHydration } from './chat/page/eventBridges'
+import { agentOpenFilesEnabled, useAgentOpenFileBridge, useChatEventBridges, useColdFileTabHydration } from './chat/page/eventBridges'
 import { RunInTerminalScope } from '../components/runInTerminalScope'
 import { uniqueNotificationTs } from './chat/page/notificationTs'
 import { useWelcomeState } from './chat/page/welcomeState'
@@ -610,7 +610,7 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
   // MCP Apps in the side panel (dashboard.mcp_app_panel, opt-in). When on, a new
   // render opens the panel to its own `app` tab instead of drawing inline in the
   // bubble — same auto-open path the web-preview marker uses.
-  const { data: appPanelCfg, isError: appPanelCfgError } = useQuery<{ mcp_app_panel?: boolean; auto_open_git_panel?: boolean }>({
+  const { data: appPanelCfg, isError: appPanelCfgError } = useQuery<{ mcp_app_panel?: boolean; auto_open_git_panel?: boolean; auto_open_agent_files?: boolean }>({
     queryKey: ['dashboardConfig'], queryFn: fetchDashboardConfig, staleTime: 30_000,
   })
   const mcpAppPanel = appPanelCfg?.mcp_app_panel === true
@@ -625,6 +625,9 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
   // default (off) — otherwise a config endpoint that is down would withhold the
   // Git tab itself, which the flag does not govern.
   const autoOpenGitPanelKnown = appPanelCfg !== undefined || appPanelCfgError
+  // On by default: open the file an agent's `kirocrew:open-file` marker names
+  // (dashboard.auto_open_agent_files); see agentOpenFilesEnabled.
+  const autoOpenAgentFiles = agentOpenFilesEnabled(appPanelCfg, appPanelCfgError)
   // Tool-call ids already routed to a tab, so re-renders of the same app don't
   // yank focus back to the panel on every streaming update.
   useEffect(() => {
@@ -3057,6 +3060,7 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
     inputRef,
   })
   useColdFileTabHydration({ tabsCtl, showActionError })
+  useAgentOpenFileBridge({ activeSlot, messages, enabled: autoOpenAgentFiles, openFile: handleFileOpen })
   // Session mode of the active slot. In the unified chat view the page-level
   // `mode` prop is always '' — the slot's own mode is the source of truth.
   const effectiveMode = currentSlot?.mode || mode

@@ -588,6 +588,28 @@ describe('usePanelTabs — per-slot isolation', () => {
     }
   })
 
+  it('persists a source-only hold through a reload, and a plain re-open keeps it', () => {
+    // A marker-opened Markdown file stays in its source view until the user
+    // picks Preview; a reload or a later click on the same path must not turn
+    // the preview, and the widgets it runs, back on by itself.
+    vi.useFakeTimers()
+    try {
+      const { result } = renderHook(() => usePanelTabs('chat-src', mock.descriptors))
+      act(() => result.current.openFile('/notes.md', '# n', 'chat-src', { sourceOnly: true }))
+      expect(result.current.activeTab?.sourceOnly).toBe(true)
+      act(() => result.current.openFile('/notes.md', '# n', 'chat-src'))
+      expect(result.current.activeTab?.sourceOnly).toBe(true)
+      act(() => { vi.advanceTimersByTime(500) })
+      const stored = JSON.parse(localStorage.getItem('mc-panel-tabs:chat-src') || 'null')
+      expect(stored.tabs.find((t: { id: string }) => t.id === 'file:/notes.md').sourceOnly).toBe(true)
+      act(() => result.current.patchTab('file:/notes.md', { sourceOnly: undefined }))
+      act(() => { vi.advanceTimersByTime(500) })
+      expect(localStorage.getItem('mc-panel-tabs:chat-src')).not.toContain('sourceOnly')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('operations only touch the active slot\'s bucket (closeAll in B leaves A intact)', () => {
     const { result, rerender } = renderHook(({ slot }: { slot: string | null }) => usePanelTabs(slot, mock.descriptors), {
       initialProps: { slot: 'chat-a' as string | null },

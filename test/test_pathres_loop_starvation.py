@@ -201,6 +201,13 @@ _EXPECTED_GATE_CALL_SITES: dict[str, int] = {
     # the candidate there is what this endpoint must not do at all, since on Windows
     # it would follow a junction aimed at a share.
     "kiro_crew/dashboard/file_api/path_complete.py": 3,
+    # ``_open_exact_regular_file``: the ``exact=1`` admission of
+    # ``/api/file-read`` and ``/api/file-diff``. The argument is canonical without
+    # a resolve: it is ``pinned_fs.fd_real_path`` on the descriptor already held
+    # open (the kernel's own path for that inode), and only after that path was
+    # found equal to the requested one. The call runs on the dashboard's
+    # path-probe pool worker, never the event loop.
+    "kiro_crew/dashboard/file_api/pinned_io.py": 1,
     # ``_project_tree_fence``: the walk's own directory, and every entry of
     # that directory the directory-level answers do not settle -- a link, or any
     # entry when a store sits at or beneath the directory. Each is handed the

@@ -1448,6 +1448,7 @@ export default function SidePanel({
                 onContentChange={(c) => patchTab(t.id, { content: c })}
                 onDiskContent={(c, binary, partial) => patchTab(t.id, { content: c, savedContent: c, ...(binary === undefined ? {} : { binary }), ...(partial === undefined ? {} : { partial }) })}
                 onDiffModeChange={(diffMode) => patchTab(t.id, { diffMode })}
+                onSourceOnlyCleared={() => patchTab(t.id, { sourceOnly: undefined })}
                 onRevealConsumed={() => patchTab(t.id, { revealLine: undefined })}
                 onPathChange={(p) => patchTab(t.id, { path: p, title: p.replace(/\/+$/, '').split('/').pop() || p })}
                 onFileSave={onFileSave}
@@ -1599,7 +1600,7 @@ function McpAppTabBody({ tab, slot }: { tab: PanelTab; slot: string }) {
  * and file-open host it stays mounted through tree-read failures so its notice,
  * toggle, and Refresh escape hatch remain reachable.
  */
-function FileTabBody({ tab, active, projectDir, scrollMemoryKey, onContentChange, onDiskContent, onDiffModeChange, onFileSave, onFileOpen, onFolderOpen, onAddToContext, onClose, onSubmitComments, connected = true, onRevealConsumed }: {
+function FileTabBody({ tab, active, projectDir, scrollMemoryKey, onContentChange, onDiskContent, onDiffModeChange, onSourceOnlyCleared, onFileSave, onFileOpen, onFolderOpen, onAddToContext, onClose, onSubmitComments, connected = true, onRevealConsumed }: {
   tab: PanelTab
   /** Is this the visible tab? Background file tabs stay mounted, so the panel
    *  needs this to keep its Cmd+F handler off a document the user cannot see. */
@@ -1613,6 +1614,7 @@ function FileTabBody({ tab, active, projectDir, scrollMemoryKey, onContentChange
    *  binary verdict of that read moves with both. */
   onDiskContent: (c: string, binary?: boolean, partial?: boolean) => void
   onDiffModeChange: (diffMode: boolean) => void
+  onSourceOnlyCleared: () => void
   onFileSave: (fp: string, c: string) => Promise<void>
   onFileOpen?: (p: string, opts?: { diffMode?: boolean; line?: number; replaceId?: string; canReplace?: () => boolean }) => void
   /** The header path menu's "Show folder in side panel" target. */
@@ -1643,6 +1645,8 @@ function FileTabBody({ tab, active, projectDir, scrollMemoryKey, onContentChange
       onDiskContent={onDiskContent}
       savedBaseline={tab.savedContent}
       initialDiffMode={tab.diffMode}
+      sourceOnly={tab.sourceOnly}
+      onSourceOnlyCleared={onSourceOnlyCleared}
       readOnly={tab.kind === 'wtdiff'}
       onDiffModeChange={onDiffModeChange}
       onSave={onFileSave}
@@ -1762,7 +1766,7 @@ function HydratingFileTab({ path, onDiskContent }: { path: string; onDiskContent
   return <div data-testid="file-tab-hydrating" className="h-full p-4"><ContentSkeleton rows={8} /></div>
 }
 
-function TabBody({ tab, active, slot, projectDir, onClose, onContentChange, onDiskContent, onDiffModeChange, onRevealConsumed, onPathChange, onFileSave, onFileOpen, onFolderOpen, onAddToContext, onSubmitComments, connected = true, onTerminalSendToChat, diffLineNumbers, setDiffLineNumbers, diffSideBySide, setDiffSideBySide }: {
+function TabBody({ tab, active, slot, projectDir, onClose, onContentChange, onDiskContent, onDiffModeChange, onSourceOnlyCleared, onRevealConsumed, onPathChange, onFileSave, onFileOpen, onFolderOpen, onAddToContext, onSubmitComments, connected = true, onTerminalSendToChat, diffLineNumbers, setDiffLineNumbers, diffSideBySide, setDiffSideBySide }: {
   tab: PanelTab; active: boolean; slot: string
   /** The chat's project directory — the file-browser rail's tree root. */
   projectDir?: string
@@ -1772,6 +1776,8 @@ function TabBody({ tab, active, slot, projectDir, onClose, onContentChange, onDi
    *  baseline alongside the buffer, so a re-open still treats the tab clean. */
   onDiskContent: (c: string, binary?: boolean, partial?: boolean) => void
   onDiffModeChange: (diffMode: boolean) => void
+  /** Drop the tab's source-only hold once the user has chosen Preview. */
+  onSourceOnlyCleared: () => void
   /** Drop the tab's one-shot line-reveal target once the panel has acted on it. */
   onRevealConsumed: () => void
   /** Folder tabs navigate internally; lift the new cwd back to the tab record
@@ -1821,6 +1827,7 @@ function TabBody({ tab, active, slot, projectDir, onClose, onContentChange, onDi
         onContentChange={onContentChange}
         onDiskContent={onDiskContent}
         onDiffModeChange={onDiffModeChange}
+        onSourceOnlyCleared={onSourceOnlyCleared}
         onFileSave={onFileSave}
         onFileOpen={onFileOpen}
         onFolderOpen={onFolderOpen}

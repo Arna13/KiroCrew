@@ -54,11 +54,15 @@ export function fileReadQueryKey(filePath: string): readonly [string, string] {
   return ['file-read', filePath]
 }
 
+/** The gateway's answer to an `exact` read of a path that is not a regular file
+ *  at exactly that path: "not opened automatically". The caller does nothing. */
+export const EXACT_REFUSED_STATUS = 422
+
 /** Read a file for a panel tab. Never throws for an HTTP status -- `ok` carries
  *  it, so each caller decides what a 404 means for its own surface. A transport
  *  failure still rejects. */
-export async function fetchFileRead(filePath: string, signal?: AbortSignal): Promise<FileReadResult> {
-  const res = await fetch(fileReadUrl(filePath), signal ? { signal } : undefined)
+export async function fetchFileRead(filePath: string, signal?: AbortSignal, opts?: { exact?: boolean }): Promise<FileReadResult> {
+  const res = await fetch(fileReadUrl(filePath, opts), signal ? { signal } : undefined)
   const binary = res.headers.get('X-File-Binary') === 'true'
   return {
     text: res.ok && !binary ? await res.text() : '',

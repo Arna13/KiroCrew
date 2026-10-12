@@ -113,6 +113,7 @@ describe('pages/chat/page owners', () => {
       'useFileMentionActions',
       'useChatEventBridges',
       'useColdFileTabHydration',
+      'useAgentOpenFileBridge',
       'useComposerChips',
       'useTurnRecovery',
       'useTranscriptRows',

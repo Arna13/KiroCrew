@@ -39,7 +39,10 @@ export function isAbsolutePath(filePath: string): boolean {
 }
 
 /** Build the /api/file-read URL, appending resolve=1 for relative paths. */
-export function fileReadUrl(filePath: string): string {
+export function fileReadUrl(filePath: string, opts?: { exact?: boolean }): string {
+  // `exact`: an open made on the agent's behalf; the gateway then opens only a
+  // regular file at exactly this path (never resolved against the project dir).
+  if (opts?.exact) return '/api/file-read?path=' + encodeURIComponent(filePath) + '&exact=1'
   return withResolve('/api/file-read?path=' + encodeURIComponent(filePath), filePath)
 }
 

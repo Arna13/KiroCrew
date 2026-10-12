@@ -1381,6 +1381,7 @@ def test_the_resolved_gate_dicts_name_the_owners() -> None:
     gate = guard._call_sites("is_sensitive_resolved_path")
     assert {k: v for k, v in gate.items() if "dashboard/file_api/" in k} == {
         "kiro_crew/dashboard/file_api/path_complete.py": 3,
+        "kiro_crew/dashboard/file_api/pinned_io.py": 1,
         "kiro_crew/dashboard/file_api/project_tree.py": 2,
     }
     assert "kiro_crew/dashboard/handlers/files.py" not in gate

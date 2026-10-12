@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, type MutableRefObject } from 'react'
 import { type QueryClient, useQueries } from '@tanstack/react-query'
 
 import type { useDeleteTerminalSession } from '../../../components/CliPanel'
+import { detectFileType, type FileType } from '../../../components/FileRenderers'
 import { normalizeUrl, setSessionPreviewPending } from '../../../components/WebPreviewPanel'
 import { addTab as addDockTerminal } from '../../../hooks/useBottomTerminal'
 import type { usePanelTabs } from '../../../hooks/usePanelTabs'
@@ -11,10 +12,11 @@ import type { AppDispatch } from '../../../store'
 import { openActivityPanel, refreshSlot, setPendingInput } from '../../../store/chatSlice'
 import type { ChatMessage, ChatSlot } from '../../../types'
 import { mergeIntoDraft } from '../../../utils/chatDrafts'
+import { detectOpenFileMarker } from '../../../utils/detectOpenFileMarker'
 import { detectPreviewUrl, previewFeedDecision } from '../../../utils/detectPreviewUrl'
 import { RUN_IN_TERMINAL_READY_DEADLINE_MS } from '../../../utils/fenceShell'
 import { fetchFileRead, fileReadQueryKey, FILE_READ_STALE_MS, isPartialRead } from '../../../utils/fileReadQuery'
-import { safeSetItem } from '../../../utils/safeStorage'
+import { safeGetItem, safeSetItem } from '../../../utils/safeStorage'
 import { onTerminalReady, sendRawToTerminalSession } from '../../../utils/terminalRegistry'
 import { errMessage } from '../../../utils/thunkError'
 
@@ -248,6 +250,90 @@ export function useChatEventBridges({
     return () => window.removeEventListener('mc:redaction-hosts-changed', handler)
   }, [dispatch])
   return { runInTerminalScope }
+}
+
+/** Per-slot localStorage key holding the paths an open-file marker already opened. */
+export const AGENT_OPEN_FILE_APPLIED_PREFIX = 'mc-agent-open-file-applied:'
+/** How many applied paths a slot remembers; the oldest is dropped beyond it. */
+export const AGENT_OPEN_FILE_APPLIED_MAX = 200
+
+function readAppliedOpenFiles(key: string): string[] {
+  const raw = safeGetItem(key)
+  if (!raw) return []
+  try {
+    const parsed: unknown = JSON.parse(raw)
+    return Array.isArray(parsed) ? parsed.filter((p): p is string => typeof p === 'string') : []
+  } catch {
+    return []
+  }
+}
+
+/**
+ * `dashboard.auto_open_agent_files` as the bridge reads it: `null` while the
+ * dashboard config read is in flight (so an opted-out user never sees an open
+ * before the value arrives), the stored value once it lands, and the default
+ * (on) when the read failed or the gateway does not send the key.
+ */
+export function agentOpenFilesEnabled(
+  cfg: { auto_open_agent_files?: boolean } | undefined,
+  readFailed: boolean,
+): boolean | null {
+  if (cfg !== undefined) return cfg.auto_open_agent_files !== false
+  return readFailed ? true : null
+}
+
+/**
+ * The file kinds a marker may open without a click: those whose viewer makes
+ * no network request of its own (code, JSON, CSV and text render as text; an
+ * image file is read from disk). Every other kind, an HTML preview first among
+ * them, can load content from other hosts as it renders, so it opens only when
+ * the user clicks its path.
+ */
+export const AGENT_OPENABLE_FILE_TYPES: ReadonlySet<FileType> = new Set<FileType>(['markdown', 'code', 'json', 'jsonl', 'csv', 'image'])
+
+/**
+ * The agent's `kirocrew:open-file` marker (detectOpenFileMarker): open the file
+ * it names in the side panel's Files tab, as if the user had clicked its path.
+ *
+ *  - Only the kinds in `AGENT_OPENABLE_FILE_TYPES` open; any other marker does
+ *    nothing, and the path stays one click away in the reply.
+ *  - `openFile` is the page's own file-open handler, the one a path-chip click
+ *    calls, so the read goes through `/api/file-read` with its owner gate,
+ *    sensitive-path refusal and redaction unchanged. A refused read surfaces the
+ *    handler's existing error notice. The open passes `exact`, so the gateway
+ *    opens only a regular file at exactly the path named; for any other path
+ *    nothing happens.
+ *  - Each (slot, path) opens at most once. The applied paths are PERSISTED per
+ *    slot before the read starts, so a reload or remount does not reopen a tab
+ *    the user closed, and a refused read is never retried. If that record
+ *    cannot be written, nothing opens: an unrecorded open would repeat on every
+ *    remount.
+ *  - `enabled` is `dashboard.auto_open_agent_files`; `null` means its value is
+ *    not known yet, and nothing happens until it is.
+ */
+export function useAgentOpenFileBridge({ activeSlot, messages, enabled, openFile }: {
+  activeSlot: string | null
+  messages: ChatMessage[]
+  enabled: boolean | null
+  openFile: (filePath: string, opts?: { slot?: string | null; sourceOnly?: boolean; exact?: boolean }) => unknown
+}) {
+  useEffect(() => {
+    const slot = activeSlot
+    if (!slot || enabled !== true) return
+    const path = detectOpenFileMarker(messages)
+    if (!path || !AGENT_OPENABLE_FILE_TYPES.has(detectFileType(path))) return
+    const key = AGENT_OPEN_FILE_APPLIED_PREFIX + slot
+    const applied = readAppliedOpenFiles(key)
+    if (applied.includes(path)) return
+    if (!safeSetItem(key, JSON.stringify([...applied, path].slice(-AGENT_OPEN_FILE_APPLIED_MAX)))) return
+    // `sourceOnly`: a Markdown or text file opens in its source editor and stays
+    // there, across reloads, until the user picks Preview. The preview runs the
+    // file's interactive widgets, so it waits for that click. The JSON, CSV and
+    // image viewers have no source mode and render as they would for a click.
+    // `exact`: the gateway opens only a regular file at exactly this path, and
+    // for anything else nothing happens.
+    void openFile(path, { slot, sourceOnly: true, exact: true })
+  }, [activeSlot, messages, enabled, openFile])
 }
 
 /**

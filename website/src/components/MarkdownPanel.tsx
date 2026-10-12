@@ -334,6 +334,10 @@ interface Props {
   /** Restored file-tab preference. Undefined allows the initial modified-file
    *  auto-diff; false explicitly keeps the normal preview/source view. */
   initialDiffMode?: boolean
+  /** Hold a Markdown file in its source view until the user picks Preview
+   *  (the tab's `sourceOnly`). `onSourceOnlyCleared` runs once they do. */
+  sourceOnly?: boolean
+  onSourceOnlyCleared?: () => void
   /** Lock the panel to a read-only working-tree DIFF (the `wtdiff` tab, #9695):
    *  the tab stays in diff mode, cannot be toggled into the editor, and shows
    *  no Edit/Save affordance. The plain `file:` tab remains the single editable
@@ -1222,7 +1226,7 @@ export interface MarkdownPanelHandle {
   requestNavigate: (nav: (stillClean: () => boolean) => void) => void
 }
 
-export default memo(forwardRef<MarkdownPanelHandle, Props>(function MarkdownPanel({ filePath, content, binary, partial, onContentChange, onDiskContent, onSave, onClose, liveWatch, onSubmitComments, connected = true, onRefresh, reserveWidth, initialDiffMode, readOnly = false, onDiffModeChange, embedded, active = true, savedBaseline, revealLine, onRevealConsumed, browserRail, railOpen, onRailToggle, scrollMemoryKey, onFolderOpen }: Props, ref) {
+export default memo(forwardRef<MarkdownPanelHandle, Props>(function MarkdownPanel({ filePath, content, binary, partial, onContentChange, onDiskContent, onSave, onClose, liveWatch, onSubmitComments, connected = true, onRefresh, reserveWidth, initialDiffMode, sourceOnly = false, onSourceOnlyCleared, readOnly = false, onDiffModeChange, embedded, active = true, savedBaseline, revealLine, onRevealConsumed, browserRail, railOpen, onRailToggle, scrollMemoryKey, onFolderOpen }: Props, ref) {
   useLanguageGeneration() // memo() bails out of the provider-level repaint; subscribe directly
   const ime = useImeGuard()
   const qc = useQueryClient()
@@ -1258,7 +1262,7 @@ export default memo(forwardRef<MarkdownPanelHandle, Props>(function MarkdownPane
     if (readOnly) return false // the wtdiff diff view is never an editor (#9695)
     if (binary && !BYTE_BACKED_FILE_TYPES.has(detectFileType(filePath))) return false
     if (revealLine && revealTargetsSource) return true
-    if (MD_EXTS.has(extOf(filePath))) return false
+    if (MD_EXTS.has(extOf(filePath))) return sourceOnly
     return !RICH_FILE_TYPES.includes(detectFileType(filePath))
   })
   const [diffMode, setDiffMode] = useState(readOnly ? true : (initialDiffMode ?? false))
@@ -1404,12 +1408,27 @@ export default memo(forwardRef<MarkdownPanelHandle, Props>(function MarkdownPane
     if (!showBinaryCard) {
       // Bytes that decoded after all: a code file's default view IS the editor and
       // `canPreview` renders no Edit toggle for it, so a stale false strands the tab.
-      if (wasShowing) setEditing(!readOnly && !isMarkdown && !isRichType)
+      if (wasShowing) setEditing(!readOnly && (isMarkdown ? sourceOnly : !isRichType))
       return
     }
     setDiffMode(false)
     setEditing(false)
-  }, [showBinaryCard, isMarkdown, isRichType, readOnly])
+  }, [showBinaryCard, isMarkdown, isRichType, readOnly, sourceOnly])
+  // A hold that arrives on a mounted panel (the agent's marker names a file
+  // already open in its preview) switches to the source view in the same
+  // render, so the preview never paints the file's widgets.
+  const [heldSource, setHeldSource] = useState(sourceOnly)
+  if (heldSource !== sourceOnly) {
+    setHeldSource(sourceOnly)
+    if (sourceOnly && !editing && isMarkdown && !readOnly && !showBinaryCard) setEditing(true)
+  }
+  // A source-only hold ends only when the user leaves the source view for the
+  // preview (Preview, or Cancel, which returns to it); from then on the tab
+  // opens the way any file tab does.
+  const leaveSourceView = useCallback(() => {
+    setEditing(false)
+    if (sourceOnly && isMarkdown && !showBinaryCard) onSourceOnlyCleared?.()
+  }, [sourceOnly, isMarkdown, showBinaryCard, onSourceOnlyCleared])
   // ── Preview-mode find (Cmd+F) ─────────────────────────────────────────────
   // Three surfaces compete for Cmd+F: the editor owns it while editing (it stops
   // propagation before anything else sees the key), and ChatPage's chat-find
@@ -2082,7 +2101,7 @@ export default memo(forwardRef<MarkdownPanelHandle, Props>(function MarkdownPane
   // to, and no buffer to discard.
   const canPreview = isMarkdown && !showBinaryCard
   const handleCancel = useCallback(async () => {
-    if (!dirty) { if (canPreview) setEditing(false); return }
+    if (!dirty) { if (canPreview) leaveSourceView(); return }
     if (!(await confirm({
       title: i18nT('components.markdownPanel.discard_unsaved_changes'),
       confirmLabel: i18nT('components.markdownPanel.discard_changes_button'),
@@ -2108,9 +2127,9 @@ export default memo(forwardRef<MarkdownPanelHandle, Props>(function MarkdownPane
         applyDiskRead(disk)
       }
       setDirty(false)
-      if (canPreview) setEditing(false)
+      if (canPreview) leaveSourceView()
     } finally { setRefreshing(false) }
-  }, [dirty, filePath, onRefresh, canPreview, confirm, readFromDisk, applyDiskRead, reportActionError])
+  }, [dirty, filePath, onRefresh, canPreview, confirm, readFromDisk, applyDiskRead, reportActionError, leaveSourceView])
 
   const resolveSelectionCoords = useCallback((fallbackText?: string) => {
     const sel = window.getSelection()
@@ -2755,7 +2774,7 @@ export default memo(forwardRef<MarkdownPanelHandle, Props>(function MarkdownPane
       <button className={`p-1.5 rounded-md border cursor-pointer transition-all ${lineNums ? 'border-accent text-accent bg-accent-subtle' : 'border-border text-muted hover:text-text hover:border-border-strong'}`} onClick={() => setLineNums(!lineNums)} title={i18nT('components.markdownPanel.toggle_line_numbers')} aria-label={i18nT('components.markdownPanel.toggle_line_numbers')}><Hash size={14} /></button>
     )}
     {canPreview && !readOnly && (
-      <button className={`px-2 py-1 rounded-md text-[12px] font-medium border cursor-pointer transition-all ${editing ? 'border-accent text-accent bg-accent-subtle' : 'border-border text-muted hover:text-text hover:border-border-strong'}`} onClick={() => { void guardDraft(() => setEditing(!editing)) }}>{editing ? i18nT('components.markdownPanel.preview') : i18nT('components.markdownPanel.edit')}</button>
+      <button className={`px-2 py-1 rounded-md text-[12px] font-medium border cursor-pointer transition-all ${editing ? 'border-accent text-accent bg-accent-subtle' : 'border-border text-muted hover:text-text hover:border-border-strong'}`} onClick={() => { void guardDraft(() => { if (editing) leaveSourceView(); else setEditing(true) }) }}>{editing ? i18nT('components.markdownPanel.preview') : i18nT('components.markdownPanel.edit')}</button>
     )}
     {readOnly && (
       <span className="px-2 py-1 text-[12px] font-medium text-muted select-none" aria-label={i18nT('components.markdownPanel.read_only')}>{i18nT('components.markdownPanel.read_only')}</span>
@@ -2818,7 +2837,7 @@ export default memo(forwardRef<MarkdownPanelHandle, Props>(function MarkdownPane
             {canPreview && !readOnly && (
               <button
                 className="px-2.5 h-[26px] rounded-md text-[11.5px] font-medium text-muted hover:text-text hover:bg-bg-hover bg-transparent border-none cursor-pointer transition-colors shrink-0"
-                onClick={() => { void guardDraft(() => setEditing(!editing)) }}
+                onClick={() => { void guardDraft(() => { if (editing) leaveSourceView(); else setEditing(true) }) }}
                 aria-pressed={editing}
               >{editing ? i18nT('components.markdownPanel.preview') : i18nT('components.markdownPanel.edit')}</button>
             )}

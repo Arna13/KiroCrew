@@ -14,6 +14,7 @@ from aiohttp import web
 
 if TYPE_CHECKING:
     from kiro_crew.dashboard.handlers.files import (
+        _CONTROL_CHARS_RE,
         _FILE_KINDS_MAX_PATHS,
         _FILE_READ_BINARY_EXTS,
         _FILE_READ_SNIFF_BYTES,
@@ -24,10 +25,13 @@ if TYPE_CHECKING:
         _sel,
         atomic_write,
         is_sensitive_path,
+        is_sensitive_resolved_path,
+        is_unc_shape,
         logger,
         open_access_control_source,
         pinned_fs,
         pinned_parent_replace_supported,
+        platform_compat,
         read_bounded_json,
         require_owner_dashboard_request,
     )
@@ -128,13 +132,22 @@ def _read_request_path(raw: str, read_cap: int) -> _TextRead:
         # symlink_refused (the final component became a link inside this
         # transaction), read_failed, file_too_large: the read did not happen.
         return _TextRead("read_failed", checked.path, "")
+    return _decode_checked_text(checked.path, checked.file, read_cap)
+
+
+def _decode_checked_text(path: str, fobj: BinaryIO, read_cap: int) -> _TextRead:
+    """Read and decode an already checked open file; closes *fobj*.
+
+    The policy half of :func:`_read_request_path`, shared with
+    :func:`_read_exact_request_path` so both answer the same bytes the same way.
+    """
     # Binary BY FORMAT, decided before any byte is decoded: a NUL-free binary
     # (a GNU thin `.a` holds only ASCII member references) would otherwise read
     # as text and open an editable buffer that a save turns into corruption.
-    if PurePath(checked.path).suffix.lower() in _FILE_READ_BINARY_EXTS:
+    if PurePath(path).suffix.lower() in _FILE_READ_BINARY_EXTS:
         with contextlib.suppress(Exception):
-            checked.file.close()
-        return _TextRead("binary", checked.path, "")
+            fobj.close()
+        return _TextRead("binary", path, "")
     try:
         # Read one bounded byte snapshot for both the binary verdict and the
         # content. Two descriptor reads would let an in-place rewrite pair a
@@ -143,24 +156,127 @@ def _read_request_path(raw: str, read_cap: int) -> _TextRead:
         # right for a text file with one bad byte and actively wrong for a .zip
         # or a .sqlite. The sniff is what catches a binary with NO extension, so
         # it runs even though the check above already answered every known one.
-        with contextlib.closing(checked.file):
-            data = checked.file.read(read_cap * 4)
+        with contextlib.closing(fobj):
+            data = fobj.read(read_cap * 4)
         if b"\x00" in data[:_FILE_READ_SNIFF_BYTES]:
-            return _TextRead("binary", checked.path, "")
+            return _TextRead("binary", path, "")
         try:
-            return _TextRead("file", checked.path, data.decode("utf-8")[:read_cap])
+            return _TextRead("file", path, data.decode("utf-8")[:read_cap])
         except UnicodeDecodeError:
             # A text file the UTF-8 decode cannot render faithfully -- Latin-1,
             # one stray byte, a codepoint split at the snapshot bound. The
             # replacement characters make this body NOT the file as written,
             # and the viewer must know before it offers the body as a copy.
-            return _TextRead(
-                "file", checked.path, data.decode("utf-8", errors="replace")[:read_cap], True
-            )
+            return _TextRead("file", path, data.decode("utf-8", errors="replace")[:read_cap], True)
     except OSError:
         with contextlib.suppress(Exception):
-            checked.file.close()
-        return _TextRead("read_failed", checked.path, "")
+            fobj.close()
+        return _TextRead("read_failed", path, "")
+
+
+class _ExactOpen(NamedTuple):
+    """The verdict of :func:`_open_exact_regular_file`.
+
+    ``kind`` is ``file`` (``fd`` is the open descriptor, the caller's to close),
+    ``not_exact`` (the path does not name a regular file at exactly that path, so
+    it is not opened automatically), ``invalid`` (the sensitive-path fence refused
+    it), ``missing``, or ``read_failed``. ``path`` is the requested path.
+    """
+
+    kind: str
+    path: str
+    fd: int | None = None
+
+
+def _open_exact_regular_file(raw: str) -> _ExactOpen:
+    """Open *raw* only when it names a regular file at exactly that path.
+
+    The admission for an open the dashboard makes on the agent's behalf (the
+    ``exact=1`` flag of ``/api/file-read`` and ``/api/file-diff``). Blocking;
+    callers run it on a worker thread. Nothing here resolves the path by name:
+
+    * the path must already be absolute and in normal form, judged on the text
+      before any system call (on Windows a share path is refused outright);
+    * the name is examined without following it (``lstat``), and anything but a
+      regular file is refused before any open;
+    * the open refuses a link at the final name
+      (:func:`platform_compat.open_file_no_reparse`);
+    * then the OPEN descriptor is checked, not the name: it must be a regular
+      file, and the kernel's own path for it (:func:`pinned_fs.fd_real_path`)
+      must equal the requested path. A descriptor whose path cannot be read is
+      refused;
+    * the sensitive-path fence judges that kernel path.
+
+    Every check is on the descriptor that is read afterwards, so nothing can
+    change between the check and the read.
+    """
+    if not raw or _CONTROL_CHARS_RE.search(raw):
+        return _ExactOpen("not_exact", raw)
+    if not os.path.isabs(raw) or os.path.normpath(raw) != raw:
+        return _ExactOpen("not_exact", raw)
+    if os.name == "nt" and (is_unc_shape(raw) or raw.startswith(("\\\\", "//"))):
+        return _ExactOpen("not_exact", raw)
+    try:
+        # No-follow: a link at the name, a directory, a device or a FIFO is
+        # refused before any open, so none of them is ever opened.
+        named = os.lstat(raw)
+    except (FileNotFoundError, NotADirectoryError):
+        return _ExactOpen("missing", raw)
+    except (OSError, ValueError):
+        return _ExactOpen("read_failed", raw)
+    if not _stat_mod.S_ISREG(named.st_mode):
+        return _ExactOpen("not_exact", raw)
+    try:
+        fd = platform_compat.open_file_no_reparse(raw, nonblocking=True)
+    except (FileNotFoundError, NotADirectoryError):
+        return _ExactOpen("missing", raw)
+    except OSError as exc:
+        if isinstance(exc, IsADirectoryError) or exc.errno in (errno.ELOOP, errno.EISDIR):
+            return _ExactOpen("not_exact", raw)
+        return _ExactOpen("read_failed", raw)
+    except ValueError:
+        return _ExactOpen("not_exact", raw)
+    try:
+        regular = _stat_mod.S_ISREG(os.fstat(fd).st_mode)
+        real = pinned_fs.fd_real_path(fd) if regular else None
+    except OSError:
+        os.close(fd)
+        return _ExactOpen("read_failed", raw)
+    if real is None or os.path.normcase(real) != os.path.normcase(raw):
+        os.close(fd)
+        return _ExactOpen("not_exact", raw)
+    if is_sensitive_resolved_path(real):
+        os.close(fd)
+        return _ExactOpen("invalid", raw)
+    return _ExactOpen("file", raw, fd)
+
+
+def _read_exact_request_path(raw: str, read_cap: int) -> _TextRead:
+    """:func:`_read_request_path` for an ``exact=1`` read, in ONE transaction.
+
+    Admission is :func:`_open_exact_regular_file`; the bytes come from the
+    descriptor it checked, decoded by the same :func:`_decode_checked_text`.
+    A refusal is the ``not_exact`` kind, which the endpoint answers without
+    reading anything.
+    """
+    opened = _open_exact_regular_file(raw)
+    if opened.kind != "file" or opened.fd is None:
+        return _TextRead(opened.kind, opened.path, "")
+    fobj = os.fdopen(opened.fd, "rb")
+    if read_cap <= 0:
+        fobj.close()
+        return _TextRead("file", opened.path, "")
+    return _decode_checked_text(opened.path, fobj, read_cap)
+
+
+def _admit_exact_path(raw: str) -> str:
+    """The admission verdict alone for an ``exact=1`` request: the
+    :class:`_ExactOpen` kind, with the descriptor closed. Blocking; callers run
+    it on a worker thread."""
+    opened = _open_exact_regular_file(raw)
+    if opened.fd is not None:
+        os.close(opened.fd)
+    return opened.kind
 
 
 class _OpenDenied(NamedTuple):

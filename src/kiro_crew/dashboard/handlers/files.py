@@ -151,15 +151,20 @@ from kiro_crew.dashboard.file_api.path_complete import (  # noqa: F401
     api_path_complete,
 )
 from kiro_crew.dashboard.file_api.pinned_io import (  # noqa: F401
+    _admit_exact_path,
     _CheckedFile,
     _classify_request_paths,
+    _decode_checked_text,
+    _ExactOpen,
     _file_write_blocking,
     _open_checked,
     _open_checked_file,
+    _open_exact_regular_file,
     _open_rb_nofollow,
     _OpenDenied,
     _OpenedFile,
     _OpenRefusal,
+    _read_exact_request_path,
     _read_request_path,
     _resolve_project_relative,
     _TextRead,
@@ -2130,10 +2135,14 @@ async def api_file_read(request: web.Request) -> web.Response:
     )
 
     raw_path = request.query.get("path", "")
+    # `exact=1`: an open the dashboard makes on the agent's behalf. It opens only
+    # a regular file at exactly the path named (_read_exact_request_path) and is
+    # never resolved against the project dir. Without the flag nothing changes.
+    exact = request.query.get("exact") == "1"
     # Resolve relative paths against project dir when resolve=1. Off-loop: the
     # resolution is a pair of realpath calls, and the schema check below needs
     # the resolved string, so it cannot be folded into the probe.
-    if request.query.get("resolve") == "1":
+    if request.query.get("resolve") == "1" and not exact:
         try:
             raw_path, _resolve_err = await _run_path_probe(_resolve_project_relative, raw_path)
         except _PathProbeBusy:
@@ -2168,7 +2177,7 @@ async def api_file_read(request: web.Request) -> web.Response:
     # stat and opens nothing.
     try:
         outcome = await _run_path_probe(
-            _read_request_path,
+            _read_exact_request_path if exact else _read_request_path,
             raw_path,
             0 if request.method == "HEAD" else read_cap + _STREAM_HOLDBACK_JWT_MAX,
             transfer=request.method != "HEAD",
@@ -2176,6 +2185,16 @@ async def api_file_read(request: web.Request) -> web.Response:
     except _PathProbeBusy:
         return _probe_busy_response(resource=raw_path, tool_name="file_read")
     path = outcome.path
+    if outcome.kind == "not_exact":
+        _sel().log_tool_invocation(
+            session_key="dashboard",
+            tool_name="file_read",
+            outcome="denied",
+            resources=raw_path,
+        )
+        return web.json_response(
+            {"error": "not opened automatically", "code": "not_exact"}, status=422
+        )
     if outcome.kind == "invalid":
         _sel().log_tool_invocation(
             session_key="dashboard",
@@ -2771,17 +2790,32 @@ async def api_file_diff(request: web.Request) -> web.Response:
     if not raw_path:
         _sel().log_api_access(caller=request.get("user", "dashboard"), operation="file_diff", outcome="allowed", resources="empty_path")
         return web.json_response({"diff": "", "original": ""})
-    # Off-loop: realpath then the isfile probe, on a caller-supplied path.
+    # `exact=1` admits only a regular file at exactly the path named, judged on
+    # the open descriptor (_admit_exact_path, which also applies the
+    # sensitive-path fence to the kernel's path); without the flag nothing
+    # changes.
+    exact = request.query.get("exact") == "1"
     try:
-        raw_path, path_is_file = await _run_path_probe(_resolve_diff_path, raw_path)
+        if exact:
+            admitted = await _run_path_probe(_admit_exact_path, raw_path)
+            path_is_file = admitted == "file"
+        else:
+            # Off-loop: realpath then the isfile probe, on a caller-supplied path.
+            raw_path, path_is_file = await _run_path_probe(_resolve_diff_path, raw_path)
     except _PathProbeBusy:
         return _probe_busy_response(
             resource=raw_path, operation="file_diff", caller=request.get("user", "dashboard")
         )
+    if exact and admitted == "not_exact":
+        _sel().log_api_access(caller=request.get("user", "dashboard"), operation="file_diff", outcome="denied", resources=raw_path, error="not_exact")
+        return web.json_response({"error": "not opened automatically", "code": "not_exact"}, status=422)
+    if exact and admitted == "invalid":
+        _sel().log_api_access(caller=request.get("user", "dashboard"), operation="file_diff", outcome="denied", resources=raw_path, error="sensitive path")
+        return web.json_response({"error": "Access denied", "code": "sensitive_path"}, status=403)
     if not path_is_file:
         _sel().log_api_access(caller=request.get("user", "dashboard"), operation="file_diff", outcome="allowed", resources=f"path={raw_path}", error="not_found")
         return web.json_response({"diff": "", "original": ""})
-    if is_sensitive_path(raw_path):
+    if not exact and is_sensitive_path(raw_path):
         _sel().log_api_access(caller=request.get("user", "dashboard"), operation="file_diff", outcome="denied", resources=raw_path, error="sensitive path")
         return web.json_response({"error": "Access denied"}, status=403)
 
