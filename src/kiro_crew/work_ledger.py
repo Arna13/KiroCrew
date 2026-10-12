@@ -3131,8 +3131,9 @@ def rebuild_from_projection(slot_key: str) -> dict[str, Any]:
     the fold does not hold (it forgets closed items past
     ``work_vocab.WORK_CLOSED_WINDOW``) is kept as the cache holds it. The rebuilt header's
     :attr:`ConductorRecord.created_total` is the number of items the fold ever held,
-    forgotten ones included, plus every legacy record kept, so the goal's spend count
-    afterwards agrees with the record rather than with the cache's header.
+    forgotten ones included, plus every legacy record kept, raised to a trusted cache
+    header's count: the goal's spend count follows the record, but never drops below
+    what the cache says was already spent.
 
     Returns the counts: ``{"slot_key", "items", "events", "removed", "legacy"}``.
     """
@@ -3248,6 +3249,8 @@ class _Forgotten(NamedTuple):
     created: int
     #: How many closed items it let go.
     items: int
+    #: Forgotten items the fold saw a baseline for, so ``created`` already counts them.
+    baseline_ids: frozenset[str] = frozenset()
 
 
 def _folded_forgotten(folded: Any) -> _Forgotten:
@@ -3255,9 +3258,15 @@ def _folded_forgotten(folded: Any) -> _Forgotten:
     view = folded if isinstance(folded, dict) else {}
     counts = view.get("forgotten")
     counts = counts if isinstance(counts, dict) else {}
+    raw_ids = counts.get("baseline_ids")
     return _Forgotten(
         created=max(0, _as_int(counts.get("created"), 0)),
         items=max(0, _as_int(counts.get("items"), 0)),
+        baseline_ids=frozenset(
+            entry
+            for entry in (raw_ids if isinstance(raw_ids, list) else ())
+            if isinstance(entry, str)
+        ),
     )
 
 
@@ -3658,10 +3667,23 @@ def _rebuild_locked(
         # RECORDED item legacy and the total would count it twice (once inside the
         # fold's creates, once as legacy). ``recorded_at`` tells the two apart.
         if cached is not None and not cached.recorded_at and _predates(cached.created_at, epoch):
+            if forgotten is not None and item_id in forgotten.baseline_ids:
+                # The fold folded its baseline and then let it go: its stamp failed
+                # after the baseline landed, so the record still reads unrecorded. The
+                # fold's total already counts it, so it is kept and counted once.
+                forgotten_kept.add(item_id)
+                continue
             # Created before this board's first recorded entry and never recorded:
             # the log never saw it, so the log cannot judge it. It stays as the
             # cache holds it and is ADDED to the total below.
             legacy.add(item_id)
+            continue
+        if cached is not None and _predates(cached.created_at, epoch):
+            # RECORDED but older than the board's first surviving entry: retention
+            # pruned the unit holding its create. The log cannot judge it, so it is
+            # kept as the cache holds it -- never unlinked -- and counted like a
+            # forgotten record, once, in the fold's total.
+            forgotten_kept.add(item_id)
             continue
         if cached is not None and _may_be_forgotten(cached, forgotten):
             # A closed record the fold does not hold: the cache is where it stays
@@ -3695,6 +3717,12 @@ def _rebuild_locked(
     # in the fold's total; a legacy record never reached the fold and is added.
     held = len(kept) + len(forgotten_kept)
     total = max(held, forgotten.created if forgotten else 0) + len(legacy)
+    if trusted_base and existing is not None:
+        # The store only ever adds to the counter, and the pieces above can overlap
+        # without one containing the other (a pruned unit's create, a torn forgotten
+        # record), so they can come out short. A trusted header's count is a floor:
+        # the rebuild may raise the spend count, never lower it below what was spent.
+        total = max(total, existing.created_total)
     if not trusted_base:
         base = 0
     elif record.goal_items_base == LEGACY_GOAL_BASE:
@@ -3706,7 +3734,9 @@ def _rebuild_locked(
     # The identity breadcrumb beside the record, as the bootstrap writes it, so a
     # cache rebuilt into an empty directory carries the same two files a new one does.
     atomic_write(conductor_dir(slot_key) / _KEY_FILE, slot_key + "\n", mode=0o600)
-    _reconcile_bindings(slot_key, fold_items, kept, legacy)
+    # A kept forgotten record is an item the fold does not hold, so like a legacy one
+    # its binding is kept where it points.
+    _reconcile_bindings(slot_key, fold_items, kept, legacy | forgotten_kept)
     return {
         "slot_key": slot_key,
         "items": written_items,
@@ -3738,7 +3768,8 @@ def _reconcile_bindings(
     this board's item which the record does not bind to that worker is removed.
     A terminal item still names the worker that finished it but does not route
     it (the store lets another board bind a worker whose item is terminal), so its
-    binding is kept where it points and never claimed back. Legacy items keep
+    binding is kept where it points and never claimed back. Items in *legacy* --
+    legacy records and kept forgotten ones, which the fold does not hold -- keep
     theirs.
     """
     wanted: dict[str, str] = {}

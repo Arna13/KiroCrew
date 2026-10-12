@@ -6402,6 +6402,12 @@ def _work_step(state: dict[str, Any], entry: Entry) -> None:
             return
         parked.append([entry.time, dict(data)])
         return
+    if data.get("baseline") is True:
+        # A baseline on an item the fold already holds: the store had not stamped
+        # it recorded (a failed stamp after its create), so a LATER entry -- a
+        # worker's, folded after the conductor's units -- may carry a baseline too.
+        # Internal, never rendered: it only protects the item's tombstone.
+        item["_unrecorded"] = True
     _work_apply(item, data, entry.time)
     _work_settle(state, item)
 
@@ -6443,10 +6449,18 @@ def _work_forget(state: dict[str, Any], item_id: str) -> None:
     forgotten[item["state"]] += 1
     if item["round"] >= state["round"]:
         forgotten["in_round"] += 1
-    tombstones: dict[str, None] = state["tombstones"]
-    tombstones[item_id] = None
+    # The value says whether a later entry for the item may carry a BASELINE: one born
+    # from a baseline, or one the fold saw a baseline for (its recorded stamp failed).
+    # Such an entry -- a worker's, folded after the conductor's units -- would
+    # materialise the item again once its id left the set. A worker writes only after
+    # the conductor's bind, so a failed stamp after a create always shows on a
+    # conductor entry first. Past the cap, the oldest other id goes first, and a
+    # protected id goes only when every id the set holds is one.
+    tombstones: dict[str, bool] = state["tombstones"]
+    tombstones[item_id] = item.get("baseline") is True or item.get("_unrecorded") is True
     while len(tombstones) > WORK_TOMBSTONE_LIMIT:
-        del tombstones[next(iter(tombstones))]
+        evict = next((key for key, born in tombstones.items() if born is not True), None)
+        del tombstones[evict if evict is not None else next(iter(tombstones))]
 
 
 def _work_set_round(state: dict[str, Any], new_round: int) -> None:
@@ -6639,7 +6653,9 @@ def _work_render(state: dict[str, Any]) -> WorkBoardView:
         item = state["items"].get(item_id)
         if item is None:
             continue
-        rendered = {key: value for key, value in item.items() if key != "events"}
+        rendered = {
+            key: value for key, value in item.items() if key != "events" and key != "_unrecorded"
+        }
         rendered["schema"] = 1
         rendered["events"] = [
             {key: value for key, value in event.items() if key != "_t"} for event in item["events"]
@@ -6667,7 +6683,16 @@ def _work_render(state: dict[str, Any]) -> WorkBoardView:
         },
         "items": items,
         "omitted": state["omitted"] + sum(len(p) for p in state["parked"].values()),
-        "forgotten": cast("WorkBoardForgotten", dict(state["forgotten"])),
+        "forgotten": cast(
+            "WorkBoardForgotten",
+            dict(
+                state["forgotten"],
+                # The protected tombstones: a rebuild reads these to count a forgotten
+                # item whose record still reads unrecorded once, not twice. Bounded by
+                # the tombstone cap.
+                baseline_ids=[key for key, born in state["tombstones"].items() if born is True],
+            ),
+        ),
     }
 
 

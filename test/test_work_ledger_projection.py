@@ -503,15 +503,17 @@ def test_a_full_fold_that_omitted_nothing_is_the_whole_board_and_rebuilds(monkey
 
 
 def test_a_rebuild_sets_the_create_counter_to_what_the_record_holds(monkeypatch):
-    """The create counter is rebuilt from the fold, not carried over.
+    """The create counter is rebuilt from the fold, with a trusted header as a floor.
 
     A cache header can hold a count the record does not: higher, after a create
     whose entry never landed and whose record was then removed, or after the
     one-time seed from an old board's files; lower, after a hand edit. Rebuilt,
     ``created_total`` is the number of items the fold retained -- past the ceiling
     guard the fold dropped no create, and its ``omitted`` there counts entries that
-    are not this board's creates -- so with the fold's one item a counter of 7
-    comes down to 1, and one of 0 comes up to 1.
+    are not this board's creates -- raised to a trusted header's count, since the
+    record's pieces can come out short and the spend count must not drop below what
+    was spent. With the fold's one item a counter of 7 stays 7, and one of 0 comes
+    up to 1.
     """
     fold = _rendered(CONDUCTOR, "it_0000abcd")
     fold["omitted"] = 3  # stragglers of a purged board: not creates, not counted
@@ -532,7 +534,8 @@ def test_a_rebuild_sets_the_create_counter_to_what_the_record_holds(monkeypatch)
 
         assert (counts["items"], counts["legacy"]) == (1, 0)
         header = wl.read_conductor(CONDUCTOR)
-        assert header is not None and header.created_total == 1
+        # A trusted header's count is a floor: 7 stays 7, 0 comes up to 1.
+        assert header is not None and header.created_total == max(stale, 1)
     # The rebuilt counter is live: the next create lands and bumps it.
     wl.apply_conductor_action(CONDUCTOR, "create", title="second", acceptance={})
     assert wl.read_conductor(CONDUCTOR).created_total == 2
@@ -3630,6 +3633,7 @@ def test_a_long_board_folds_to_its_open_items_plus_the_closed_window() -> None:
         "rejected": 0,
         "abandoned": 0,
         "in_round": 300 - window,
+        "baseline_ids": [],
     }
     assert set(state["tombstones"]) == set(ids[: 300 - window])
 
@@ -3714,6 +3718,152 @@ def test_the_tombstone_set_is_capped(monkeypatch) -> None:
     state, ids = _create_close_board(10)
     assert list(state["tombstones"]) == ids[4:9]
     assert state["forgotten"]["items"] == 9
+
+
+def test_a_forgotten_baseline_item_is_not_resurrected_past_the_tombstone_cap(
+    monkeypatch,
+) -> None:
+    """An item the log never created arrives by BASELINE, and a later baseline for
+    the same id (a worker's report, folded after the conductor's units) would
+    materialise it again once its tombstone was evicted. Such an id has no create to
+    fall back on, so the cap evicts the ids of created items first."""
+    monkeypatch.setattr(projection, "WORK_TOMBSTONE_LIMIT", 5)
+    monkeypatch.setattr(projection, "WORK_CLOSED_WINDOW", 1)
+    state = projection._work_start()
+    projection._work_bind_slot(state, "member-board")
+    legacy = "it_legacy00"
+    projection._work_step(
+        state,
+        _work_entry(
+            seq=1,
+            time_ms=1789999990000,
+            actor="conductor",
+            action="close",
+            item_id=legacy,
+            baseline=True,
+            title="legacy",
+            state="accepted",
+            event_kind="close",
+            event="accepted",
+        ),
+    )
+    seq = 1
+    for index in range(10):
+        item_id = f"it_{index:08x}"
+        steps = (("create", {"title": f"t{index}"}), ("close", {"state": "accepted"}))
+        for action, extra in steps:
+            seq += 1
+            projection._work_step(
+                state,
+                _work_entry(
+                    seq=seq,
+                    time_ms=1790000000000 + seq,
+                    actor="conductor",
+                    action=action,
+                    item_id=item_id,
+                    event_kind=action,
+                    event=action,
+                    **extra,
+                ),
+            )
+    assert legacy in state["tombstones"]
+    assert len(state["tombstones"]) == 5
+    created = state["forgotten"]["created"]
+    projection._work_step(
+        state,
+        _work_entry(
+            seq=1,
+            time_ms=1789999980000,
+            actor="worker",
+            action="report",
+            item_id=legacy,
+            baseline=True,
+            title="legacy",
+            state="open",
+            summary="late",
+            event_kind="report",
+            event="late",
+        ),
+    )
+    assert legacy not in state["items"]
+    assert state["forgotten"]["created"] == created
+
+
+def test_a_forgotten_created_item_whose_stamp_failed_is_not_resurrected(monkeypatch) -> None:
+    """A created item whose recorded stamp failed carries a baseline on its next
+    mutation, the conductor's bind, and on a worker's report after it. The worker's
+    unit folds after the conductor's, so once the item is closed and forgotten that
+    report arrives last; its tombstone must outlive the cap, or the report brings the
+    item back as open and counts its create twice."""
+    monkeypatch.setattr(projection, "WORK_TOMBSTONE_LIMIT", 5)
+    monkeypatch.setattr(projection, "WORK_CLOSED_WINDOW", 1)
+    state = projection._work_start()
+    projection._work_bind_slot(state, "member-board")
+    target = "it_unstamped"
+    conductor_steps = (
+        ("create", {"title": "t"}),
+        ("bind", {"baseline": True, "title": "t", "worker_session_key": "worker-1"}),
+        ("close", {"state": "accepted"}),
+    )
+    seq = 0
+    for action, extra in conductor_steps:
+        seq += 1
+        projection._work_step(
+            state,
+            _work_entry(
+                seq=seq,
+                time_ms=1790000000000 + seq,
+                actor="conductor",
+                action=action,
+                item_id=target,
+                event_kind=action,
+                event=action,
+                **extra,
+            ),
+        )
+        if action == "bind":
+            # The marker is the fold's own: the rendered item does not carry it.
+            (held,) = projection._work_render(state)["items"]
+            assert "_unrecorded" not in held
+    for index in range(10):
+        item_id = f"it_{index:08x}"
+        steps = (("create", {"title": f"t{index}"}), ("close", {"state": "accepted"}))
+        for action, extra in steps:
+            seq += 1
+            projection._work_step(
+                state,
+                _work_entry(
+                    seq=seq,
+                    time_ms=1790000000000 + seq,
+                    actor="conductor",
+                    action=action,
+                    item_id=item_id,
+                    event_kind=action,
+                    event=action,
+                    **extra,
+                ),
+            )
+    assert target in state["tombstones"]
+    assert len(state["tombstones"]) == 5
+    created = state["forgotten"]["created"]
+    projection._work_step(
+        state,
+        _work_entry(
+            seq=1,
+            time_ms=1790000000002,
+            actor="worker",
+            action="report",
+            item_id=target,
+            baseline=True,
+            title="t",
+            state="open",
+            summary="late",
+            event_kind="report",
+            event="late",
+        ),
+    )
+    assert target not in state["items"]
+    assert state["forgotten"]["created"] == created
 
 
 def test_a_create_reusing_a_forgotten_id_is_a_new_item() -> None:
@@ -3820,6 +3970,104 @@ def test_a_closed_unrecorded_legacy_record_is_added_not_folded_in_a_rebuild(
     header = wl.read_conductor(CONDUCTOR)
     # The fold's five creates plus the one legacy record the log never held.
     assert header is not None and header.created_total == 6
+
+
+def test_a_dirty_rebuild_keeps_a_recorded_open_record_older_than_the_log(monkeypatch) -> None:
+    """Retention pruned the unit holding a recorded open item's create, so the board's
+    first surviving entry is newer than the item. On a dirty board the rebuild does not
+    refuse a fold behind the cache, and the record must not be unlinked: the log cannot
+    judge it, so it is kept as the cache holds it."""
+    fold = _rendered(CONDUCTOR, "it_0000abcd")
+    fold["conductor"]["first_entry_at"] = "2099-01-01T00:00:00+00:00"
+    monkeypatch.setattr(
+        projection,
+        "read_slot_projection",
+        lambda slot, name, **_kw: SimpleNamespace(value=fold if name == "work" else {}),
+    )
+    wl.ensure_conductor(CONDUCTOR, goal="ship it")
+    item = wl.apply_conductor_action(CONDUCTOR, "create", title="pruned", acceptance={})["item"]
+    wl.mark_item_recorded(CONDUCTOR, item.item_id)
+    before = wl.item_path(CONDUCTOR, item.item_id).read_bytes()
+    wl.mark_cache_dirty(CONDUCTOR, "an unrecorded write could not be undone")
+
+    counts = wl.rebuild_from_projection(CONDUCTOR)
+
+    assert counts["removed"] == 0
+    assert counts["legacy"] == 0
+    assert wl.item_path(CONDUCTOR, item.item_id).read_bytes() == before
+
+
+def test_a_rebuild_keeps_the_binding_of_a_forgotten_record_it_keeps(monkeypatch) -> None:
+    """A worker still bound to a closed item the fold forgot keeps its binding: the
+    rebuild keeps the record, so it keeps the binding pointing at it too, and the
+    worker's brief still resolves."""
+    fold = _fold_with_one_closed(monkeypatch)
+    fold["conductor"]["first_entry_at"] = "2000-01-01T00:00:00"
+    wl.ensure_conductor(CONDUCTOR, goal="ship it")
+    item = wl.apply_conductor_action(CONDUCTOR, "create", title="old", acceptance={})["item"]
+    wl.mark_item_recorded(CONDUCTOR, item.item_id)
+    wl.apply_conductor_action(CONDUCTOR, "bind", item_id=item.item_id, worker_session_key=WORKER)
+    wl.apply_conductor_action(CONDUCTOR, "close", item_id=item.item_id, state="accepted")
+    assert wl.read_binding(WORKER) == (CONDUCTOR, item.item_id)
+
+    counts = wl.rebuild_from_projection(CONDUCTOR)
+
+    assert counts["removed"] == 0
+    assert wl.item_path(CONDUCTOR, item.item_id).exists()
+    assert wl.read_binding(WORKER) == (CONDUCTOR, item.item_id)
+
+
+def test_a_forgotten_baseline_record_whose_stamp_failed_is_counted_once(monkeypatch) -> None:
+    """A legacy record's baseline landed in the log, its recorded stamp then failed, and
+    the fold let it go once closed: the record still reads unrecorded and predates the
+    epoch, yet ``forgotten.created`` already counts it. The fold names it among its
+    ``baseline_ids``, so the rebuild keeps it as forgotten and does not add it again."""
+    fold = _fold_with_one_closed(monkeypatch)
+    fold["conductor"]["first_entry_at"] = "2099-01-01T00:00:00+00:00"
+    wl.ensure_conductor(CONDUCTOR, goal="ship it")
+    folded_legacy = _closed_unrecorded("legacy")
+    fold["forgotten"]["baseline_ids"] = [folded_legacy]
+
+    counts = wl.rebuild_from_projection(CONDUCTOR)
+
+    assert counts["removed"] == 0
+    assert counts["legacy"] == 0
+    assert wl.item_path(CONDUCTOR, folded_legacy).exists()
+    header = wl.read_conductor(CONDUCTOR)
+    # The fold's five creates, the forgotten baseline record among them.
+    assert header is not None and header.created_total == 5
+
+
+def test_the_fold_names_its_forgotten_baseline_items(monkeypatch) -> None:
+    """The rendered ``forgotten`` block lists the ids whose tombstones are protected,
+    and only those."""
+    monkeypatch.setattr(projection, "WORK_CLOSED_WINDOW", 1)
+    state = projection._work_start()
+    projection._work_bind_slot(state, "member-board")
+    steps = (
+        ("it_legacy00", "close", {"baseline": True, "title": "legacy", "state": "accepted"}),
+        ("it_00000001", "create", {"title": "a"}),
+        ("it_00000001", "close", {"state": "accepted"}),
+        ("it_00000002", "create", {"title": "b"}),
+        ("it_00000002", "close", {"state": "accepted"}),
+    )
+    for seq, (item_id, action, extra) in enumerate(steps, start=1):
+        projection._work_step(
+            state,
+            _work_entry(
+                seq=seq,
+                time_ms=1790000000000 + seq,
+                actor="conductor",
+                action=action,
+                item_id=item_id,
+                event_kind=action,
+                event=action,
+                **extra,
+            ),
+        )
+    forgotten = projection._work_render(state)["forgotten"]
+    assert forgotten["baseline_ids"] == ["it_legacy00"]
+    assert forgotten["items"] == 2
 
 
 def test_a_recorded_first_item_the_fold_forgot_is_counted_once(monkeypatch) -> None:

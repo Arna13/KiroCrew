@@ -318,8 +318,8 @@ def test_the_column_head_shows_the_whole_state_share_not_just_held_cards() -> No
 def test_the_items_tile_and_added_this_round_count_forgotten_items() -> None:
     """The ``items`` tile and ``+N in round`` cover the whole board, like the total.
 
-    Counted from held items only, a 300-item board read "299 of 300 settled · +2 in
-    round 1" beside an ``items`` tile of 2.
+    A 300-item board holding two items shows 300 on the tile and in the round
+    line, not the 2 it holds.
     """
     view = _view([_item("it_0", "open"), _item("it_1", "accepted")])
     view["forgotten"] = {

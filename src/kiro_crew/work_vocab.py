@@ -69,8 +69,10 @@ WORK_STORED_ITEM_LIMIT: int = 256
 WORK_CLOSED_WINDOW: int = 32
 #: Ids of items the ``work`` fold has forgotten, oldest first, kept so an entry for one
 #: that is folded late (a worker report in a unit read after the close) is recognised
-#: and dropped instead of parked. Ids only; past the cap the oldest id goes first, and
-#: a late entry for an id past it parks and counts in ``omitted`` like any unknown id.
+#: and dropped instead of parked. Ids only; past the cap the oldest id of a CREATED item
+#: goes first, and a late entry for an id past it parks and counts in ``omitted`` like
+#: any unknown id. A baseline-born id goes only once the set holds nothing else, since a
+#: late baseline for one would materialise the item again.
 WORK_TOMBSTONE_LIMIT: int = 4096
 #: Fields a conductor action may set on an item. What the write route logs from
 #: the committed item is what the fold applies to the rebuilt one; the two read
@@ -194,6 +196,9 @@ class WorkBoardForgotten(TypedDict):
     #: Forgotten items created in the board's current round, so "added this round"
     #: still counts them. Zeroed when the round moves.
     in_round: int
+    #: Ids of forgotten items a later baseline could name (their tombstones are
+    #: protected), so a rebuild counts such a record once. Not a count.
+    baseline_ids: NotRequired[list[str]]
 
 
 def work_event_id(ts: str, item_id: str, kind: str, text: str, *, status: str | None = None) -> str:
