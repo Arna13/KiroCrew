@@ -262,7 +262,11 @@ def _url_payload_command(n: int) -> str:
 #: MCP server) parses a large hosts file in the call instead of refusing as
 #: pending with no retry coming. One branch, reusing ``atomic_write.on_event_loop``,
 #: and the docstring and comment naming it; the on-loop path is unchanged.
-_PACKAGE_LINE_BUDGET = 28_872
+#:
+#: Raised again, from 28,872, for the ``engines`` leaf in ``paths.py``: the KAS
+#: engine bundle the gateway installs and later executes joins the file-tool floor
+#: beside ``playwright-cli`` -- one entry and its reason. No matcher moved.
+_PACKAGE_LINE_BUDGET = 28_875
 
 #: Ceiling on any ONE file in the package. This is what the bound is really for --
 #: a package total says nothing about a single file growing back into a second
