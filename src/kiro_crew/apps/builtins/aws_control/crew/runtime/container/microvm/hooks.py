@@ -109,19 +109,38 @@ PAYLOAD_SEEN = f"{STATE_DIR}/payload-seen.json"
 BOOT_STATE = f"{STATE_DIR}/boot.json"
 
 AGENT_BIN = _guest_path(USR, "bin", "amazon-ssm-agent")
-#: Where the SSM agent publishes the managed node's role credentials. It writes
-#: them under the HOME of the process that runs it, and this image sets
-#: ``HOME=/var/lib/crew`` -- so the obvious ``/root/.aws/credentials`` is the
-#: WRONG path here and would have stalled the boot at the credential wait once
-#: registration began working. Both are checked, because the agent's own HOME is
-#: the image's to change.
-SHARED_CREDS_CANDIDATES = (
-    os.path.join(os.environ.get("HOME", "/root"), ".aws", "credentials"),
-    "/root/.aws/credentials",
-    _guest_path(VAR, "lib", "crew", ".aws", "credentials"),
-)
+
 #: The login user the image's crew processes run as (``Dockerfile``: ``USER crew``).
 CREW_USER = "crew"
+
+#: The crew user's own home, which the base image creates and chowns to that uid.
+#: Named here so one place can say what must NOT be under it.
+CREW_HOME = _guest_path(VAR, "lib", CREW_USER)
+
+#: HOME for the SSM agent, and only for it. ``Dockerfile.microvm`` creates it
+#: ``0700 root:root``, which is the whole point: with ``Profile.ShareCreds`` the
+#: agent publishes the managed node's role credentials under its own HOME, and the
+#: image's process-wide ``HOME`` is the crew user's own directory -- a uid the crew
+#: owns, so it could read that file and replace the ``.aws`` directory before a
+#: rotation. That role reads every crew's secret under the lane's prefix, so the
+#: credential file must sit where the crew uid can neither traverse nor write.
+#:
+#: Outside ``/var/lib/amazon/ssm`` deliberately. Run Command stages a script under
+#: the agent's orchestration root there and runs it as ``sudo -u crew``, so that
+#: tree has to stay traversable by the crew uid and cannot hold the credential.
+AGENT_HOME = _guest_path(VAR, "lib", "microvm-agent-home")
+
+#: Where the SSM agent publishes the managed node's role credentials, in the order
+#: the guest looks. Both are root-only directories: :data:`AGENT_HOME` is what
+#: :func:`agent_env` hands the agent, and ``/root`` is where it writes if HOME ever
+#: reaches it unset -- a program that takes its home from the passwd entry rather
+#: than from the environment. Nothing under :data:`CREW_HOME` belongs here, and
+#: ``test_microvm_guest_hardening`` is what keeps one from being added: it also
+#: requires the image to gate every directory named here.
+SHARED_CREDS_CANDIDATES = (
+    os.path.join(AGENT_HOME, ".aws", "credentials"),
+    "/root/.aws/credentials",
+)
 
 _lock = threading.Lock()
 _children: "dict[str, subprocess.Popen]" = {}
@@ -254,6 +273,9 @@ def register_agent(activation_id: str, activation_code: str, region: str) -> Non
             encoding="utf-8",
             check=False,
             timeout=50,
+            # The agent's own root-only HOME here too, so no step of the
+            # registration can put a credential under the crew user's home.
+            env=agent_env(),
         )
     except subprocess.TimeoutExpired:
         log("ssm.register", rc="timeout", seconds=round(time.time() - started, 2))
@@ -315,6 +337,26 @@ def spawn(
         _children[name] = proc
 
 
+def agent_env() -> "dict[str, str]":
+    """The environment the SSM agent runs with, whose only job is ``HOME``.
+
+    The agent is root and publishes the managed node's role credentials under its
+    HOME. The image's process-wide ``HOME`` is the crew user's own directory, so an
+    agent that inherits it writes the lane's strongest credential into a directory
+    the crew uid owns. :data:`AGENT_HOME` is root-only, and this function is the
+    one place that decides which HOME the agent gets.
+
+    ``AWS_SHARED_CREDENTIALS_FILE`` is dropped: :func:`wait_for_shared_credentials`
+    sets it on this process so the guest's own boto3 reads the file the agent
+    wrote, and handing that name back to the agent would let a value this process
+    chose decide where the agent writes.
+    """
+    env = dict(os.environ)
+    env["HOME"] = AGENT_HOME
+    env.pop("AWS_SHARED_CREDENTIALS_FILE", None)
+    return env
+
+
 # ── secrets ──────────────────────────────────────────────────────────────────
 
 
@@ -368,6 +410,84 @@ def read_secret(secret_id: str, region: str) -> str:
 #: out. The manifest in it is what says which crew this image IS.
 BUNDLE_DIR = "/app/crew-bundle"  # noqa: S108 - an image path, not a temp dir
 
+#: Names the crew's own process tree inherits from PID 1, one by one.
+#:
+#: PID 1 here is root, it holds the registration code in its argv for the length
+#: of one call, and :func:`wait_for_shared_credentials` points
+#: ``AWS_SHARED_CREDENTIALS_FILE`` at the managed node's role credential -- a role
+#: that reads every crew's secret under the lane's prefix. The crew is the one
+#: child that runs as another uid, so what it inherits is a decision rather than
+#: a default, and an allowlist is the only form of that decision which stays
+#: correct when a name nobody here anticipated appears in root's environment.
+#:
+#: The locale, path and Python names are what any child needs to run at all. The
+#: certificate names are read by the model subprocess's own HTTP stack, so a crew
+#: in an environment with a private trust store needs them to reach the model.
+SUPERVISOR_ENV_ALLOWLIST = (
+    "PATH",
+    "HOME",
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE",
+    "TZ",
+    "TMPDIR",
+    "USER",
+    "LOGNAME",
+    "SHELL",
+    "PYTHONUNBUFFERED",
+    "PYTHONDONTWRITEBYTECODE",
+    "SSL_CERT_FILE",
+    "SSL_CERT_DIR",
+    "REQUESTS_CA_BUNDLE",
+    "CURL_CA_BUNDLE",
+    "KIROCREW_HOME",
+    "AWS_REGION",
+    "AWS_DEFAULT_REGION",
+)
+
+#: Prefix carried in whole: the container's own settings contract, which
+#: ``container/common/config.py`` reads and ``Dockerfile``/``Dockerfile.microvm``
+#: bake. Every name under it is the image's or this function's to set, and none of
+#: them is a credential -- ``SMC_CONTROL_SECRET`` is passed as an argument to
+#: :func:`supervisor_env` and set explicitly there.
+SUPERVISOR_ENV_PREFIX = "SMC_"
+
+#: Names refused even though their prefix is carried, because they name the AWS
+#: identity the SSM agent published for the ROOT side of this guest. The crew has
+#: no call to make with it: on this lane nothing in the crew's tree reads a
+#: secret, a bucket or a key, and the whole point of the agent's root-only HOME is
+#: that this credential is not the crew's to use.
+SUPERVISOR_ENV_DENYLIST = (
+    "AWS_SHARED_CREDENTIALS_FILE",
+    "AWS_CONFIG_FILE",
+    "AWS_PROFILE",
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SECRET_ACCESS_KEY",
+    "AWS_SESSION_TOKEN",
+    "AWS_SECURITY_TOKEN",
+    "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
+    "AWS_CONTAINER_CREDENTIALS_FULL_URI",
+    "AWS_CONTAINER_AUTHORIZATION_TOKEN",
+    "AWS_WEB_IDENTITY_TOKEN_FILE",
+    "AWS_ROLE_ARN",
+)
+
+
+def inherited_env() -> "dict[str, str]":
+    """The allowlisted slice of this process's environment, and nothing else.
+
+    Names absent from :data:`os.environ` are absent from the result rather than
+    empty, so a child cannot tell "set to nothing" from "not set" differently from
+    how it would without this function.
+    """
+    picked = {
+        name: value
+        for name, value in os.environ.items()
+        if (name in SUPERVISOR_ENV_ALLOWLIST or name.startswith(SUPERVISOR_ENV_PREFIX))
+        and name not in SUPERVISOR_ENV_DENYLIST
+    }
+    return picked
+
 
 def bundle_crew_name() -> str:
     """The crew name the image's own manifest declares, or ``""``.
@@ -400,8 +520,12 @@ def supervisor_env(
 
     ``SMC_FRONT_BIND`` is the one value whose answer differs by lane, and it is
     set rather than defaulted: see ``front/__main__``.
+
+    The base is :func:`inherited_env`, an allowlist, rather than this process's
+    whole environment: PID 1 is root on a guest whose root identity reads every
+    crew's secret under the lane's prefix, and the crew runs as another uid.
     """
-    env = dict(os.environ)
+    env = inherited_env()
     env.update(
         # The BUNDLE's crew name, not the launch tag. The supervisor checks the
         # name it is given against the bundle's manifest and refuses when they
@@ -413,9 +537,9 @@ def supervisor_env(
         SMC_CREW_NAME=bundle_crew_name() or str(payload.get("tag") or ""),
         # Strict auth, asserted here as well as baked into the image's own ``ENV``.
         #
-        # Not redundant: this environment starts from ``os.environ``, so the
-        # image's value already arrives -- but a launch that passed its own value
-        # would be in there too, and this line is what makes the guest's answer
+        # Not redundant: the ``SMC_`` prefix is carried in whole, so the image's
+        # value already arrives -- and so would a value the image was built with
+        # at an operator's choosing. This line is what makes the guest's answer
         # the final one. A lane whose compute carries an internet-reachable
         # endpoint and no security group cannot let a caller choose the posture.
         SMC_REQUIRE_AUTH_ALL_ROUTES="1",
@@ -498,6 +622,80 @@ def boot_crew(payload: "dict[str, Any]") -> None:
         write_state(BOOT_STATE, dict(_boot))
 
 
+# ── is this payload for THIS VM? ─────────────────────────────────────────────
+
+#: Image-level names that say which account and region a launch of this image may
+#: name. ``Dockerfile.microvm`` declares them as build args with empty defaults,
+#: so an operator who builds with their own account and region baked gets the
+#: check, and an image built without them keeps the checks that need no pin.
+EXPECTED_ACCOUNT_ENV = "SMC_MICROVM_ACCOUNT"
+EXPECTED_REGION_ENV = "SMC_MICROVM_REGION"
+
+
+def _arn_parts(value: str) -> "tuple[str, str]":
+    """``(region, account)`` of an ARN, and ``("", "")`` for anything that is not one.
+
+    A bare secret NAME is not an ARN and yields nothing, which is a pass rather
+    than a refusal: the lane's own launcher may send either form, and a check that
+    refused names would refuse every launch that uses them.
+    """
+    fields = value.split(":")
+    if len(fields) < 6 or fields[0] != "arn":
+        return "", ""
+    return fields[3], fields[4]
+
+
+def run_payload_verdict(payload: "dict[str, Any]") -> "tuple[bool, str]":
+    """Whether this ``/run`` payload is one of THIS VM's own launches, and why not.
+
+    The hook port is reachable from the internet by anyone holding
+    ``lambda:CreateMicrovmAuthToken`` in the owner's account, the platform presents
+    no credential the guest can check, and ``/run`` is single-shot. So a caller who
+    reaches this route before the platform does hands the VM an activation they
+    minted themselves, the VM registers as a node in THEIR account, and the
+    owner's own launch is answered ``repeat_ignored`` -- with the owner's crew
+    bundle serving to whoever minted the control secret.
+
+    This is the one authentication available to a process that holds no key: the
+    payload must be internally consistent, and it must agree with whatever the
+    image was built knowing.
+
+    * A pinned region refuses a payload, or an ARN inside it, that names another.
+    * A pinned account refuses a payload whose secret ARNs name another.
+    * With or without a pin, a payload naming two accounts or two regions is
+      refused: the lane writes both secrets in one account and one region, so a
+      mixture is a payload assembled from more than one launch.
+
+    The verdict is a fixed code from a closed set, never a value out of the
+    payload: it reaches a log, and this module's logs carry no caller-chosen
+    content.
+    """
+    expected_account = os.environ.get(EXPECTED_ACCOUNT_ENV, "").strip()
+    expected_region = os.environ.get(EXPECTED_REGION_ENV, "").strip()
+
+    regions = set()
+    accounts = set()
+    claimed_region = str(payload.get("region") or "").strip()
+    if claimed_region:
+        regions.add(claimed_region)
+    for key in ("secretRef", "identityRef"):
+        region, account = _arn_parts(str(payload.get(key) or ""))
+        if region:
+            regions.add(region)
+        if account:
+            accounts.add(account)
+
+    if expected_region and any(region != expected_region for region in regions):
+        return False, "region-is-not-this-vm"
+    if expected_account and any(account != expected_account for account in accounts):
+        return False, "account-is-not-this-vm"
+    if len(regions) > 1:
+        return False, "payload-names-two-regions"
+    if len(accounts) > 1:
+        return False, "payload-names-two-accounts"
+    return True, "ok"
+
+
 def handle_run(body: bytes) -> "dict[str, Any]":
     """The real bootstrap, and the one hook that may happen only once.
 
@@ -553,6 +751,15 @@ def _handle_run_once(body: bytes) -> "dict[str, Any]":
         log("run.payload_unreadable", bytes=len(body), error=type(exc).__name__)
         return {"ok": True, "repeat": False}
 
+    # Before anything is written and before the agent is registered: a payload
+    # that is not this VM's own launch gets the same constant answer a repeat
+    # gets, leaves no state behind, and does NOT consume the single-shot marker --
+    # so the owner's real launch, arriving after a stranger's, still boots.
+    for_this_vm, verdict = run_payload_verdict(payload)
+    if not for_this_vm:
+        log("run.payload_refused", verdict=verdict, payload_encoding=encoding)
+        return {"ok": True, "repeat": False}
+
     ssm_block = payload.get("ssm") or {}
     region = str(payload.get("region") or _region)
     # What arrived, as shapes and lengths. "The payload arrived intact" is a
@@ -573,7 +780,8 @@ def _handle_run_once(body: bytes) -> "dict[str, Any]":
 
     log("machine_id.in_effect", machine_id=reset_machine_id())
     register_agent(str(ssm_block.get("id") or ""), str(ssm_block.get("code") or ""), region)
-    spawn("ssm-agent", [AGENT_BIN])
+    # With the agent's own HOME, never this process's. See :func:`agent_env`.
+    spawn("ssm-agent", [AGENT_BIN], env=agent_env())
     _managed_instance_id = read_managed_instance_id()
     log("run.registered", managed_instance_id=_managed_instance_id, payload_encoding=encoding)
 
@@ -716,8 +924,40 @@ class Handler(BaseHTTPRequestHandler):
     sys_version = ""
     protocol_version = "HTTP/1.1"
 
+    #: The one body every answer that is not a hook's own carries. A dict rather
+    #: than bytes so :meth:`_reply` serialises it the same way it serialises a
+    #: hook's answer, and the two are indistinguishable on the wire.
+    CONSTANT_REFUSAL = {"ok": False}
+
     def send_response(self, code: int, message: Optional[str] = None) -> None:  # noqa: A003
         self.send_response_only(code, message)
+
+    def send_error(
+        self, code: int, message: Optional[str] = None, explain: Optional[str] = None
+    ) -> None:
+        """The constant answer for everything the stdlib would describe.
+
+        ``http.server`` reaches here for a method no ``do_*`` handles -- OPTIONS,
+        PATCH, TRACE and anything else a scanner sends -- and for a request line or
+        version it cannot parse, and its own reply is an HTML page naming the
+        method, the path and the reason. That page is a description of the guest:
+        it tells a caller which methods this listener implements and distinguishes
+        a malformed request from an unimplemented one.
+
+        So every one of them gets the same status and the same body as an unknown
+        path. ``message`` and ``explain`` are read and dropped deliberately: they
+        are the stdlib's description of the caller's own request, and nothing on
+        this port describes anything back.
+
+        A reply the stdlib cannot send at all -- a request line so broken that the
+        version is unknown -- falls back to its own handling, which closes the
+        connection. Nothing is disclosed by a connection that ends.
+        """
+        del code, message, explain
+        try:
+            self._reply(404, dict(self.CONSTANT_REFUSAL))
+        except Exception:  # noqa: BLE001 - a half-written reply must still close
+            self.close_connection = True
 
     def log_message(self, fmt: str, *args: Any) -> None:
         # Hook events are logged by their handlers through ``log``. An access log
@@ -749,13 +989,20 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802
         # No hook is a GET, so every GET -- including the front and dashboard
         # paths a probe will try -- gets the one constant answer.
-        self._reply(404, {"ok": False})
+        self._reply(404, dict(self.CONSTANT_REFUSAL))
 
     def do_POST(self) -> None:  # noqa: N802
         name = self._route()
         body = self._read_body()
         if name == "run":
-            self._reply(200, handle_run(body))
+            # The verdict is the guest's; the WIRE answer is the same constant
+            # every other hook gets. A body carrying ``repeat`` would tell a
+            # caller this listener cannot authenticate whether a crew is already
+            # up -- the one fact the whole module is arranged not to disclose --
+            # and a refused payload would be distinguishable from an accepted
+            # one. What happened is in the log, which only the owner reads.
+            handle_run(body)
+            self._reply(200, {"ok": True})
             return
         if name in ("ready", "validate", "resume", "suspend"):
             # Fixed replies. ``ready`` answering 200 is what tells the build
@@ -807,13 +1054,13 @@ class Handler(BaseHTTPRequestHandler):
             # business and is in the log above.
             self._reply(200, {"ok": True})
             return
-        self._reply(404, {"ok": False})
+        self._reply(404, dict(self.CONSTANT_REFUSAL))
 
     def do_PUT(self) -> None:  # noqa: N802
-        self._reply(404, {"ok": False})
+        self._reply(404, dict(self.CONSTANT_REFUSAL))
 
     def do_DELETE(self) -> None:  # noqa: N802
-        self._reply(404, {"ok": False})
+        self._reply(404, dict(self.CONSTANT_REFUSAL))
 
     def do_HEAD(self) -> None:  # noqa: N802
         self.send_response(404)
