@@ -648,6 +648,7 @@ _SESSION_ANSWERS: dict[str, Any] = {
     "set_active_dashboard_slots": None,
     "set_approval_policy": None,
     "set_compacting_callback": None,
+    "unlanded_marker_pending": False,
     "stop_generation": 0,
 }
 #: The real in-memory link stores ``chat_test_helpers._make_state`` builds,

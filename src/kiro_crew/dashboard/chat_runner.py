@@ -10983,6 +10983,15 @@ async def _run_chat(
         # next turn.
         if is_new and not resumed:
             state.sessions.mark_first_turn_history_owed(session_key)
+        if state.sessions.unlanded_marker_pending(session_key) is True:
+            # The sid's unlanded marker must land before the turn does, or a
+            # crash in the debounce window keeps the sid without it. Awaited
+            # off the loop; a failed write fails the turn before it is sent,
+            # and the turn's own finally hands the session back. A marker left
+            # by an earlier turn whose write failed is flushed again here, as a
+            # warm retry is not ``is_new``. Only a backend whose resume honours
+            # the marker ever carries one, so other turns await nothing.
+            await state.sessions.aflush()
         # AcpProvider exposes an exact bool; ``is True`` prevents a truthy mock
         # or fallback from authorizing replay. KAS and every future backend fail
         # closed even if they populate a familiar ``tool_name``.
