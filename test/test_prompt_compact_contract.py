@@ -12,7 +12,8 @@ from pathlib import Path
 
 import pytest
 
-from kiro_crew.context_assembly.sections import computer_use_block
+from kiro_crew.config.sections import DashboardConfig
+from kiro_crew.context_assembly.sections import computer_use_block, open_file_block
 
 ROOT = Path(__file__).resolve().parents[1]
 CONFIG = ROOT / "src" / "kiro_crew" / "config"
@@ -20,12 +21,14 @@ CONFIG = ROOT / "src" / "kiro_crew" / "config"
 # A maintainer may raise a budget in a reviewed change when a new rule earns
 # its space. Preserve the operational clauses below rather than cutting them
 # to fit; their tests, not a size limit, check the retained text contracts.
-# Measured on the prompt with its Computer Use slot filled by the full section,
-# so the section's bytes still count against the budget after moving into
+# Measured on the prompt with its Computer Use slot filled by the full section
+# and its open-file slot filled as `dashboard.auto_open_agent_files`'s default
+# fills it, so both blocks' bytes still count against the budget after living in
 # `context_assembly/sections.py`. The `{{MAX_SUBAGENTS}}` and `{{WIDGET_BLOCK}}`
 # slots are still counted as their raw tokens.
 PROMPT_BYTE_CEILINGS = {"prompt.md": 40_850}
 _COMPUTER_USE_TOKEN = "{{COMPUTER_USE_BLOCK}}"
+_OPEN_FILE_TOKEN = "{{OPEN_FILE_BLOCK}}"
 
 
 def _read(name: str = "prompt.md") -> str:
@@ -33,8 +36,13 @@ def _read(name: str = "prompt.md") -> str:
 
 
 def _resolved(name: str = "prompt.md", *, mounted: bool = True) -> str:
-    """The prompt with its Computer Use slot filled as a session gets it."""
-    return _read(name).replace(_COMPUTER_USE_TOKEN, computer_use_block(mounted))
+    """The prompt with its Computer Use and open-file slots filled as a session gets them."""
+    default_open = DashboardConfig().auto_open_agent_files
+    return (
+        _read(name)
+        .replace(_COMPUTER_USE_TOKEN, computer_use_block(mounted))
+        .replace(_OPEN_FILE_TOKEN, open_file_block(default_open))
+    )
 
 
 def _section(text: str, heading: str) -> str:
@@ -61,6 +69,7 @@ def test_each_selected_prompt_stays_under_its_byte_ceiling(name: str) -> None:
 def test_template_slots_remain_complete_and_unique(name: str) -> None:
     text = _read(name)
     assert re.findall(r"\{\{([A-Z_]+)\}\}", text) == [
+        "OPEN_FILE_BLOCK",
         "MAX_SUBAGENTS",
         "COMPUTER_USE_BLOCK",
         "WIDGET_BLOCK",

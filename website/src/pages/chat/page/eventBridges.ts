@@ -270,16 +270,15 @@ function readAppliedOpenFiles(key: string): string[] {
 
 /**
  * `dashboard.auto_open_agent_files` as the bridge reads it: `null` while the
- * dashboard config read is in flight (so an opted-out user never sees an open
- * before the value arrives), the stored value once it lands, and the default
- * (on) when the read failed or the gateway does not send the key.
+ * dashboard config read is in flight, the stored value once it lands, and the
+ * default (off) when the read failed or the gateway does not send the key.
  */
 export function agentOpenFilesEnabled(
   cfg: { auto_open_agent_files?: boolean } | undefined,
   readFailed: boolean,
 ): boolean | null {
-  if (cfg !== undefined) return cfg.auto_open_agent_files !== false
-  return readFailed ? true : null
+  if (cfg !== undefined) return cfg.auto_open_agent_files === true
+  return readFailed ? false : null
 }
 
 /**

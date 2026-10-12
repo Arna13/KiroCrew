@@ -4391,7 +4391,7 @@ scroll shell) and the owners under `pages/chat/page/`:
 | `composerStaging.ts` | What the composer holds besides its text (staged files, pastes, session references, the snip, upload notices); folder chips derived from `@rel/` tokens |
 | `composerFileMentions.ts` | Caret insertion of file and folder mentions, file-chip ↔ alias reconciliation, the chip removes |
 | `launchIntake.ts` | Text arriving from outside a keystroke: Redux `pendingInput`, a popout's `?prefill=`, the error hand-off FIFO, an app's launch intent, the auto-send those arm, a widget's prefill |
-| `eventBridges.ts` | Window and Electron events: the Web Preview feed, built-in browser reachability, run-in-terminal and the redaction cards' terminal / composer / reload requests; cold file-tab reads |
+| `eventBridges.ts` | Window and Electron events: the Web Preview feed, built-in browser reachability, run-in-terminal and the redaction cards' terminal / composer / reload requests; cold file-tab reads; the agent open-file marker (`useAgentOpenFileBridge`) |
 | `busyTurnControls.ts` | Steer, question-card answers, stop and the queued-message cards on a busy slot |
 | `turnRecovery.ts` | Continue and the fixes an error row offers |
 | `transcriptRows.ts` | Turn grouping, the latched running flag, stable row keys and the app-bearing turn's anchor |
@@ -4411,6 +4411,55 @@ ordered against each other (the signed-token intake strips the whole query, so
 `website/src/test/ChatPage.pageOwners.test.ts` pins the owners' call sequence
 with that inline effect's place in it, the facade exports, that no owner imports
 the facade or switches slots, and that nothing outside `pages/chat/page/` except ChatPage imports the owners (owners may import each other).
+
+**Agent open-file marker** (`utils/detectOpenFileMarker.ts`, `useAgentOpenFileBridge` in
+`pages/chat/page/eventBridges.ts`) — a hidden `<!-- kirocrew:open-file path="..." -->`
+comment in the NEWEST assistant message opens that file in the side panel's Files
+tab, as if the user had clicked its path. User text, tool rows, older assistant
+messages and a marker shown inside a code fence or inline code span are ignored;
+with several markers the last one wins. The path must be absolute (POSIX or a
+Windows drive path): relative, `~`, a root of two separators in any mix (UNC and
+device shapes such as `//host`, `/\host`, `\\?\`), `?` and `*`, a `:` beyond a
+drive letter, the `/net` and `/afs` automount roots, any empty, `.` or `..`
+segment (only a path in normal form is accepted), control
+characters and paths over 4096 characters are refused by the parser, before any
+read. Only file kinds whose viewer makes no network request of its own open this
+way (`AGENT_OPENABLE_FILE_TYPES`, by `detectFileType`: Markdown and text, code,
+JSON, JSONL, CSV and image files); an HTML file, whose sandboxed preview still
+loads images and styles from other hosts, and every other kind (PDF, Office,
+spreadsheet, media, Excalidraw) open only on a click, and their marker neither
+reads nor records anything. The tab opens with `sourceOnly` set
+(`PanelTab.sourceOnly`, persisted with the tab), which holds a Markdown or text
+file in the source editor: the rendered preview runs the file's interactive
+widgets, so it renders only once the user picks Preview (or Cancel, which returns
+to it), and a reload or remount restores the tab still held; a hold that arrives
+on a panel already showing that file's preview switches it to the source view in
+the same render, and `MarkdownPanel` clears the hold only when the user picks
+Preview or Cancel. The bridge calls the page's `handleFileOpen` (the path-chip click handler),
+so the read is the owner-gated `GET /api/file-read` with its sensitive-path
+refusal and redaction unchanged, and a refused read shows that handler's existing
+error notice. The open passes `exact=1` to `/api/file-read` and `/api/file-diff`,
+so auto-open only opens regular files at the exact path named: the gateway opens
+the name without following a link at it and checks the open descriptor, which
+must be a regular file whose kernel path (`pinned_fs.fd_real_path`) equals the
+requested path (`_open_exact_regular_file` in `file_api/pinned_io.py`). Anything
+else answers 422 `not_exact`, and the dashboard then does nothing: no tab, no
+notice, no IDE hand-off. Without the flag both endpoints answer as before, and a
+click never sends it. Each (slot, path) opens at most once: the applied paths are written
+to `mc-agent-open-file-applied:<slot>` (the newest 200, collected with the slot's
+other keys) BEFORE the read starts, so a reload never reopens a closed tab and a
+refused read is not retried; when that write fails nothing opens. Gated on
+`dashboard.auto_open_agent_files` (default false, Settings → Chat → Side Panel);
+nothing happens until the dashboard config read settles, and a failed read
+resolves to the default. The system prompt documents the marker in one line,
+through its `{{OPEN_FILE_BLOCK}}` slot (`context_assembly/sections.open_file_block`):
+present only on a dashboard surface with the setting on, and with it off the prompt
+is byte for byte the one without the slot (`test/test_context_open_file_block.py`).
+Pinned by `website/src/test/detectOpenFileMarker.test.ts`,
+`website/src/test/agentOpenFileBridge.test.tsx`,
+`website/src/test/MarkdownPanel.agentOpenFile.test.tsx`, the source-only
+persistence case in `website/src/test/usePanelTabs.test.ts` and, for the
+`exact=1` admission, `test/test_file_read_exact.py`.
 
 ### Composer file uploads
 

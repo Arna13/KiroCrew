@@ -3,8 +3,9 @@
 These renderers produce the deterministic blocks every session carries whatever its
 memory holds -- the critical-rules contract, the runtime identity, the user profile,
 the reply-style preferences, the workspace identity, the runtime refresh a follow-up
-turn needs, the widget pointer an agent prompt's ``{{WIDGET_BLOCK}}`` resolves to and
-the section its ``{{COMPUTER_USE_BLOCK}}`` resolves to. Each takes its inputs as
+turn needs, the widget pointer an agent prompt's ``{{WIDGET_BLOCK}}`` resolves to,
+the section its ``{{COMPUTER_USE_BLOCK}}`` resolves to and the open-file marker line
+its ``{{OPEN_FILE_BLOCK}}`` resolves to. Each takes its inputs as
 arguments and reads no transcript, store or file, so a render is a pure function of
 config and the trusted dispatcher metadata.
 
@@ -571,3 +572,25 @@ def computer_use_block(mounted: bool) -> str:
     short pointer when it is not.
     """
     return _COMPUTER_USE_SECTION if mounted else _COMPUTER_USE_UNAVAILABLE
+
+
+# What an agent prompt's ``{{OPEN_FILE_BLOCK}}`` resolves to on a dashboard surface
+# while ``dashboard.auto_open_agent_files`` is on. The slot sits at the end of the
+# image line, so the block carries its own leading blank line and an unfilled slot
+# leaves that line exactly as it reads without the feature. It counts against
+# ``prompt.md``'s byte budget, ``PROMPT_BYTE_CEILINGS`` in
+# ``test/test_prompt_compact_contract.py``, at the setting's default.
+_OPEN_FILE_LINE = (
+    '\n\nIn a dashboard chat, `<!-- kirocrew:open-file path="/abs/path.md" -->` in '
+    "your reply opens that Markdown, text, code or image file in the side panel "
+    "(absolute paths only, once per file per chat)."
+)
+
+
+def open_file_block(enabled: bool) -> str:
+    """What an agent prompt's ``{{OPEN_FILE_BLOCK}}`` resolves to.
+
+    ``enabled`` is true only on a dashboard surface with
+    ``dashboard.auto_open_agent_files`` on: the marker line then, nothing otherwise.
+    """
+    return _OPEN_FILE_LINE if enabled else ""

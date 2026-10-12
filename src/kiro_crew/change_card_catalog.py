@@ -829,6 +829,7 @@ DASHBOARD_SETTINGS: dict[str, tuple[str, tuple[Any, ...]]] = {
     "chat.link-previews": ("link_previews", _BOOL_VALUES),
     "chat.mcp-apps-in-side-panel": ("mcp_app_panel", _BOOL_VALUES),
     "chat.auto-open-git-in-side-panel": ("auto_open_git_panel", _BOOL_VALUES),
+    "chat.auto-open-agent-files-in-side-panel": ("auto_open_agent_files", _BOOL_VALUES),
     "chat.split-view-session-grid": ("session_grid", _BOOL_VALUES),
     "chat.tail-only-fork": ("tail_fork_enabled", _BOOL_VALUES),
     "chat.restore-sessions": ("restore_sessions", _BOOL_VALUES),

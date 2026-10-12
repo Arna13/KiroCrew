@@ -15460,6 +15460,8 @@
         "auto_add_saved_artifacts": "自动添加已保存的产物",
         "auto_compact_threshold": "自动压缩阈值",
         "auto_ingest_limit_per_scan": "每次扫描的自动摄取上限",
+        "auto_open_agent_files": "在侧边栏中自动打开代理文件",
+        "auto_open_agent_files_hint": "代理的回复要求时，在侧边栏中打开该文件。每个文件在每个聊天中只打开一次。关闭后只有点击文件才会打开。",
         "auto_open_git_panel": "在侧边栏中自动打开 Git",
         "auto_register_project_documents": "自动注册项目文档",
         "background_effort": "后台推理强度",

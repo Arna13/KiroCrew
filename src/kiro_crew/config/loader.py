@@ -3695,6 +3695,7 @@ def _build_dashboard_config(_degraded: set[str], dashboard_data: dict) -> Dashbo
         session_grid=section.get("session_grid"),
         mcp_app_panel=section.get("mcp_app_panel"),
         auto_open_git_panel=section.read("auto_open_git_panel", _safe_bool),
+        auto_open_agent_files=section.read("auto_open_agent_files", _safe_bool),
         session_card_source_links=section.read("session_card_source_links", _safe_bool),
         default_memory_mode=_default_memory_mode_from(section.get("default_memory_mode")),
         widget_density=section.get("widget_density"),

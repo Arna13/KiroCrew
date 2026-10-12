@@ -625,7 +625,7 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
   // default (off) — otherwise a config endpoint that is down would withhold the
   // Git tab itself, which the flag does not govern.
   const autoOpenGitPanelKnown = appPanelCfg !== undefined || appPanelCfgError
-  // On by default: open the file an agent's `kirocrew:open-file` marker names
+  // Opt-in: open the file an agent's `kirocrew:open-file` marker names
   // (dashboard.auto_open_agent_files); see agentOpenFilesEnabled.
   const autoOpenAgentFiles = agentOpenFilesEnabled(appPanelCfg, appPanelCfgError)
   // Tool-call ids already routed to a tab, so re-renders of the same app don't

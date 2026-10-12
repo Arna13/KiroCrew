@@ -824,6 +824,18 @@ export const SETTINGS_REGISTRY: SettingEntry[] =
     "configKey": "session.autocompact_pct"
   },
   {
+    "id": "chat.auto-open-agent-files-in-side-panel",
+    "label": "Auto-Open Agent Files in Side Panel",
+    "labelKey": "pages.settings.chatPanel.auto_open_agent_files",
+    "description": "Open a file in the side panel when the agent's reply asks for it. Each file opens once per chat. Turn this off to open files only by clicking them.",
+    "tab": "chat",
+    "type": "toggle",
+    "occurrence": 1,
+    "params": {
+      "sub": "sidepanel"
+    }
+  },
+  {
     "id": "chat.auto-open-git-in-side-panel",
     "label": "Auto-Open Git in Side Panel",
     "labelKey": "pages.settings.chatPanel.auto_open_git_panel",

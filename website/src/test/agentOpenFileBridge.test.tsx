@@ -220,12 +220,12 @@ describe('agentOpenFilesEnabled', () => {
   it('is unknown while the config read is in flight', () => {
     expect(agentOpenFilesEnabled(undefined, false)).toBeNull()
   })
-  it('follows the stored value, and reads an absent key as on', () => {
+  it('follows the stored value, and reads an absent key as off', () => {
     expect(agentOpenFilesEnabled({ auto_open_agent_files: false }, false)).toBe(false)
     expect(agentOpenFilesEnabled({ auto_open_agent_files: true }, false)).toBe(true)
-    expect(agentOpenFilesEnabled({}, false)).toBe(true)
+    expect(agentOpenFilesEnabled({}, false)).toBe(false)
   })
-  it('resolves a failed read to the default', () => {
-    expect(agentOpenFilesEnabled(undefined, true)).toBe(true)
+  it('resolves a failed read to the default (off)', () => {
+    expect(agentOpenFilesEnabled(undefined, true)).toBe(false)
   })
 })

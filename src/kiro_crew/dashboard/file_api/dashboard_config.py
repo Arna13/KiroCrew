@@ -91,6 +91,7 @@ async def api_dashboard_config(request: web.Request) -> web.Response:
             "link_patterns",
             "mcp_app_panel",
             "auto_open_git_panel",
+            "auto_open_agent_files",
             "folder_suggestions_enabled",
             "topic_tags_enabled",
             "session_card_source_links",
@@ -437,6 +438,20 @@ async def api_dashboard_config(request: web.Request) -> web.Response:
                     status=400,
                 )
             updates["auto_open_git_panel"] = val
+        if "auto_open_agent_files" in body:
+            val = body["auto_open_agent_files"]
+            if not isinstance(val, bool):
+                _sel().log_tool_invocation(
+                    session_key="dashboard", tool_name="dashboard_config_write", outcome="failure"
+                )
+                return web.json_response(
+                    {
+                        "error": "auto_open_agent_files must be a boolean",
+                        "code": "invalid_auto_open_agent_files",
+                    },
+                    status=400,
+                )
+            updates["auto_open_agent_files"] = val
         if "session_card_source_links" in body:
             val = body["session_card_source_links"]
             if not isinstance(val, bool):
@@ -656,6 +671,7 @@ async def api_dashboard_config(request: web.Request) -> web.Response:
             "session_grid": cfg.dashboard.session_grid,
             "mcp_app_panel": cfg.dashboard.mcp_app_panel,
             "auto_open_git_panel": cfg.dashboard.auto_open_git_panel,
+            "auto_open_agent_files": cfg.dashboard.auto_open_agent_files,
             "session_card_source_links": cfg.dashboard.session_card_source_links,
             "session_folder_root": cfg.dashboard.session_folder_root,
             "tail_fork_enabled": cfg.dashboard.tail_fork_enabled,

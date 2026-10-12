@@ -15460,6 +15460,8 @@
         "auto_add_saved_artifacts": "保存されたアーティファクトの自動追加",
         "auto_compact_threshold": "自動圧縮のしきい値",
         "auto_ingest_limit_per_scan": "スキャンごとの自動取り込み上限",
+        "auto_open_agent_files": "エージェントのファイルをサイドパネルで自動的に開く",
+        "auto_open_agent_files_hint": "エージェントの返信が求めたときに、ファイルをサイドパネルで開きます。各ファイルはチャットごとに 1 回だけ開きます。オフにすると、ファイルはクリックしたときだけ開きます。",
         "auto_open_git_panel": "サイドパネルで Git を自動的に開く",
         "auto_register_project_documents": "プロジェクトドキュメントの自動登録",
         "background_effort": "バックグラウンドの推論強度",

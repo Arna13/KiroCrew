@@ -15704,6 +15704,8 @@
         "auto_add_saved_artifacts": "Gespeicherte Artefakte automatisch hinzufügen",
         "auto_compact_threshold": "Schwellenwert für automatische Verdichtung",
         "auto_ingest_limit_per_scan": "Auto-Aufnahmegrenze pro Durchlauf",
+        "auto_open_agent_files": "Agent-Dateien automatisch im Seitenpanel öffnen",
+        "auto_open_agent_files_hint": "Öffnet eine Datei im Seitenpanel, wenn die Antwort des Agenten darum bittet. Jede Datei öffnet sich einmal pro Chat. Schalte dies aus, um Dateien nur per Klick zu öffnen.",
         "auto_open_git_panel": "Git automatisch im Seitenpanel öffnen",
         "auto_register_project_documents": "Projektdokumente automatisch registrieren",
         "background_effort": "Hintergrund-Aufwand",

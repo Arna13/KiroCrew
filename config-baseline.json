@@ -7346,6 +7346,7 @@
         "session_grid": false,
         "mcp_app_panel": false,
         "auto_open_git_panel": false,
+        "auto_open_agent_files": false,
         "session_card_source_links": true,
         "terminal": {
           "enabled": true
@@ -8069,6 +8070,20 @@
       "tags": [],
       "label": "Auto-open Git in the side panel",
       "help": "Expand the chat's right side panel to its Git tab each time a session starts in a project directory that is a git repository. The Git tab itself is always created either way, so it is one click away.",
+      "hasChildren": false,
+      "enumValues": null,
+      "defaultValue": false
+    },
+    {
+      "path": "dashboard.auto_open_agent_files",
+      "kind": "core",
+      "type": "boolean",
+      "required": false,
+      "deprecated": false,
+      "sensitive": false,
+      "tags": [],
+      "label": "Auto-open agent files in the side panel",
+      "help": "Open a file in the chat's side panel Files tab when the agent's reply asks for it with a hidden open-file marker. Each file opens once per chat, through the same read a click on its path uses. Turn this off to open files only by clicking them.",
       "hasChildren": false,
       "enumValues": null,
       "defaultValue": false

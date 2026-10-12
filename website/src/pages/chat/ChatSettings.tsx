@@ -344,6 +344,8 @@ export interface DashboardConfig {
   link_patterns: { pattern: string; url: string }[]
   mcp_app_panel: boolean
   auto_open_git_panel: boolean
+  /** dashboard.auto_open_agent_files; absent from an older gateway, read as off. */
+  auto_open_agent_files?: boolean
   session_card_source_links: boolean
   /** Directory each new chat gets its own fresh folder under; '' = off. */
   session_folder_root?: string

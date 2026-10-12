@@ -555,7 +555,7 @@ export function ChatPanel({ basePath }: { basePath?: string } = {}) {
   // second toggle during a save carries the first one's value forward.
   const dashCfg = overlay.shown(
     'dashboardConfig',
-    dashQ.data ?? { restore_sessions: false, restore_window_minutes: 30, merge_queued_messages: false, default_memory_mode: 'persistent' as const, widget_density: 'more' as const, verbosity: 'answer_only' as const, quick_send: false, session_grid: false, tail_fork_enabled: false, link_previews: false, link_patterns: [], mcp_app_panel: false, auto_open_git_panel: false, session_card_source_links: true, folder_suggestions_enabled: true, topic_tags_enabled: false, use_builtin_browser: true, model_picker_hidden_models: [] },
+    dashQ.data ?? { restore_sessions: false, restore_window_minutes: 30, merge_queued_messages: false, default_memory_mode: 'persistent' as const, widget_density: 'more' as const, verbosity: 'answer_only' as const, quick_send: false, session_grid: false, tail_fork_enabled: false, link_previews: false, link_patterns: [], mcp_app_panel: false, auto_open_git_panel: false, auto_open_agent_files: false, session_card_source_links: true, folder_suggestions_enabled: true, topic_tags_enabled: false, use_builtin_browser: true, model_picker_hidden_models: [] },
   )
   const shownDefaultMemoryMode = overlay.shown(
     DEFAULT_MEMORY_MODE_PATH,
@@ -1909,6 +1909,7 @@ export function ChatPanel({ basePath }: { basePath?: string } = {}) {
         <SettingsCard>
           <SettingsToggle label={i18nT('pages.settings.chatPanel.mcp_apps_in_side_panel')} description={i18nT('pages.settings.chatPanel.render_interactive_mcp_apps_in_the_right_side_pa')} checked={dashCfg.mcp_app_panel} onChange={v => setDash({ mcp_app_panel: v })} disabled={dashDisabled} />
           <SettingsToggle label={i18nT('pages.settings.chatPanel.auto_open_git_panel')} hint={i18nT('pages.settings.chatPanel.expand_the_side_panel_to_the_git_tab_each_time_yo')} checked={dashCfg.auto_open_git_panel} onChange={v => setDash({ auto_open_git_panel: v })} disabled={dashDisabled} />
+          <SettingsToggle label={i18nT('pages.settings.chatPanel.auto_open_agent_files')} hint={i18nT('pages.settings.chatPanel.auto_open_agent_files_hint')} checked={dashCfg.auto_open_agent_files === true} onChange={v => setDash({ auto_open_agent_files: v })} disabled={dashDisabled} />
         </SettingsCard>
           )
 

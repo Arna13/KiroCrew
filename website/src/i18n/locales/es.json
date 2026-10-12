@@ -15948,6 +15948,8 @@
         "auto_add_saved_artifacts": "Añadir artefactos guardados automáticamente",
         "auto_compact_threshold": "Umbral de compactación automática",
         "auto_ingest_limit_per_scan": "Límite de ingesta automática por análisis",
+        "auto_open_agent_files": "Abrir automáticamente archivos del agente en el panel lateral",
+        "auto_open_agent_files_hint": "Abre un archivo en el panel lateral cuando la respuesta del agente lo pide. Cada archivo se abre una vez por chat. Desactívalo para abrir archivos solo al hacer clic.",
         "auto_open_git_panel": "Abrir Git automáticamente en el panel lateral",
         "auto_register_project_documents": "Registrar documentos de proyecto automáticamente",
         "background_effort": "Esfuerzo en segundo plano",

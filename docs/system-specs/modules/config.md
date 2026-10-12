@@ -114,6 +114,13 @@ and its charged budgets. Fixed call, byte, cache and iframe limits and the disab
 contract are documented in
 [learn-cron-dashboard](learn-cron-dashboard.md#automatic-session-status-cards).
 
+`dashboard.auto_open_agent_files` defaults to false, an opt-in: with it on, the
+system prompt carries the `kirocrew:open-file` marker's line, so with the default
+the prompt is byte for byte the one without it. The switch decides only whether
+the dashboard opens the file the marker names, and that open is the same
+owner-gated file read a click on the path makes. The behaviour is specified in
+[learn-cron-dashboard](learn-cron-dashboard.md) under "Agent open-file marker".
+
 ## Orchestration prompt contract
 
 `config/prompt.md` guides direct work and delegation using a concrete-value

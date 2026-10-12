@@ -3348,6 +3348,21 @@ class DashboardConfig:
             "itself is always created either way, so it is one click away.",
         ),
     )
+    # Off by default, an opt-in: when it is on, the system prompt carries the
+    # open-file marker's line, so the default prompt stays the size it is
+    # without it. The open goes through the same owner-gated file read a click
+    # on a path chip uses, so the switch governs only whether the click is made
+    # for the user.
+    auto_open_agent_files: bool = field(
+        default=False,
+        metadata=_meta(
+            "Auto-open agent files in the side panel",
+            "Open a file in the chat's side panel Files tab when the agent's reply "
+            "asks for it with a hidden open-file marker. Each file opens once per "
+            "chat, through the same read a click on its path uses. Turn this off "
+            "to open files only by clicking them.",
+        ),
+    )
     # Default TRUE: the chip strip shipped unconditionally before this switch
     # existed, so a config that never mentions the key must render exactly what
     # it rendered before.

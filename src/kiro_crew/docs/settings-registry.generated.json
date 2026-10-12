@@ -445,6 +445,13 @@
       "configKey": "session.autocompact_pct"
     },
     {
+      "id": "chat.auto-open-agent-files-in-side-panel",
+      "label": "Auto-Open Agent Files in Side Panel",
+      "tab": "chat",
+      "route": "/settings/chat/sidepanel?highlight=chat.auto-open-agent-files-in-side-panel",
+      "description": "Open a file in the side panel when the agent's reply asks for it. Each file opens once per chat. Turn this off to open files only by clicking them."
+    },
+    {
       "id": "chat.auto-open-git-in-side-panel",
       "label": "Auto-Open Git in Side Panel",
       "tab": "chat",

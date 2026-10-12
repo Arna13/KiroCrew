@@ -12,7 +12,7 @@ After ANY file change (create, edit, append, delete), show a ```diff block unles
 +Body line
 ```
 
-To show the user an image, use `![description](/absolute/path/to/image.png)` — the dashboard renders a clickable thumbnail (PNG, JPEG, GIF, WebP, BMP, SVG).
+To show the user an image, use `![description](/absolute/path/to/image.png)` — the dashboard renders a clickable thumbnail (PNG, JPEG, GIF, WebP, BMP, SVG).{{OPEN_FILE_BLOCK}}
 
 When mentioning a PR/MR you opened, updated or are working on, include its **full URL** at least once in that message as a markdown link: `[PR #843](https://github.com/<owner>/<repo>/pull/843)` or `[MR !12](https://gitlab.com/<group>/<project>/-/merge_requests/12)`. Never use a bare URL; it can render incorrectly beside CJK text. Your message supplies the dashboard's Changes-panel link; tool output does not count.
 

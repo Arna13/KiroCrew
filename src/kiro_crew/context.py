@@ -2377,7 +2377,9 @@ class ContextBuilder:
         ``{{COMPUTER_USE_BLOCK}}`` is the full Computer Use section only when the
         agent spec mounts ``kirocrew-computer`` (``computer_use`` when the caller
         holds that session's reading, otherwise a live one), and a short pointer
-        to the setting when it does not.
+        to the setting when it does not. ``{{OPEN_FILE_BLOCK}}`` is the open-file
+        marker line on a dashboard surface with ``dashboard.auto_open_agent_files``
+        on, and empty otherwise.
         """
         if ContextBuilder._MAX_SUBAGENTS_TOKEN in prompt:
             prompt = prompt.replace(
@@ -2402,10 +2404,19 @@ class ContextBuilder:
         # ``_build_response_preferences_section``.
         prompt = prompt.replace("{{VERBOSITY_BLOCK}}", "")
 
+        # The open-file marker is acted on only by the dashboard's chat side
+        # panel, so the line that teaches it reaches a dashboard surface with the
+        # setting on and nothing else.
+        dashboard_surface = has_dashboard_surface(session_key or "")
+        open_files = dashboard_surface and bool(
+            getattr(cfg.dashboard, "auto_open_agent_files", False)
+        )
+        prompt = prompt.replace("{{OPEN_FILE_BLOCK}}", _sections.open_file_block(open_files))
+
         # Widgets and artifacts need a chat window to render in, which is a
         # property of where the session is DISPLAYED, not where it started: a
         # Slack-born conversation with its dashboard tab open can render both.
-        if not has_dashboard_surface(session_key or ""):
+        if not dashboard_surface:
             return prompt.replace("{{WIDGET_BLOCK}}", "")
 
         density = getattr(cfg.dashboard, "widget_density", "more")

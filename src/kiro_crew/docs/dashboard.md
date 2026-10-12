@@ -24,7 +24,7 @@ If the dashboard doesn't load after setup:
 
 ### Chat (`/chat`)
 
-Multi-session parallel chat with full Markdown rendering, syntax-highlighted code blocks, Mermaid diagrams, and clickable file paths. A confirmed local file link in an agent reply opens that file in the chat side panel; a `:line` suffix opens the file at that line instead of navigating the browser back to Chat.
+Multi-session parallel chat with full Markdown rendering, syntax-highlighted code blocks, Mermaid diagrams, and clickable file paths. A confirmed local file link in an agent reply opens that file in the chat side panel; a `:line` suffix opens the file at that line instead of navigating the browser back to Chat. An agent can also open a file it wrote there without a click, with a hidden `<!-- kirocrew:open-file path="/abs/path" -->` marker in its reply (absolute paths only; Markdown, text, code, JSON, CSV and image files; once per file per chat). A Markdown file opens in its source view, and **Preview** renders it. This is off by default: turn on **Auto-Open Agent Files in Side Panel** in Settings → Chat → Side Panel to use it.
 
 - **Multiple tabs**: each tab runs its own agent session in parallel.
 - **Agent selection**: pick an agent before starting a chat, or switch mid-session.
