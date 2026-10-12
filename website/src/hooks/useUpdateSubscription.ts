@@ -3,6 +3,7 @@ import { useQueryClient } from '@tanstack/react-query'
 import { useAppDispatch } from '../store'
 import { setDesktopUpdateAvailable } from '../store/dashboardSlice'
 import { updateInfoQuery } from '../api/updateInfoQuery'
+import { compareVersions } from '../utils/releaseVersion'
 
 export type UpdateState = globalThis.UpdateState
 
@@ -34,7 +35,13 @@ export type UpdateState = globalThis.UpdateState
  * Only two states are worth restoring: a staged build awaiting install
  * ('downloaded') and an install failure — the states a reload strands the user
  * without, because nothing re-emits them (the 4h poll is gated off while a
- * build is staged). Everything else is either transient (a check/download in
+ * build is staged). The 'downloaded' seed is restored ONLY while the staged
+ * version is still newer than the one now running: the main process keeps
+ * lastState in memory, so a reload that is not a fresh process (the gateway
+ * exec'ing itself on a restart) replays a 'downloaded' from before the
+ * restart, and if that restart landed on the staged build the stage is already
+ * installed — replaying it re-lights "Restart to update" for a build that is
+ * no longer pending. Everything else is either transient (a check/download in
  * flight keeps emitting live events) or goes stale in a way that misleads — an
  * offline error from hours ago replayed as current reads as "the update lane
  * is broken now".
@@ -69,7 +76,24 @@ export function useUpdateSubscription() {
       if (disposed) return
       const last = info?.lastState
       if (!last) return
-      const worthRestoring = last.state === 'downloaded'
+      // A 'downloaded' seed is only worth restoring while the staged build is
+      // still AHEAD of the one now running. The main process keeps lastState
+      // in memory, so a renderer reload that is NOT a fresh process — the
+      // gateway exec'ing itself on a restart, the install-failure recovery
+      // reload — hands this hook a 'downloaded' from before the restart. If
+      // that restart landed on (or past) the staged version, the stage is
+      // already installed: replaying it re-lights "Restart to update" for a
+      // build that is no longer pending, which is the banner that "stays after
+      // the app restarts". The feed's launch check clears it eventually, but
+      // only after a delay, and never at all while the check cannot reach the
+      // feed. Gate on the versions instead: restore only when the stage is
+      // genuinely newer. An unorderable or absent pair falls through to NOT
+      // restoring — a seed we cannot place must not relight the pill.
+      const stagedStillAhead = last.state === 'downloaded'
+        && !!last.version
+        && !!info?.version
+        && compareVersions(last.version, info.version) === 1
+      const worthRestoring = stagedStillAhead
         || (last.state === 'error' && last.phase === 'install')
       if (!worthRestoring) return
       // A live event that arrived while the round-trip was in flight is newer
