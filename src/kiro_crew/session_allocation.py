@@ -21,6 +21,12 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
 from kiro_crew.agent_spec_format import iter_agent_spec_files
+from kiro_crew.aws_project_profiles import (
+    AWS_PROFILE_ENV,
+    bound_profile_env,
+    configured_project_profiles,
+    resolve_project_profile,
+)
 from kiro_crew.kiro_prerequisite import pre_spawn_identity, spawn_pid, stamp_spawn_identity
 from kiro_crew.messaging.queue_drain import entry_channel, wake_other_drains
 from kiro_crew.metrics.sessions import (
@@ -1262,6 +1268,22 @@ class SessionAllocationService:
                 cwd=cwd,
                 start_priority=start_priority,
             )
+        project_profiles = configured_project_profiles(owner._cfg)
+        if (
+            project_profiles
+            and cwd
+            and await asyncio.to_thread(resolve_project_profile, project_profiles, cwd)
+        ):
+            # The run's shared runtime is one process with one environment, so a
+            # step in a project bound to an AWS profile takes the dedicated path,
+            # where get_or_create sets that profile for its own process.
+            return await owner.get_or_create(
+                key,
+                agent=agent,
+                approval_policy=approval_policy,
+                cwd=cwd,
+                start_priority=start_priority,
+            )
         async with self._lock:
             # The other publication door: a key whose run is being ended
             # (``begin_ending``) admits no per-step session either. Refused here
@@ -2359,6 +2381,24 @@ class SessionAllocationService:
             agent = preparation.template
             effective_cwd = preparation.project or effective_cwd
             extra_factory_kwargs["crew_agent"] = preparation.member
+
+        # A project bound to an AWS profile (aws.project_profiles) starts its
+        # agent with AWS_PROFILE set, unless the caller chose a profile itself.
+        # Set before the pool decision so a bound session never takes a pooled
+        # process spawned without it. An empty map leaves extra_env untouched.
+        project_profiles = configured_project_profiles(owner._cfg)
+        if project_profiles and effective_cwd:
+            bound_env = await asyncio.to_thread(
+                bound_profile_env, project_profiles, effective_cwd, extra_env
+            )
+            if bound_env is not extra_env and bound_env is not None:
+                # The profile NAME only: the binding never holds a credential.
+                self._deps.logger.info(
+                    "session %s: AWS profile %r from aws.project_profiles",
+                    key,
+                    bound_env[AWS_PROFILE_ENV],
+                )
+            extra_env = bound_env
 
         # Reconciliation can publish a new template model. Resolve only after
         # that boundary, while retaining an explicit caller model unchanged.

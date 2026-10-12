@@ -55,6 +55,11 @@ from kiro_crew.agent_spec_format import iter_agent_spec_files, parse_agent_spec_
 
 # Leaf module (stdlib + platform_compat only) — no import cycle with config.
 from kiro_crew.atomic_write import atomic_write, on_event_loop
+from kiro_crew.aws_project_profiles import (
+    PROJECT_PROFILES_KEY,
+    coerce_project_profiles,
+    project_profile_refusals,
+)
 
 # Post-split section internals are reached through the module: the name-level
 # `from kiro_crew.config.sections import (...)` block below is a FROZEN
@@ -83,6 +88,7 @@ from kiro_crew.config.integration_sections import (  # noqa: F401
     _DEFAULT_SSH_COMPRESSION,
     _DEFAULT_TUNNEL_BASE_PORT,
     _DEFAULT_WARM_SET_CAP,
+    AwsConfig,
 )
 from kiro_crew.config.migration import (  # noqa: F401
     _REPORTED_SUPERSEDED_KEYS,
@@ -1698,7 +1704,8 @@ class ConfigWriteRefused(ValueError):
     Raised by :func:`write_config_atomically` before any byte reaches disk, for
     content that must never be persisted: today, a provider key in plaintext under
     ``agent.deepseek_env``, where the only admissible value is a
-    ``secret://<vault name>`` reference (``sections.deepseek_env_plaintext_keys``).
+    ``secret://<vault name>`` reference (``sections.deepseek_env_plaintext_keys``),
+    and an ``aws.project_profiles`` entry the load would ignore.
     The message names env-var KEYS only, never the value, so it is safe to print
     on a terminal and to log. A ``ValueError`` so the CLI's existing refusal shape
     applies, and so a caller cannot mistake it for the unreadable-file case
@@ -1827,6 +1834,51 @@ def _deepseek_env_on_disk(path: Path) -> object:
     return agent.get("deepseek_env") if isinstance(agent, dict) else None
 
 
+def _refuse_aws_project_profiles(data: dict, path: Path) -> None:
+    """Refuse an ``aws.project_profiles`` entry the load would drop.
+
+    The load ignores such an entry with only a gateway-log line
+    (``aws_project_profiles.coerce_project_profiles``), so a write that stored it
+    would succeed while the project silently kept the default credential chain.
+    Refusing it names the directory and the rule when it is saved -- ``kirocrew
+    config set`` prints it, a dashboard write answers 400 -- and nothing is
+    written. The message never carries a profile value.
+
+    Scoped to what THIS write does, like :func:`_refuse_unpublishable`: a bad
+    entry a hand edit already landed, in a mapping this write leaves exactly as it
+    found it, publishes with a warning, because every writer in the product
+    reaches this function. A write that changes the mapping must leave it clean.
+    An unreadable prior file cannot show the entry pre-existing, so it is refused.
+    """
+    aws = data.get("aws") if isinstance(data, dict) else None
+    mapping = aws.get("project_profiles") if isinstance(aws, dict) else None
+    refusals = project_profile_refusals(mapping)
+    if not refusals:
+        return
+    detail = "; ".join(refusals)
+    if _aws_project_profiles_on_disk(path) == mapping:
+        logger.warning(
+            "config.json already holds %s entries the load ignores (%s); this write "
+            "left that mapping as it found it.",
+            PROJECT_PROFILES_KEY,
+            detail,
+        )
+        return
+    raise ConfigWriteRefused(
+        f"{PROJECT_PROFILES_KEY} refuses {detail}. Nothing was written: fix or remove the entry."
+    )
+
+
+def _aws_project_profiles_on_disk(path: Path) -> object:
+    """The ``aws.project_profiles`` value the document at *path* holds, or ``None``."""
+    try:
+        document = json.loads(read_config_text(path))
+    except (OSError, ValueError):
+        return None
+    aws = document.get("aws") if isinstance(document, dict) else None
+    return aws.get("project_profiles") if isinstance(aws, dict) else None
+
+
 def write_config_atomically(path: Path, data: dict, *, fsync: bool = False) -> None:
     """Write a config dict to *path* atomically, PRESERVING its permissions.
 
@@ -1878,6 +1930,7 @@ def write_config_atomically(path: Path, data: dict, *, fsync: bool = False) -> N
     setup, so the target is resolved first to preserve that behavior.
     """
     _refuse_unpublishable(data, path)
+    _refuse_aws_project_profiles(data, path)
     # Resolve BEFORE stat/write so a symlinked config keeps pointing at its
     # target (and the mode preserved is the target's, not the link's).
     try:
@@ -3871,6 +3924,14 @@ class KiroCrewConfig:
             "here — it lives on the keystone computer_use.json.",
         ),
     )
+    aws: AwsConfig = field(
+        default_factory=AwsConfig,
+        metadata=_meta(
+            "AWS",
+            "AWS settings for agent sessions: which named profile a project's "
+            "sessions start with.",
+        ),
+    )
     mcp_gateway: McpGatewayConfig = field(
         default_factory=McpGatewayConfig,
         metadata=_meta("MCP Gateway", "Sidecar MCP broker that shares backends across sessions."),
@@ -4331,6 +4392,7 @@ class KiroCrewConfig:
             "default_memory_store": self.default_memory_store,
             "stt": asdict(self.stt),
             "computer_use": asdict(self.computer_use),
+            "aws": asdict(self.aws),
             "instances": asdict(self.instances),
             "mcp_gateway": asdict(self.mcp_gateway),
             "mcp": asdict(self.mcp),
@@ -5880,6 +5942,13 @@ def build_config(
         # There is deliberately NO ``enabled`` key read here — see
         # ComputerUseConfig's docstring and computer_use_state_path().
         computer_use=_build_computer_use_config(computer_use_data),
+        # A bad entry costs that one binding: the project keeps the default
+        # credential chain (aws_project_profiles.coerce_project_profiles).
+        aws=AwsConfig(
+            project_profiles=coerce_project_profiles(
+                _coerced_section(data, "aws", _degraded).get("project_profiles")
+            )
+        ),
         # ``_coerce_bool``, not ``_safe_bool``: this one key decides whether
         # an unattended installer runs, and the two wrong answers are not
         # symmetric. A hand-edited ``"auto_update": "false"`` is truthy to

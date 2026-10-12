@@ -2,7 +2,7 @@
 
 Owns the DTOs and defaults for ``mcp`` and ``mcp_gateway`` (including the MCP stub
 roster readers the gateway seed shares), ``instances``, ``tunnel``, ``publish``,
-``computer_use`` and the external app ``registries``. The computer-use and
+``computer_use``, ``aws`` and the external app ``registries``. The computer-use and
 instance bounds come from ``computer_use.types`` and ``instances.constants``.
 ``config.sections`` re-exports every name; this module never imports it, the
 loader, schema or validation.
@@ -1029,5 +1029,41 @@ class TunnelConfig:
             "Explicit tunnel name (overrides name_mode). "
             "Note: some tunnel providers prefix your username (e.g. 'foo' becomes '<user>-foo').",
             restart=True,
+        ),
+    )
+
+
+@dataclass
+class AwsConfig:
+    """AWS settings for the agent sessions Kiro Crew starts.
+
+    ``project_profiles`` is the operator's directory -> named-profile map; the
+    rules that read it live in :mod:`kiro_crew.aws_project_profiles`.
+    """
+
+    project_profiles: dict[str, str] = field(
+        default_factory=dict,
+        metadata=_meta(
+            "Project AWS Profiles",
+            "Binds an AWS named profile to a project directory, so the agent in a "
+            "session working there starts with AWS_PROFILE set to it and an AWS "
+            "command reaches the intended account without --profile. Keys are "
+            "absolute directory paths, values are profile names from your own AWS "
+            "config (IAM or SSO), e.g. "
+            '{"/home/me/src/billing": "billing-prod", "/home/me/src/sandbox": "dev"}. '
+            "A session whose working directory is a key or lies under one gets that "
+            "profile; when several keys contain it the deepest wins, and a sibling "
+            "whose name merely starts the same (/a/proj and /a/project2) does not "
+            "match. A directory under no key keeps the default credential chain. A "
+            "profile a caller sets itself (a scheduled job's env, a workflow) wins "
+            "over this map. A profile name must be 1 to 128 letters, digits, '_', "
+            "'.', '+' or '-', not starting with '-'; an entry that breaks that rule "
+            "or has a relative key is refused when saved and ignored with a warning "
+            "if a hand edit puts it in config.json. Only the profile NAME is stored "
+            "and passed on: no credential is read or copied, and the binding is "
+            "never taken from a file inside the project. This picks the account a "
+            "command goes to by default; it is not isolation, and the agent can "
+            "still name another profile. Takes effect for sessions started after "
+            "the change; a running session keeps the environment it started with.",
         ),
     )
