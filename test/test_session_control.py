@@ -4273,6 +4273,7 @@ _DASHBOARD_TOOL_CALLS = {
     "chat_tag_column_list": {},
     "chat_tag_column_create": {"name": "Urgent", "tag": "todo"},
     "chat_tag_column_move": {"column": "Todo", "after": "Live"},
+    "session_move_to_column": {"session": "chat-3", "column": "Todo"},
     "session_create": {},
     "session_fork": {},
     "session_stop": {"target": "chat-2"},

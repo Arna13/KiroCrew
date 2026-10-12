@@ -2960,6 +2960,16 @@ CHAT_SESSION_PIN_SCHEMA = ToolSchema(
     ],
 )
 
+SESSION_MOVE_TO_COLUMN_SCHEMA = ToolSchema(
+    tool_name="session_move_to_column",
+    fields=[
+        # Same session-reference shape as ``chat_session_pin.session``, and the
+        # column-reference bound the ``chat_tag_column_*`` schemas use.
+        FieldSpec("session", str, required=True, max_len=512),
+        FieldSpec("column", str, required=True, max_len=_CHAT_TAG_REF_MAX),
+    ],
+)
+
 # Board columns (``/api/chat/tag-columns``). A column name is stored as
 # ``name[:60]`` (``chat_tags._NAME_MAX``), the same cap as a tag name, and a
 # column reference is a 12-hex id or the column's exact name.
@@ -4483,6 +4493,7 @@ MCP_DASHBOARD_SCHEMAS: dict[str, ToolSchema] = {
     "chat_tag_column_list": CHAT_TAG_COLUMN_LIST_SCHEMA,
     "chat_tag_column_create": CHAT_TAG_COLUMN_CREATE_SCHEMA,
     "chat_tag_column_move": CHAT_TAG_COLUMN_MOVE_SCHEMA,
+    "session_move_to_column": SESSION_MOVE_TO_COLUMN_SCHEMA,
 }
 
 # ── Tool Schemas (MCP crew log — server ``kirocrew-crew-log``) ──

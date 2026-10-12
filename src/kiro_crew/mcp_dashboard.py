@@ -653,6 +653,45 @@ def _board_tools() -> tuple[Tool, ...]:
                 "PUT /api/chat/tag-columns/order",
             ),
         ),
+        Tool(
+            name="session_move_to_column",
+            description=(
+                "Move a LIVE session's card into a sidebar board column, the same as "
+                "dragging it there. ``session`` is a slot key or 'dashboard:<slot>' "
+                "session key from chat_folder_tree, or a session's exact title when "
+                "that title is unique. ``column`` is a column id or exact name (see "
+                "chat_tag_column_list). The session takes the one status tag the "
+                "column filters on and loses its other status tags; plain labels "
+                "stay. A column with no single status tag, and a live-state lane, "
+                "cannot take a card, and the result says so. The tag rules of "
+                "chat_tag_assign apply: a status the person reserved is refused. An "
+                "app agent may move only its own sessions; a crew member only a "
+                "session it owns or created."
+            ),
+            schema={
+                "type": "object",
+                "properties": {
+                    "session": {
+                        "type": "string",
+                        "description": "Slot key, 'dashboard:<slot>' session key, or exact unique session title.",
+                    },
+                    "column": {"type": "string", "description": "Column id or exact name."},
+                },
+                "required": ["session", "column"],
+            },
+            run=_run_session_move_to_column,
+            # A ``session_*`` row: the table's strict gate verifies the caller
+            # before the body runs and hands it over as ``ctx.caller_key``,
+            # and ``SESSION_CONTROL_TOOLS`` (hence the channel containment
+            # check) picks it up.
+            identity="strict",
+            routes=(
+                "GET /api/chat/tag-columns",
+                "GET /api/chat/tags",
+                "GET /api/chat/slots",
+                "POST /api/chat/slots/{slot}/drop",
+            ),
+        ),
     )
 
 
@@ -4480,6 +4519,79 @@ def _run_chat_tag_column_move(args: dict[str, Any], ctx: ToolContext) -> str:
             )
         return redact(f"Error: {refused.error}")
     return redact(f"Moved column `{names[move_id]}` {side} `{names[anchor_id]}`.")
+
+
+#: ``/drop`` rejection codes that are answers, not failures: the card stays
+#: where it is and calling again changes nothing, so they read as "Not moved".
+_DROP_NOT_MOVED = {
+    "not_status_lane": "that column does not filter on exactly one status tag, so "
+    "no tag change can place a card there",
+    "state_lane": "that column follows the session's live state, which no tag " "change can set",
+}
+
+
+def _run_session_move_to_column(args: dict[str, Any], ctx: ToolContext) -> str:
+    # This writes to a session OTHER than the caller's, so the row is strict:
+    # the table verified the caller before this ran, and that key rides on
+    # every request unchanged.
+    caller_key = ctx.caller_key
+    channel_err = _refuse_channel_board_write("session_move_to_column", caller_key)
+    if channel_err:
+        return channel_err
+    columns, cols_err = _get_rows(ctx.client, "/api/chat/tag-columns")
+    if cols_err:
+        return f"Error: {cols_err}"
+    column_id, col_err = _resolve_chat_tag_column(str(args["column"]), columns)
+    if col_err:
+        return redact(f"Error: {col_err}")
+    column_name = (
+        next((str(c.get("name") or "").strip() for c in columns if c.get("id") == column_id), "")
+        or column_id
+    )
+    chat_slots, slots_err = _visible_chat_slots(ctx)
+    if slots_err:
+        return f"Error: {slots_err}"
+    slot_key, slot_err = _resolve_chat_slot_key(args["session"], chat_slots)
+    if slot_err:
+        return redact(f"Error: {slot_err}")
+    slot_row = next((s for s in chat_slots if str(s.get("key") or "") == slot_key), {})
+    # ``expected_created`` pins the drop to the slot generation resolved above,
+    # as chat_session_pin does: a slot key recreated for another conversation
+    # in between is refused instead of retagged.
+    body: dict[str, Any] = {"column_id": column_id}
+    slot_created = str(slot_row.get("created") or "")
+    if slot_created:
+        body["expected_created"] = slot_created
+    try:
+        d = ctx.client.post(
+            f"/api/chat/slots/{quote(slot_key, safe='')}/drop",
+            body,
+            session_key=caller_key,
+        )
+    except DashboardError as refused:
+        if refused.code == "column_not_found":
+            return redact(
+                f"Error: column `{column_name}` was removed before the move. Nothing "
+                "was written — call chat_tag_column_list for the current columns."
+            )
+        return redact(f"Error: {refused.error}")
+    if d.get("ok") is not True:
+        code = str(d.get("code") or "")
+        if code == "session_gone":
+            return redact(
+                f"Error: session `{slot_key}` closed or was replaced after it was "
+                "resolved. Nothing was written — call chat_folder_tree to see the "
+                "current sessions."
+            )
+        why = _DROP_NOT_MOVED.get(code) or str(d.get("reason") or "the board refused it")
+        return redact(f"Not moved: session `{slot_key}` stays put — {why}.")
+    tags, tags_err = _get_rows(ctx.client, "/api/chat/tags")
+    names_by_id = (
+        {} if tags_err else {str(t.get("id") or ""): str(t.get("name") or "?") for t in tags}
+    )
+    final = [str(t) for t in (d.get("tags") or []) if isinstance(t, str)]
+    shown = ", ".join(f"`{names_by_id.get(t, t)}`" for t in final) or "none"
+    return redact(f"Moved session `{slot_key}` into column `{column_name}`. Tags now: {shown}.")
 
 
 #: Every tool this server has, one row each, in the order ``tools/list`` advertises

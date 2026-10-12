@@ -102,6 +102,7 @@
     "chat_tag_column_list": "List board columns",
     "chat_tag_column_create": "Add board column",
     "chat_tag_column_move": "Move board column",
+    "session_move_to_column": "Move session to column",
     "session_create": "Create session",
     "session_fork": "Fork session",
     "session_stop": "Stop session",

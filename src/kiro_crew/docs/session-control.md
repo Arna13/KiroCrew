@@ -5,15 +5,15 @@ another one, change its model, reload its agent process, and take another one un
 the sidebar. The tools come from the
 `kirocrew-dashboard` MCP server, so an agent that does not mount that server
 never has them — exactly like any other MCP server. This page is the reference
-for all 34 of its tools, written for the agent that is about to use them.
+for all 35 of its tools, written for the agent that is about to use them.
 
 The server is defined in `src/kiro_crew/mcp_dashboard.py`. Two halves:
 
 - **Session control** — `session_create`, `session_fork`, `session_send`,
   `session_read_message`, `session_summary`, `session_stop`, `session_end_wait`, `session_retry`,
   `session_continue`, `session_set_model`, `session_reload`, `session_rename`, `session_generate_title`, `session_close`, `session_revive`,
-  `session_broadcast`, `session_status`, `session_adopt`, `session_release`. These reach another
-  session.
+  `session_broadcast`, `session_status`, `session_adopt`, `session_release`,
+  `session_move_to_column`. These reach another session.
 - **Sidebar shape** — `chat_folder_tree`, `chat_folder_create`,
   `chat_folder_move`, `chat_folder_update`, `chat_folder_move_session`, `chat_folder_delete`,
   `chat_folder_file_self`, `chat_tag_list`, `chat_tag_create`, `chat_tag_update`, `chat_tag_assign`,
@@ -816,11 +816,20 @@ column list is part of the person's own layout, shared by every session.
 | `chat_tag_column_list` | none | Every column in board order: id, name, what it filters on. Read-only |
 | `chat_tag_column_create` | `name` (required), `tag` (required) | Append a column showing sessions that carry `tag`. A column with the same name and tag is returned instead of duplicated |
 | `chat_tag_column_move` | `column` (required), exactly one of `before` / `after` | Move one column next to another. The others keep their order |
+| `session_move_to_column` | `session` (required), `column` (required) | Move a live session's card into a column, the same as dragging it there |
 
 `tag`, `column`, `before` and `after` take an id or an exact name. There is
 no delete or retag verb: removing a column or changing its filter removes a view
 the person built. An app agent and a crew member can list columns but not
 write them; the `/api/chat/tag-columns` write endpoints refuse both.
+
+`session_move_to_column` gives the session the one status tag the column
+filters on and removes its other status tags; plain labels stay. `session` takes
+the same references as `chat_session_pin`. A column that does not filter on
+exactly one status tag, or that follows live state, cannot take a card: the tool
+answers "Not moved" and writes nothing. The tag rules of `chat_tag_assign` hold:
+a status the person reserved cannot be entered or left. An app agent moves only
+its own sessions and a crew member only a session it owns or created.
 
 ## Pins
 
@@ -902,8 +911,9 @@ other humans can see, and sending would run channel text as a turn inside it.
 sidebar the same way `session_adopt` and `session_release` do. The tool also
 refuses a `channel:` caller itself, before listing any session, so an
 auto-approved call that never reaches the permission prompt is still refused.
-`chat_tag_column_create` and `chat_tag_column_move` are blocked and refused at
-dispatch in the same way, because they rearrange the person's board.
+`chat_tag_column_create`, `chat_tag_column_move` and `session_move_to_column`
+are blocked and refused at dispatch in the same way, because they rearrange the
+person's board.
 `session_broadcast` is blocked for that reason multiplied by the fleet, and
 `session_status` because its rows carry other sessions' titles — the names of the
 user's private work, in front of whoever is in the thread.

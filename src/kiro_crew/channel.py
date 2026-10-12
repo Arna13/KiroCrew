@@ -217,6 +217,10 @@ CHANNEL_AGENT_BLOCKED_TOOLS: tuple[str, ...] = (
     # ``chat_tag_column_list`` stays available: the layout names no session.
     "chat_tag_column_create",
     "chat_tag_column_move",
+    # Moving a card between board columns retags another session, which a
+    # channel agent would name from thread text; the handler also refuses a
+    # ``channel:`` caller at dispatch.
+    "session_move_to_column",
     "session_revive",
     # Renaming a folder changes the person's sidebar the same way, and a channel
     # caller reaches the endpoint with the person's folder authority. The

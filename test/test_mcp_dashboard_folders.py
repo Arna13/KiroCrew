@@ -1794,6 +1794,7 @@ class TestAdvertisedSet:
             "chat_tag_column_list",
             "chat_tag_column_create",
             "chat_tag_column_move",
+            "session_move_to_column",
             "chat_session_pin",
             "session_create",
             "session_fork",

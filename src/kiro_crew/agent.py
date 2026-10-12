@@ -5502,6 +5502,10 @@ handle immediately.
 #: * ``chat_tag_column_move`` — WITHHELD, on the invariant: it MUTATES the order
 #:   of columns the person arranged, which is existing state that is not the
 #:   caller's own, and no conductor step needs it.
+#: * ``session_move_to_column`` — WITHHELD, on ``chat_tag_assign``'s reason: the
+#:   drop retags the session named in the ARGUMENTS
+#:   (``/api/chat/slots/<target>/drop``), so ingested content could move any
+#:   persistent same-workspace session between columns. No conductor step needs it.
 #: * ``session_rename`` — WITHHELD. Writes another session's title through
 #:   ``/api/session-control/rename`` where the target is the session named in the
 #:   ARGUMENTS, and the rename is final, so the automatic titler never corrects a
