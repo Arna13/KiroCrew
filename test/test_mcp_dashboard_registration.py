@@ -384,6 +384,7 @@ class TestWhatThisSetGrants:
         "session_continue",
         "session_set_model",
         "session_reload",
+        "session_set_autocompact",
         # Relabels a session the caller may already stop, or itself; same gate.
         "session_rename",
         "session_close",

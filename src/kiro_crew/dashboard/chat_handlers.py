@@ -7030,36 +7030,71 @@ async def api_chat_slot_autocompact(request: web.Request) -> web.Response:
         return web.json_response(
             {"error": "pct is required (number or null)", "code": "pct_required"}, status=400
         )
-    pct = body["pct"]
-    if pct is not None:
-        # bool is an int subclass; True would otherwise read as 1.0 and be
-        # rejected by range, but reject it explicitly for a clear error.
-        if isinstance(pct, bool) or not isinstance(pct, (int, float)):
-            return web.json_response(
-                {"error": "pct must be a number or null", "code": "pct_not_a_number"}, status=400
-            )
-        try:
-            pct = float(pct)
-        except OverflowError:
-            # An int too large for a float; out of range by definition.
-            return web.json_response(
-                {"error": "pct must be a finite number", "code": "pct_not_finite"}, status=400
-            )
-        if pct != pct:  # NaN
-            return web.json_response(
-                {"error": "pct must be a finite number", "code": "pct_not_finite"}, status=400
-            )
-        if not (AUTOCOMPACT_PCT_MIN <= pct <= AUTOCOMPACT_PCT_MAX):
-            return web.json_response(
-                {
-                    "error": (
-                        f"pct must be between {AUTOCOMPACT_PCT_MIN:g} "
-                        f"and {AUTOCOMPACT_PCT_MAX:g}"
-                    ),
-                    "code": "pct_out_of_range",
-                },
-                status=400,
-            )
+    pct, invalid = parse_autocompact_pct(body["pct"])
+    if invalid is not None:
+        return web.json_response({"error": invalid["error"], "code": invalid["code"]}, status=400)
+    return await commit_slot_autocompact(
+        state,
+        slot,
+        name,
+        pct,
+        reauthorize=lambda: _reauthorize_after_await(
+            state, slot, name, request_app, "slot_autocompact"
+        ),
+    )
+
+
+def parse_autocompact_pct(raw: Any) -> tuple[float | None, dict[str, str] | None]:
+    """Check one ``pct`` value: ``(value, None)`` when valid, else ``(None, error)``.
+
+    ``None`` is valid and means "clear the override". *error* is the
+    ``{"error", "code"}`` body the slot route answers with a 400, and
+    ``session_set_autocompact`` raises with the same code.
+    """
+    if raw is None:
+        return None, None
+    # bool is an int subclass; True would otherwise read as 1.0 and be
+    # rejected by range, but reject it explicitly for a clear error.
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+        return None, {"error": "pct must be a number or null", "code": "pct_not_a_number"}
+    try:
+        pct = float(raw)
+    except OverflowError:
+        # An int too large for a float; out of range by definition.
+        return None, {"error": "pct must be a finite number", "code": "pct_not_finite"}
+    if pct != pct:  # NaN
+        return None, {"error": "pct must be a finite number", "code": "pct_not_finite"}
+    if not (AUTOCOMPACT_PCT_MIN <= pct <= AUTOCOMPACT_PCT_MAX):
+        return None, {
+            "error": f"pct must be between {AUTOCOMPACT_PCT_MIN:g} and {AUTOCOMPACT_PCT_MAX:g}",
+            "code": "pct_out_of_range",
+        }
+    return pct, None
+
+
+async def commit_slot_autocompact(
+    state: DashboardState,
+    slot: Any,
+    name: str,
+    pct: float | None,
+    *,
+    reauthorize: Callable[[], web.Response | None],
+    recheck_after_commit: bool = True,
+) -> web.Response:
+    """Write *pct* as *slot*'s threshold override: durably, then live.
+
+    The slot route's transaction, shared with ``session_set_autocompact``.
+    *reauthorize* re-decides access with no await before the write; it must
+    be synchronous and return a refusal response or ``None``.
+
+    *recheck_after_commit* runs *reauthorize* once more after the durable
+    commit, before the live override changes. The slot route keeps that
+    check. ``session_set_autocompact`` turns it off: its access decision is
+    taken under the transcript lock right before the pinned write, so the
+    write is linearized there and no refusal can follow a commit. That leaves
+    no compensating write to get wrong. The pin and the rebind check still
+    run either way.
+    """
     # Persist via the same forced-save mechanism every other slot-metadata
     # route uses (tags / folders / pin: save_slot_off_loop(force=True) -- the
     # empty-window merge for message-less slots, the full save otherwise;
@@ -7084,7 +7119,7 @@ async def api_chat_slot_autocompact(request: web.Request) -> web.Response:
     # TRANSCRIPT so two alias slots resolving onto one file serialize too.
     locked_history_key = slot_history_key(slot)
     async with _autocompact_txn_lock(locked_history_key):
-        stale = _reauthorize_after_await(state, slot, name, request_app, "slot_autocompact")
+        stale = reauthorize()
         if stale is not None:
             return stale
         # Pin the write to the transcript this authorization decision covered:
@@ -7192,8 +7227,11 @@ async def api_chat_slot_autocompact(request: web.Request) -> web.Response:
         # authorization decision with NO await between them. The persist await is
         # a rebind window (same mechanism as the body read), so re-decide before
         # the live override mutation; the slot-field change above rolls back for
-        # a rebound slot, whose successor re-derives its state on restore.
-        stale = _reauthorize_after_await(state, slot, name, request_app, "slot_autocompact")
+        # a rebound slot, whose successor re-derives its state on restore. A
+        # caller that linearizes at the commit skips the re-decision; the
+        # rebind check below still binds the live write to the committed
+        # transcript.
+        stale = reauthorize() if recheck_after_commit else None
         if stale is not None:
             slot.autocompact_pct = prior_pct
             return stale

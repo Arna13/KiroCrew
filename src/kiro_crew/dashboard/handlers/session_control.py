@@ -745,3 +745,29 @@ async def api_session_control_summary(request: web.Request) -> web.Response:
     except sc.SessionControlError as exc:
         return _refusal(exc)
     return web.json_response(result)
+
+
+async def api_session_control_autocompact(request: web.Request) -> web.Response:
+    """POST /api/session-control/autocompact — read or set a session's compact threshold.
+
+    ``{"target": ...}`` reads; ``{"target": ..., "pct": <number|null>}`` sets or
+    clears the override. One route for both: a JSON ``null`` already means
+    "clear", so a missing key is the only spelling of "read".
+    """
+    refused = await _require_internal(request)
+    if refused is not None:
+        return refused
+    # No prewarm here, for the reason `api_session_control_stop` gives.
+    state: DashboardState = request.app["state"]
+    try:
+        body = await _body(request)
+        result = await sc.autocompact_target(
+            state,
+            caller_session_key=_read_session_key(request),
+            target=_target(body),
+            pct=body["pct"] if "pct" in body else sc.AUTOCOMPACT_READ,
+            caller_fenced=_carried_fence(request),
+        )
+    except sc.SessionControlError as exc:
+        return _refusal(exc)
+    return web.json_response(result)

@@ -1000,6 +1000,45 @@ def _session_tools() -> tuple[Tool, ...]:
             routes=("POST /api/session-control/reload",),
         ),
         Tool(
+            name="session_set_autocompact",
+            description=(
+                "Read or change one session's auto-compact threshold: the percent of "
+                "the context window at which its conversation is compacted between "
+                "turns, the same override as the slider in that tab's context meter. "
+                "Omit pct to read the override, the crew default, the global default "
+                "and the allowed range. Pass a number in that range to set the "
+                "override, or null to clear it so the session follows its crew's "
+                "default, else the global one. The change applies from the target's "
+                "next between-turn check and survives gateway restarts. target may be "
+                "your own session (the current turn is not interrupted) or a session "
+                "you created; any other session is refused. The global threshold "
+                "cannot be changed here."
+            ),
+            schema={
+                "type": "object",
+                "properties": {
+                    "target": {
+                        "type": "string",
+                        "description": (
+                            "Session key from list_sessions or session_create, or its "
+                            "exact title. Your own session key works too."
+                        ),
+                    },
+                    "pct": {
+                        "type": ["number", "null"],
+                        "description": (
+                            "Threshold percent within the allowed range, or null to "
+                            "clear the override. Omit to read."
+                        ),
+                    },
+                },
+                "required": ["target"],
+            },
+            run=_run_session_set_autocompact,
+            identity="strict",
+            routes=("POST /api/session-control/autocompact",),
+        ),
+        Tool(
             name="session_rename",
             description=(
                 "Rename a live session's sidebar title: your own session, or one you "
@@ -2287,14 +2326,19 @@ def _resolve_chat_tag_column(ref: str, columns: list[dict]) -> tuple[str, str | 
     return named[0], None
 
 
-def _refuse_channel_board_write(name: str, caller_key: str) -> str | None:
-    """Refuse a board write from a ``channel:`` caller, at dispatch.
+_BOARD_IS_THE_PERSONS = "the board is the person's own sidebar layout"
+
+
+def _refuse_channel_write(
+    name: str, caller_key: str, why: str = _BOARD_IS_THE_PERSONS
+) -> str | None:
+    """Refuse a write from a ``channel:`` caller, at dispatch.
 
     The ``CHANNEL_AGENT_BLOCKED_TOOLS`` name match runs at the permission
     prompt, which an auto-approved call never reaches, so the containment has to
     hold here too (the same split ``chat_session_pin`` uses). A channel agent
-    acts on thread text other people wrote, and the board is the person's own
-    sidebar layout.
+    acts on thread text other people wrote; *why* names what the tool would
+    have changed (the board, by default).
     """
     if not caller_key.startswith("channel:"):
         return None
@@ -2311,9 +2355,8 @@ def _refuse_channel_board_write(name: str, caller_key: str) -> str | None:
         # below holds either way.
         pass
     return (
-        f"Error: {name} is not available to channel agents — the board is the "
-        "person's own sidebar layout, and a channel agent acts on thread text "
-        "other people wrote."
+        f"Error: {name} is not available to channel agents — {why}, and a channel "
+        "agent acts on thread text other people wrote."
     )
 
 
@@ -3003,6 +3046,49 @@ def _run_session_reload(args: dict[str, Any], ctx: ToolContext) -> str:
         f"\U0001f504 `{target}` is relaunching its agent process with the conversation "
         "kept. Its transcript shows the reload notice."
     )
+
+
+def _run_session_set_autocompact(args: dict[str, Any], ctx: ToolContext) -> str:
+    # Refused at dispatch: the blocklist name match never sees an auto-approved call.
+    channel_err = _refuse_channel_write(
+        "session_set_autocompact",
+        ctx.caller_key,
+        why="a threshold decides when a session's context is summarized away",
+    )
+    if channel_err:
+        return channel_err
+    payload: dict[str, Any] = {"target": args["target"]}
+    writing = "pct" in args
+    if writing:
+        payload["pct"] = args["pct"]
+    verb = "change" if writing else "read"
+    try:
+        resp = ctx.client.post(
+            "/api/session-control/autocompact", payload, session_key=ctx.caller_key
+        )
+    except DashboardError as refused:
+        return redact(f"Error: could not {verb} that session's threshold: {refused.error}")
+    if resp.get("error"):
+        return redact(f"Error: could not {verb} that session's threshold: {resp['error']}")
+    target = resp.get("target", args["target"])
+    pct = resp.get("pct")
+    lo, hi = resp.get("min"), resp.get("max")
+    tail = ""
+    if isinstance(lo, (int, float)) and isinstance(hi, (int, float)):
+        tail = f" (allowed range {lo:g}-{hi:g})"
+    agent_pct, global_pct = resp.get("agent_pct"), resp.get("global_pct")
+    if isinstance(agent_pct, (int, float)):
+        follows = f"follows its crew's default ({agent_pct:g}%)"
+    elif isinstance(global_pct, (int, float)):
+        follows = f"follows the global default ({global_pct:g}%)"
+    else:
+        follows = "follows the default"
+    now = f"{pct:g}%" if isinstance(pct, (int, float)) else follows
+    if not writing:
+        return redact(f"`{target}` auto-compact threshold: {now}{tail}.")
+    if pct is None:
+        return redact(f"Cleared `{target}`'s threshold override; it now {follows}.")
+    return redact(f"Set `{target}`'s auto-compact threshold to {now}{tail}.")
 
 
 def _run_session_close(args: dict[str, Any], ctx: ToolContext) -> str:
@@ -4326,7 +4412,7 @@ def _run_chat_tag_column_create(args: dict[str, Any], ctx: ToolContext) -> str:
     )
     if gate:
         return gate
-    channel_err = _refuse_channel_board_write("chat_tag_column_create", caller_key)
+    channel_err = _refuse_channel_write("chat_tag_column_create", caller_key)
     if channel_err:
         return channel_err
     tags, tags_err = _get_rows(ctx.client, "/api/chat/tags")
@@ -4379,7 +4465,7 @@ def _run_chat_tag_column_move(args: dict[str, Any], ctx: ToolContext) -> str:
     )
     if gate:
         return gate
-    channel_err = _refuse_channel_board_write("chat_tag_column_move", caller_key)
+    channel_err = _refuse_channel_write("chat_tag_column_move", caller_key)
     if channel_err:
         return channel_err
     columns, cols_err = _get_rows(ctx.client, "/api/chat/tag-columns")

@@ -5546,6 +5546,9 @@ handle immediately.
 #:   and relaunches it. The conversation survives, but a reload is still a
 #:   process-level action on a session a person may be watching, and no
 #:   conductor step needs it.
+#: * ``session_set_autocompact`` — WITHHELD. Writes a session's compaction
+#:   threshold (its own or one it created), and no conductor step calls it yet;
+#:   a verb is granted for a step, not for being bounded.
 #: * ``session_retry`` — WITHHELD here, GRANTED to members (below). It sends no
 #:   new text: it re-runs a failed last turn through Resume's path, and it refuses
 #:   any turn that did not fail. But it still starts a turn in a session that is

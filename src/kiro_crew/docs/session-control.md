@@ -5,13 +5,14 @@ another one, change its model, reload its agent process, and take another one un
 the sidebar. The tools come from the
 `kirocrew-dashboard` MCP server, so an agent that does not mount that server
 never has them — exactly like any other MCP server. This page is the reference
-for all 33 of its tools, written for the agent that is about to use them.
+for all 34 of its tools, written for the agent that is about to use them.
 
 The server is defined in `src/kiro_crew/mcp_dashboard.py`. Two halves:
 
 - **Session control** — `session_create`, `session_fork`, `session_send`,
   `session_read_message`, `session_summary`, `session_stop`, `session_end_wait`, `session_retry`,
-  `session_continue`, `session_set_model`, `session_reload`, `session_rename`, `session_close`, `session_revive`,
+  `session_continue`, `session_set_model`, `session_reload`, `session_set_autocompact`,
+  `session_rename`, `session_close`, `session_revive`,
   `session_broadcast`, `session_status`, `session_adopt`, `session_release`. These reach another
   session.
 - **Sidebar shape** — `chat_folder_tree`, `chat_folder_create`,
@@ -625,6 +626,30 @@ Refusals only a revive gives:
 | `reopen_failed` | HTTP 503: the session could not be reopened. Try again |
 | `reopen_rollback_failed` | HTTP 503: the revive was refused but the session's closed mark could not be put back, so it may come back as open. Close it again from the History tab |
 
+### `session_set_autocompact`
+
+| Argument | Required | Meaning |
+|---|---|---|
+| `target` | yes | Session key or exact title; your own session key works too |
+| `pct` | no | Threshold percent within the context meter slider's range, or `null` to clear the override. Omit to read |
+
+Reads or changes one session's auto-compact threshold, the per-session
+override the slider in a tab's context meter sets. Omit `pct` to read: the
+reply gives the override, the crew default the session would follow, the
+global default, and the allowed range. A number sets the override. `null`
+clears it, so the session follows its crew's default, else the global one.
+The global threshold and a crew's default are not reachable from this tool.
+
+The target must be your own session or one you created. Any other session is
+refused with `not_creator`, whatever caller class you are, because a threshold
+decides when a conversation gets summarized away. Addressing your own session
+mid-turn is safe: the override is read only by the between-turn compaction
+check, so your current turn finishes and the next check uses the new value.
+
+A value outside the range is refused with `pct_out_of_range`, and the message
+names the limits. A relay archive is refused like every other verb refuses
+it. The value persists with the session and survives gateway restarts.
+
 ### `session_rename`
 
 | Argument | Required | Meaning |
@@ -812,8 +837,8 @@ gateway-issued key counts. Refusals you should expect, by code:
 | `target_not_found` | No open session matches that key or title. A closed tab is out of scope for every verb except session_revive, whose target is precisely an archived session |
 | `target_already_live` | session_revive only: the session is open already. The message carries its live key — address it directly |
 | `ambiguous_target` | The string matches more than one session across the three forms below. Address it by its session key |
-| `self_target` | A session cannot control itself. session_close and session_release are the exceptions: both accept the caller as the target |
-| `not_creator` | The caller is fenced to sessions it created itself (a crew member's DM slot, a scheduled run, and anything either of them created) |
+| `self_target` | A session cannot control itself. session_close, session_release and session_set_autocompact are the exceptions: each accepts the caller as the target |
+| `not_creator` | The caller is fenced to sessions it created itself (a crew member's DM slot, a scheduled run, and anything either of them created). session_set_autocompact applies this fence to every caller |
 | `workspace_mismatch` | Peers must be in the same workspace — that is the memory boundary |
 | `ephemeral_target` | Incognito and temporary sessions are not addressable |
 | `app_scoped_target` | App-scoped sessions are not addressable, in either direction |
