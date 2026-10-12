@@ -1115,6 +1115,22 @@ class _SshTunnel:
 
         Fails early if the ssh child exits before the port comes up (e.g. auth
         failure, ExitOnForwardFailure), capturing stderr for diagnostics.
+
+        The timeout message distinguishes the two shapes a timeout can take,
+        because they call for different operator action. A child that has
+        ALREADY EXITED is handled inside the loop by :meth:`_failed_on_child_exit`,
+        which composes a classified error from its stderr. A child that is STILL
+        RUNNING at the deadline has not failed at all -- it is a connect that did
+        not finish in the budget, which on a host reached through a ProxyCommand
+        (jump host, WSSH, corporate proxy) is the common case: the proxy
+        handshake alone routinely consumes most of the default budget before ssh
+        even begins the forward (see ``DEFAULT_CONNECT_TIMEOUT_SECS``), so for
+        those hosts this timeout is the binding constraint rather than a dead
+        link. A bare "timed out waiting for forward" names neither the cause nor
+        the one knob that fixes it, so a proxy-bound user retries into the same
+        wall with nothing to act on. Naming ``instances.connect_timeout_secs``
+        when the child is still connecting is the actionable half of the fix; the
+        default is left at 15s so a genuinely dead direct host still fails fast.
         """
         deadline = time.monotonic() + self._connect_timeout
         while time.monotonic() < deadline:
@@ -1129,8 +1145,39 @@ class _SshTunnel:
                     return False
                 return True
             await asyncio.sleep(_READY_POLL_INTERVAL_SECS)
-        self.status.error = f"timed out after {self._connect_timeout}s waiting for forward"
+        self.status.error = self._ready_timeout_error()
         return False
+
+    def _ready_timeout_error(self) -> str:
+        """Compose the readiness-timeout message, naming the cause and the knob.
+
+        Only reached when the deadline lapsed with the port never reachable and
+        the child never observed exited. The child's live/dead state at this
+        instant decides the wording:
+
+        * STILL RUNNING -- a connect that ran out of budget, not a failure. On a
+          ProxyCommand/jump-host the proxy handshake eats most of the budget
+          before the forward even begins, so the fix is to raise the timeout, and
+          the message says exactly that and names the tunable. (``_proc`` can read
+          ``None`` here only if a racing ``stop()`` cleared it, which is a
+          deliberate teardown, not a slow proxy -- the generic wording is right
+          for it.)
+        * ALREADY EXITED -- the child died in the same tick the loop gave up,
+          too late for :meth:`_failed_on_child_exit` to have caught it. Keep the
+          generic wording rather than guess a cause the stderr classifier was not
+          run against.
+        """
+        proc = self._proc
+        if proc is not None and proc.returncode is None:
+            return (
+                f"timed out after {self._connect_timeout}s waiting for the SSH forward "
+                f"while the connection was still being established (the ssh process is "
+                f"still running). A host reached through a jump host or proxy can spend "
+                f"most of this budget on the proxy handshake before the forward begins; "
+                f"raise it with `kirocrew config set instances.connect_timeout_secs "
+                f"<value>` and connect again."
+            )
+        return f"timed out after {self._connect_timeout}s waiting for forward"
 
     async def _failed_on_child_exit(self) -> bool:
         """Record an already-exited child as an ERROR status; True if it exited.
