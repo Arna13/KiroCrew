@@ -310,6 +310,41 @@ export function tailNotInPage(tail: ChatMessage[], page: ChatMessage[]): ChatMes
   return tail.filter(m => !rowIdentities(m).some(id => seen.has(id)))
 }
 
+/** The user's own sends that landed in `view` while a slot-detail fetch was in
+ *  flight: the rows past the dispatch-time baseline (`liveFrom`), each a user
+ *  bubble carrying a `sendId` (only a send mints one) that `page` -- read before
+ *  the send -- does not already carry by identity. Shared verbatim by
+ *  `switchSlot.fulfilled` and `refreshSlot.fulfilled`, which both replace the
+ *  transcript with a count-matched page and must keep these rows rather than
+ *  drop the user's message until the next fetch. `liveFrom` is clamped to the
+ *  view length so a stale or absent baseline cannot slice out of range.
+ *
+ *  `alsoExclude` is the head the caller is ALREADY preserving above the page
+ *  (`olderHeadAbovePage`). The baseline is a dispatch-time INDEX, so a
+ *  `loadOlderMessages` that prepends rows during the in-flight fetch slides it
+ *  down onto historical `sendId` rows; without excluding the preserved head
+ *  those rows enter both the head and this tail, and last-wins dedup then moves
+ *  the old questions below their replies. Excluding it keeps the rescue to
+ *  genuinely new sends. */
+export function liveSendsSince(
+  view: ChatMessage[], liveFrom: number, page: ChatMessage[], alsoExclude: readonly ChatMessage[] = [],
+): ChatMessage[] {
+  const from = Math.min(liveFrom, view.length)
+  return tailNotInPage(
+    view.slice(from).filter(m => m.role === 'user' && typeof m.meta?.sendId === 'string' && m.meta.sendId),
+    [...alsoExclude, ...page],
+  )
+}
+
+/** An idle fetched page that does not carry a send made while it was in flight
+ *  (`liveSends`) was read BEFORE that send, so its `running: false` is stale and
+ *  must not idle the slot under the turn the send opened. The one predicate both
+ *  `switchSlot.fulfilled` and `refreshSlot.fulfilled` gate their run-verdict
+ *  writes on. */
+export function pagePredatesLiveSend(running: boolean, liveSends: readonly ChatMessage[]): boolean {
+  return !running && liveSends.length > 0
+}
+
 /** Epoch ms for a transcript `ts`, or `null` when it cannot be read.
  *
  *  One transcript can carry both offset-aware and naive rows — current builds

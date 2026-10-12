@@ -16,7 +16,7 @@ import { recentErrors, recordError, redactSecrets, type ErrorReport } from '../.
 import { chatSlotDetailPath } from '../../api/chatSlotPaths'
 import type { ChatState } from './state'
 import { fetchSlotDetail, isUnsafeKey, safeKey } from './wire'
-import { deduplicateByMid, floorForGen, olderHeadAbovePage, raiseChunkSeq, sameTranscript, serverRowCount, snapshotChunkGen, snapshotChunkSeq, tailNotInPage } from './transcript'
+import { deduplicateByMid, floorForGen, liveSendsSince, olderHeadAbovePage, pagePredatesLiveSend, raiseChunkSeq, sameTranscript, serverRowCount, snapshotChunkGen, snapshotChunkSeq } from './transcript'
 import { abortActiveOlderFetch, pagingCursorAfterKeptHead, slotCoverageShortfall, slotSwitchFetchLimit } from './paging'
 import { mergePreservedThinking, reinsertThinkingOrphans, type ThinkingAnchor } from './thinking'
 import { bumpRunEpoch, enterActiveSlot, pushHistory } from './runState'
@@ -540,10 +540,13 @@ export function addSlotSwitchCases(builder: ActionReducerMapBuilder<ChatState>):
       // that already caught the send cannot double it. The trailing reply has
       // its own re-attach below; these go in front of it, in send order.
       const liveFrom = Math.min(state._switchLiveFrom ?? existing.length, existing.length)
-      const liveSends = tailNotInPage(
-        existing.slice(liveFrom).filter(m => m.role === 'user' && typeof m.meta?.sendId === 'string' && m.meta.sendId),
-        preserved,
-      )
+      // Computed before `liveSends` so the rescue can exclude the head it will
+      // preserve: the dispatch-time `liveFrom` index slides onto historical
+      // `sendId` rows when `loadOlderMessages` prepends during the in-flight
+      // fetch, and those rows must not land in both the head and the tail.
+      const priorServerRows = existing.filter(m => m.role !== 'thinking')
+      const { olderHead } = olderHeadAbovePage(priorServerRows, preserved)
+      const liveSends = liveSendsSince(existing, liveFrom, preserved, olderHead)
       let next: ChatMessage[]
       if (
         state._wsChunkedDuringFetch
@@ -595,8 +598,6 @@ export function addSlotSwitchCases(builder: ActionReducerMapBuilder<ChatState>):
        * the head are collapsed by the `hydrateQueuedBubbles` call below, which
        * strips every queued row before re-adding the authoritative server set.
        */
-      const priorServerRows = existing.filter(m => m.role !== 'thinking')
-      const { olderHead } = olderHeadAbovePage(priorServerRows, preserved)
       if (olderHead.length) next = [...olderHead, ...next]
       // The page's run verdict. An idle page that does not carry a send made
       // while it was in flight (`liveSends`) was read BEFORE that send: it
@@ -616,8 +617,8 @@ export function addSlotSwitchCases(builder: ActionReducerMapBuilder<ChatState>):
       // syncSlotRunningFromServer; the hand-back in `enterActiveSlot` reads
       // the epoch to tell a turn that ran on screen from a slot that saw
       // nothing.
-      const pagePredatesLiveSend = !running && liveSends.length > 0
-      if (!pagePredatesLiveSend) {
+      const pagePredatesSend = pagePredatesLiveSend(running, liveSends)
+      if (!pagePredatesSend) {
         state.slotState = running ? 'streaming' : 'idle'
         if (running && !state.slotRunning) bumpRunEpoch(state, key)
         state.slotRunning = running
@@ -638,7 +639,7 @@ export function addSlotSwitchCases(builder: ActionReducerMapBuilder<ChatState>):
         const snapGen = snapshotChunkGen(messages)
         state.lastChunkSeq = raiseChunkSeq(floorForGen(state.lastChunkSeq, state.lastChunkGen, snapGen), snapshotChunkSeq(messages))
         if (snapGen !== undefined) state.lastChunkGen = snapGen
-      } else if (!pagePredatesLiveSend) {
+      } else if (!pagePredatesSend) {
         state.lastChunkSeq = undefined
       }
       /* The cursor is a row OFFSET, not the array's first row, so keeping a head
