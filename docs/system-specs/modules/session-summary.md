@@ -280,6 +280,18 @@ inherits `agent.model`, so unattended summarization cannot ride the interactive
 flagship. Every failure path is swallowed and logged: a lost summary must never
 surface as a failed turn, and the previous cached summary stays valid.
 
+The summary text follows the **workspace UI language** (`dashboard.language`)
+rather than the transcript's. `_generate_locked` hands `context.ui_language_tag(cfg)`
+to `_build_prompt`, which fills the prompt's `{language}` slot just before the
+transcript; an unset language, or a tag that names no shipped catalog, fills it with
+nothing and leaves the prompt byte-identical. The slot is filled by `str.replace` on
+the constant alone, before the transcript is appended, so a transcript that quotes
+`{language}` cannot restate it. The JSON keys and the `status` values stay as the
+prompt spells them, because `normalize_payload` reads them. A summary already cached
+for the current transcript keeps the language it was written in until the transcript
+changes. `TestPromptFollowsTheUiLanguage` in `test_session_summary_generate.py` pins
+the slot.
+
 On success, `push_session_summary()` broadcasts `{"_type": "session_summary"}` so
 the panel invalidates immediately rather than polling.
 
@@ -538,6 +550,6 @@ addition later; if one is ever added it must be registered inline in
 | `test_session_summary_config.py` | Defaults, clamping, disk parsing, malformed sections |
 | `test_session_summary_extract.py` | Role filtering, `meta` ignored, excerpting, the two mechanical traps |
 | `test_session_summary_storage.py` | Sidecar round-trip, invalidation, transcript-untouched, delete reaping |
-| `test_session_summary_generate.py` | Gating, caching, failure containment, prompt trap coverage |
+| `test_session_summary_generate.py` | Gating, caching, failure containment, prompt trap coverage, the UI-language slot |
 | `test_session_summary_api.py` | Status codes, error `code`, stale flag, never-generates |
 | `test_mcp_dashboard_session_summary.py` | The `session_summary` MCP reader |
