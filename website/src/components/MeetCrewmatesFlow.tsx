@@ -8,6 +8,7 @@ import { useTranslation } from 'react-i18next'
 import { api, type SlackConfigData } from '../api/client'
 import { ApiError } from '../api/apiError'
 import { cronJobsQuery } from '../api/cronJobsQuery'
+import { MEMBERS_ROSTER_QUERY_KEY, membersRosterQuery } from '../api/membersQuery'
 import { parseErrorCode } from '../utils/errorReport'
 import { useDocumentImeLatch, useImeGuard } from '../hooks/useImeGuard'
 import { compareText, fmtTime } from '../i18n/format'
@@ -344,12 +345,14 @@ export default function MeetCrewmatesFlow({
   // A taken name is a step-2 problem: the flow returns there and says it under
   // the name field, where the fix is. Cleared as soon as the name changes.
   // `taken` = the server's 409: the notice then carries the way to that
-  // crewmate (the Crew Members page) and the matching suggestion chip is marked.
+  // crewmate (the Crewmates page) and the matching suggestion chip is marked.
+  // A name the roster already lists is caught on step 2 itself (`nameIssue`);
+  // this state is the server's word for what the roster did not show.
   const [nameError, setNameError] = useState<{ message: string; taken: boolean; name: string } | null>(null)
   const [schedule, setSchedule] = useState<'saved' | 'refused' | 'unknown' | 'none'>('saved')
   const [createdName, setCreatedName] = useState('')
   // The config key the server derived from the typed name (`Issue Radar` ->
-  // `issue-radar`). The Crew Members page addresses and seeds a crewmate by
+  // `issue-radar`). The Crewmates page addresses and seeds a crewmate by
   // this key, never by the label.
   const [createdKey, setCreatedKey] = useState('')
   // What the ready step summarises: the goal as submitted and, for a daily
@@ -362,6 +365,21 @@ export default function MeetCrewmatesFlow({
   const trimmed = name.trim()
   const nameValid = isValidCrewmateName(trimmed)
   const displayName = trimmed || t('components.meetCrewmatesFlow.example_radar_name')
+  // The names the roster already shows (key and label), read the way the
+  // Crewmates page's own create dialog reads them (`NewCrewmateDialog`): a
+  // match is the server's 409 `agent_exists` said before the user moves on,
+  // so Next stays off on step 2 instead of bouncing back from Create. Until
+  // the roster answers (or when it fails) nothing is flagged and the server's
+  // refusal stays the backstop.
+  const { data: roster, isError: rosterFailed } = useQuery({ ...membersRosterQuery, enabled: open })
+  const takenNames = useMemo(
+    () => new Set((roster ?? []).flatMap(r => (r.display_name ? [r.name, r.display_name] : [r.name]))),
+    [roster],
+  )
+  // A roster match is a validation hint (nothing failed yet), the server's
+  // refusal is an error: they render differently, and either one holds Next.
+  const nameTakenHint = !nameError && nameValid && takenNames.has(trimmed)
+  const nameIssue = !!nameError || nameTakenHint
 
   // Reset on every opening so a re-entry from the Crewmates page starts clean.
   // `t` is read through a ref: a language switch mid-flow must not reset the
@@ -627,6 +645,9 @@ export default function MeetCrewmatesFlow({
       if (e instanceof ApiError && e.status >= 400 && e.status < 500) guideSave.refused()
       if (e instanceof ApiError && e.status === 409 && parseErrorCode(e.body) === 'agent_exists') {
         setNameError({ message: t('components.meetCrewmatesFlow.error_name_taken', { name: trimmed }), taken: true, name: trimmed })
+        // The roster missed this name: refresh it, so step 2 keeps flagging
+        // the name after the user types away and back.
+        void qc.invalidateQueries({ queryKey: MEMBERS_ROSTER_QUERY_KEY })
         go(2)
         return
       }
@@ -825,6 +846,20 @@ export default function MeetCrewmatesFlow({
       )}
     </div>
   )
+  // The way from a taken name to the crewmate that owns it (step 2).
+  const openTakenCrewmate = (tone: string) => (
+    <button
+      type="button"
+      className={`text-[12px] font-medium underline underline-offset-2 ${tone} hover:opacity-80 cursor-pointer bg-transparent border-none p-0`}
+      onClick={() => {
+        finish('dismissed')
+        navigate('/members')
+      }}
+      data-testid="meet-crewmates-name-taken-open"
+    >
+      {t('components.meetCrewmatesFlow.open_crewmates')}
+    </button>
+  )
   if (step === 1) {
     const goalOk = !!job.trim()
     body = (
@@ -922,11 +957,11 @@ export default function MeetCrewmatesFlow({
               autoComplete="off"
               spellCheck={false}
               maxLength={NAME_MAX}
-              aria-invalid={nameError ? true : undefined}
-              aria-describedby={nameError ? 'meet-crewmates-name-error' : undefined}
+              aria-invalid={nameIssue ? true : undefined}
+              aria-describedby={nameIssue ? 'meet-crewmates-name-error' : undefined}
               className="w-full text-[13px]"
               data-testid="meet-crewmates-name"
-              {...ime.bindEnter({ onEnter: () => { if (nameValid && !nameError) go(3) } })}
+              {...ime.bindEnter({ onEnter: () => { if (nameValid && !nameIssue) go(3) } })}
             />
             {nameError && (
               /* The server's refusal (409 taken / 400 unusable name). No hand-off: the
@@ -940,31 +975,38 @@ export default function MeetCrewmatesFlow({
                   variant={nameError.taken ? 'block' : 'inline'}
                   className={nameError.taken ? 'mt-2 text-left' : 'mt-2'}
                   testId="meet-crewmates-name-error"
-                  footer={
-                    nameError.taken ? (
-                      <button
-                        type="button"
-                        className="text-[12px] font-medium underline underline-offset-2 text-danger hover:opacity-80 cursor-pointer bg-transparent border-none p-0"
-                        onClick={() => {
-                          finish('dismissed')
-                          navigate('/members')
-                        }}
-                        data-testid="meet-crewmates-name-taken-open"
-                      >
-                        {t('components.meetCrewmatesFlow.open_crewmates')}
-                      </button>
-                    ) : undefined
-                  }
+                  footer={nameError.taken ? openTakenCrewmate('text-danger') : undefined}
                 />
               </div>
+            )}
+            {nameTakenHint && (
+              /* The roster already lists this name: a validation hint like the
+                 time field's (nothing failed), with the same way to that
+                 crewmate the server's refusal offers. */
+              <div id="meet-crewmates-name-error" className="mt-2 text-[12px] text-warn-fg" data-testid="meet-crewmates-name-taken-hint">
+                <p>{t('components.meetCrewmatesFlow.error_name_taken', { name: trimmed })}</p>
+                <div className="mt-1">{openTakenCrewmate('text-warn-fg')}</div>
+              </div>
+            )}
+            {rosterFailed && (
+              /* No hand-off: the name and job typed in this flow are unsaved.
+                 A failed read (first load or refresh) means the names above
+                 may be stale; a taken name is then said by Create instead. */
+              <ErrorNotice
+                message={t('pages.membersPage.roster_load_failed')}
+                variant="inline"
+                className="mt-2"
+                testId="meet-crewmates-roster-error"
+              />
             )}
             <div className="flex flex-wrap gap-1.5 mt-2.5" role="group" aria-label={t('components.meetCrewmatesFlow.suggested_names')}>
               {EXAMPLES.map(ex => {
                 const label = t(ex.name)
                 const on = trimmed === label
-                // The chip whose name the server just refused as taken is marked
-                // so it reads as "that one exists", not as a fresh suggestion.
-                const taken = !!nameError?.taken && nameError.name === label
+                // A chip whose name the roster lists, or the server just refused
+                // as taken, is marked so it reads as "that one exists", not as a
+                // fresh suggestion.
+                const taken = takenNames.has(label) || (!!nameError?.taken && nameError.name === label)
                 return (
                   <button
                     key={ex.id}
@@ -1008,7 +1050,7 @@ export default function MeetCrewmatesFlow({
         <Btn type="button" className="h-9 rounded-lg px-4" onClick={() => go(1)} data-testid="meet-crewmates-back">
           {t('components.meetCrewmatesFlow.back')}
         </Btn>
-        <SendBtn type="button" disabled={!nameValid || !!nameError} onClick={() => go(3)} data-testid="meet-crewmates-next" {...maybe(embedded ? GUIDE_ANCHORS.crewmateNameNext : undefined, guideAnchor)}>
+        <SendBtn type="button" disabled={!nameValid || !!nameIssue} onClick={() => go(3)} data-testid="meet-crewmates-next" {...maybe(embedded ? GUIDE_ANCHORS.crewmateNameNext : undefined, guideAnchor)}>
           {t('components.meetCrewmatesFlow.next')}
         </SendBtn>
       </>

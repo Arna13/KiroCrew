@@ -240,21 +240,24 @@ describe('MeetCrewmatesFlow', () => {
 
   it('a create with no usable answer stops on step 3: nothing is claimed by name, no schedule, the notice sends the user to the Crewmates page', async () => {
     createAgent.mockRejectedValueOnce(new Error('network'))
-    // A same-named row on the roster is NOT evidence: another opening prefills
-    // the same example name. Without the identity from a clean create response
-    // there is nothing this flow may claim.
-    members.mockResolvedValue({ members: [{ name: 'Radar', slug: 'radar', memory_store: 'someone-elses' } as never] })
     const onDone = vi.fn()
     renderWithProviders(<MeetCrewmatesFlow open onDone={onDone} onCreated={vi.fn()} />)
+    // Step 2 reads the roster once (empty: the name is free).
+    await waitFor(() => expect(members).toHaveBeenCalledTimes(1))
+    // A same-named row on the roster AFTER the create is NOT evidence: another
+    // opening prefills the same example name. Without the identity from a
+    // clean create response there is nothing this flow may claim, so the
+    // roster is not read again to decide.
+    members.mockResolvedValue({ members: [{ name: 'Radar', slug: 'radar', memory_store: 'someone-elses' } as never] })
     next()
     next()
     fireEvent.click(screen.getByTestId('meet-crewmates-create'))
     const notice = await screen.findByTestId('meet-crewmates-error')
     expect(notice).toHaveTextContent('may or may not have been created')
-    expect(notice).toHaveTextContent('Crew Members page')
+    expect(notice).toHaveTextContent('Crewmates page')
     expect(screen.getByTestId('meet-crewmates-step-3')).toBeInTheDocument()
     expect(createCron).not.toHaveBeenCalled()
-    expect(members).not.toHaveBeenCalled()
+    expect(members).toHaveBeenCalledTimes(1)
     expect(screen.queryByTestId('meet-crewmates-ready')).toBeNull()
     fireEvent.click(screen.getByTestId('meet-crewmates-open-crewmates'))
     expect(onDone).toHaveBeenCalledWith('completed')
@@ -303,7 +306,7 @@ describe('MeetCrewmatesFlow', () => {
     expect(onDone).not.toHaveBeenCalled()
     // The notice carries the way to the crewmate that owns the name, and the
     // matching suggestion chip is marked as taken.
-    expect(screen.getByTestId('meet-crewmates-name-taken-open')).toHaveTextContent('Open the Crew Members page')
+    expect(screen.getByTestId('meet-crewmates-name-taken-open')).toHaveTextContent('Open the Crewmates page')
     expect(screen.getByRole('button', { name: /^Radar · already exists$/ })).toHaveAttribute('title', 'already exists')
     // Picking another chip is a name change too: the refusal clears, Next comes back.
     fireEvent.click(screen.getByRole('button', { name: /Scribe/ }))
@@ -321,6 +324,65 @@ describe('MeetCrewmatesFlow', () => {
     fireEvent.click(screen.getByTestId('meet-crewmates-create'))
     fireEvent.click(await screen.findByTestId('meet-crewmates-name-taken-open'))
     expect(onDone).toHaveBeenCalledWith('dismissed')
+  })
+
+  it('a name the roster already lists is flagged on step 2 and Next stays off, before any create', async () => {
+    // The roster shows a crewmate keyed `issue-radar` and labelled "Radar", and
+    // one keyed `scribe` with no label: both the label and the key count.
+    members.mockResolvedValue({ members: [
+      { name: 'issue-radar', display_name: 'Radar', slug: 'issue-radar' } as never,
+      { name: 'scribe', slug: 'scribe' } as never,
+    ] })
+    renderWithProviders(<MeetCrewmatesFlow open onDone={vi.fn()} onCreated={vi.fn()} />)
+    next()
+    // The prefilled "Radar" is taken: said under the name field as a hint
+    // (nothing failed, so no alert), Next is off, Enter does not advance, and
+    // the chip reads as taken.
+    const hint = await screen.findByTestId('meet-crewmates-name-taken-hint')
+    expect(hint).toHaveTextContent('A crewmate named Radar already exists')
+    expect(hint.querySelector('[role="alert"]')).toBeNull()
+    expect(screen.queryByTestId('meet-crewmates-name-error')).toBeNull()
+    expect(screen.getByTestId('meet-crewmates-name')).toHaveAttribute('aria-invalid', 'true')
+    expect(screen.getByTestId('meet-crewmates-name')).toHaveAttribute('aria-describedby', hint.id)
+    expect(screen.getByTestId('meet-crewmates-next')).toBeDisabled()
+    fireEvent.keyDown(screen.getByTestId('meet-crewmates-name'), { key: 'Enter' })
+    expect(screen.getByTestId('meet-crewmates-step-2')).toBeInTheDocument()
+    expect(screen.getByTestId('meet-crewmates-name-taken-open')).toHaveTextContent('Open the Crewmates page')
+    expect(screen.getByRole('button', { name: /^Radar · already exists$/ })).toHaveAttribute('title', 'already exists')
+    // A key the roster lists is taken too.
+    fireEvent.change(screen.getByTestId('meet-crewmates-name'), { target: { value: 'scribe' } })
+    expect(screen.getByTestId('meet-crewmates-name-taken-hint')).toHaveTextContent('A crewmate named scribe already exists')
+    expect(screen.getByTestId('meet-crewmates-next')).toBeDisabled()
+    // A free name clears the hint and Next comes back.
+    fireEvent.change(screen.getByTestId('meet-crewmates-name'), { target: { value: 'Radar2' } })
+    expect(screen.queryByTestId('meet-crewmates-name-taken-hint')).toBeNull()
+    expect(screen.getByTestId('meet-crewmates-next')).toBeEnabled()
+    next()
+    expect(screen.getByTestId('meet-crewmates-step-3')).toBeInTheDocument()
+    expect(createAgent).not.toHaveBeenCalled()
+  })
+
+  it('a roster that cannot be read says so on step 2 and leaves the name to Create', async () => {
+    members.mockRejectedValue(new Error('network'))
+    renderWithProviders(<MeetCrewmatesFlow open onDone={vi.fn()} onCreated={vi.fn()} />)
+    next()
+    expect(await screen.findByTestId('meet-crewmates-roster-error')).toHaveTextContent('Could not load your crewmates')
+    expect(screen.queryByTestId('meet-crewmates-name-taken-hint')).toBeNull()
+    // No hand-off next to the unsaved name: the notice offers no agent button.
+    expect(screen.getByTestId('meet-crewmates-roster-error').querySelector('button')).toBeNull()
+    expect(screen.getByTestId('meet-crewmates-next')).toBeEnabled()
+    next()
+    expect(screen.getByTestId('meet-crewmates-step-3')).toBeInTheDocument()
+  })
+
+  it('a roster refresh that fails says so even while the earlier rows are cached', async () => {
+    const { queryClient } = renderWithProviders(<MeetCrewmatesFlow open onDone={vi.fn()} onCreated={vi.fn()} />)
+    next()
+    await waitFor(() => expect(members).toHaveBeenCalledTimes(1))
+    expect(screen.queryByTestId('meet-crewmates-roster-error')).toBeNull()
+    members.mockRejectedValue(new Error('network'))
+    await queryClient.refetchQueries({ queryKey: ['kirocrew-agents', 'members-roster'] })
+    expect(await screen.findByTestId('meet-crewmates-roster-error')).toHaveTextContent('Could not load your crewmates')
   })
 
   it('a schedule the server refused (4xx) lands on the ready step saying it was not saved', async () => {
