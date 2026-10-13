@@ -778,28 +778,39 @@ def test_crash_dump_diagnostic_carries_the_newest_stack(tmp_path: Path) -> None:
     assert "older" not in text
 
 
-def test_crash_dump_diagnostic_keeps_the_wedged_thread_under_the_cap(tmp_path: Path) -> None:
-    """``faulthandler`` writes the main thread LAST, behind every idle worker. The
-    diagnostic replays the wedged thread first, so a dump past the cap keeps the
-    stack that explains the stall and drops workers."""
+def test_crash_dump_diagnostic_replays_every_thread_uncapped(tmp_path: Path) -> None:
+    """``faulthandler`` writes threads newest-first, so hundreds of idle workers
+    sit between the top of the file and the one thread that matters. The
+    diagnostic replays the wedged thread first and then EVERY other thread with
+    the journal's 120-line / 8 KiB cap lifted: a loop thread caught at a syscall
+    boundary is waiting for the GIL some OTHER thread holds, and that thread can
+    be anywhere in the file."""
     workers = "".join(
         f"Thread 0x{n:04x} (most recent call first):\n"
-        '  File "threading.py", line 1 in _bootstrap\n'
-        '  File "queue.py", line 2 in get\n'
+        '  File "/usr/lib/python3.12/queue.py", line 171 in get\n'
+        '  File "/usr/lib/python3.12/concurrent/futures/thread.py", line 90 in _worker\n'
+        '  File "/usr/lib/python3.12/threading.py", line 1032 in _bootstrap\n'
         for n in range(400)
     )
     body = (
-        "Timeout (0:00:25)!\n" + workers + "Thread 0xffff (most recent call first):\n"
-        '  File "memory.py", line 42 in wedged_frame\n'
+        "Timeout (0:00:25)!\n"
+        + workers[: len(workers) // 2]
+        + "Thread 0xbeef (most recent call first):\n"
+        '  File "/usr/lib/python3.12/ctypes/__init__.py", line 379 in __init__\n'
+        '  File "/home/u/src/kiro_crew/embeddings.py", line 700 in gil_holder\n'
+        + workers[len(workers) // 2 :]
+        + "Current thread 0xffff (most recent call first):\n"
+        '  File "/usr/lib/python3.12/selectors.py", line 468 in select\n'
+        '  File "/usr/lib/python3.12/asyncio/base_events.py", line 1961 in _run_once\n'
     )
     _write_dump(tmp_path, "loopstall-20261010T034911Z.txt", body)
     text = crash_dump_diagnostic(tmp_path)
-    assert text.endswith("... (dump truncated; wedged thread shown first)")
-    assert "wedged_frame" in text
-    assert text.index("wedged_frame") < text.index("_bootstrap")
-    # dump_replay_lines caps at 120 lines / 8192 bytes of stack text; the header
-    # line and the joining newlines ride on top.
-    assert len(text) < 8192 + 120 + 200
+    assert "truncated" not in text
+    # Wedged thread first, and the holder buried mid-file is still there.
+    assert text.index("in select") < text.index("gil_holder")
+    # Nothing is dropped: 400 workers + the holder + the wedged thread.
+    assert text.count("(most recent call first)") == 402
+    assert len(text) > 8192 + 120
 
 
 def test_gateway_diagnostics_include_the_crash_dump() -> None:

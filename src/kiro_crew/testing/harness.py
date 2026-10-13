@@ -113,9 +113,14 @@ def crash_dump_diagnostic(home: Path) -> str:
     message instead of a directory nobody uploads.
 
     The stacks come through :func:`~kiro_crew.dashboard.crash_dump_store.dump_replay_lines`
-    at its journal-replay caps: ``faulthandler`` writes threads newest-first,
-    which puts the main thread LAST behind every idle worker, and that reader
-    replays the wedged thread first, so the caps only ever drop workers.
+    with its journal caps lifted: every thread, wedged thread first. The
+    journal's 120-line / 8 KiB budget is wrong for a failure message. A loop
+    thread caught at a syscall boundary (``selectors.select``, ``stat``) while
+    every visible worker is parked is waiting to reacquire the GIL from some
+    OTHER thread inside a long native call, and ``faulthandler`` lists threads
+    newest-first, so a capped replay ends before that thread -- the one stack
+    that says what stalled the gateway. The reader's own file bound (a few
+    MiB) is the only cap left.
 
     Empty when no dump with stacks exists -- a header-only file is the sentinel
     every boot opens and says nothing. Never raises: a missing or unreadable
@@ -126,7 +131,7 @@ def crash_dump_diagnostic(home: Path) -> str:
         dump = newest_dump_with_stacks(home / "logs" / "crash-dumps")
         if dump is None:
             return ""
-        lines, truncated = dump_replay_lines(dump)
+        lines, truncated = dump_replay_lines(dump, max_lines=sys.maxsize, max_bytes=sys.maxsize)
     except Exception:  # noqa: BLE001 - diagnostics must never mask the failure
         return ""
     if not lines:
