@@ -208,3 +208,46 @@ async def test_run_git_tree_kills_and_reaps_on_cancellation(monkeypatch) -> None
 
     reap.assert_awaited_once_with(proc)
     assert communicate.call_count == 1
+
+
+@pytest.mark.parametrize(
+    ("trusted", "recorded"),
+    [
+        ("git@example.com:team/notes.git", "example.com:team/notes"),
+        ("ssh://git@example.com/team/notes.git", "ssh://example.com/team/notes"),
+        ("https://user:token@example.com/team/notes.git", "https://example.com/team/notes"),
+        ("https://example.com/team/notes.git", "https://example.com/team/notes/"),
+        ("/srv/vaults/notes.git", "/srv/vaults/notes"),
+    ],
+)
+def test_the_trusted_remote_matches_the_url_git_records_in_fetch_head(trusted, recorded):
+    """git drops userinfo and `.git` when it writes FETCH_HEAD; the trusted URL
+    is reduced the same way, so an SSH remote -- the case manual pulls exist for
+    -- still matches."""
+    assert git_ops._anonymized_remote(trusted) == git_ops._anonymized_remote(recorded)
+
+
+def test_a_different_host_or_path_does_not_match_after_anonymizing():
+    assert git_ops._anonymized_remote(
+        "git@example.com:team/notes.git"
+    ) != git_ops._anonymized_remote("git@example.org:team/notes.git")
+    assert git_ops._anonymized_remote(
+        "git@example.com:team/notes.git"
+    ) != git_ops._anonymized_remote("example.com:team/other")
+
+
+def test_fetched_tip_requires_the_current_branch_from_the_trusted_remote(tmp_path):
+    oid_a, oid_b = "a" * 40, "b" * 40
+    (tmp_path / "FETCH_HEAD").write_text(
+        f"{oid_a}\t\tbranch 'main' of example.com:team/notes\n"
+        f"{oid_b}\tnot-for-merge\tbranch 'draft' of example.com:team/notes\n",
+        encoding="utf-8",
+    )
+    trusted = "git@example.com:team/notes.git"
+    assert git_ops._fetched_tip_sync(str(tmp_path), "main", trusted) == oid_a
+    assert git_ops._fetched_tip_sync(str(tmp_path), "draft", trusted) == oid_b
+    assert (
+        git_ops._fetched_tip_sync(str(tmp_path), "main", "git@example.org:team/notes.git") is None
+    )
+    assert git_ops._fetched_tip_sync(str(tmp_path), "other", trusted) is None
+    assert git_ops._fetched_tip_sync(str(tmp_path / "missing"), "main", trusted) is None

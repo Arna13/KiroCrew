@@ -651,19 +651,76 @@ def synced_cleanly(result: dict[str, Any]) -> bool:
     return not result.get("conflicts")
 
 
-async def record_last_sync(vault_id: str) -> int:
-    """Stamp *vault_id*'s last conflict-free sync and return it (epoch ms).
+async def record_last_sync(vault_id: str, at: Optional[int] = None) -> int:
+    """Stamp *vault_id*'s last conflict-free sync and return the stored stamp (epoch ms).
 
-    The backend is the ONLY writer of ``lastSync``, for both the manual and the
-    background trigger, so a client cannot claim a sync happened and the two
-    paths cannot disagree about when one did.
+    The backend is the ONLY writer of ``lastSync``, for the manual, the
+    background and the external-pull trigger, so a client cannot claim a sync
+    happened and the paths cannot disagree about when one did.
+
+    ``at`` is the moment the sync was observed when that is not now: a pull
+    made outside the app is stamped with its fetch time. A stamp never moves
+    backwards, so a fetch time that predates a sync the app itself completed
+    meanwhile leaves the newer stamp in place.
     """
-    now = int(time.time() * 1000)
+    stamp = int(time.time() * 1000) if at is None else at
     async with _settings_lock:
         settings = await read_settings()
-        settings["lastSync"][vault_id] = now
+        stamp = max(stamp, settings["lastSync"].get(vault_id, -1))
+        settings["lastSync"][vault_id] = stamp
         await asyncio.to_thread(_write_settings_sync, settings)
-    return now
+    return stamp
+
+
+async def record_external_sync(vault: dict[str, Any]) -> None:
+    """Count a pull made outside the app as this vault's last sync, if it was one.
+
+    Auto sync can be unavailable (an SSH remote the sandbox cannot reach), so a
+    user keeps the vault current with ``git pull`` by hand. Only the app's own
+    sync paths stamp ``lastSync``, so the "Synced N ago" label kept reading
+    from the last time the app pulled -- a week stale over a vault that was
+    current. What is stamped here is the observation the app's own sync earns
+    its stamp with: a fetch newer than the stamp, from the trusted remote for
+    the checked-out branch, that left HEAD at the fetched tip with nothing
+    pending in the vault's scope. A fetch that left local commits unpushed, or
+    edits uncommitted, is not a sync: those notes are still only on this
+    machine, so the label must not say they are backed up.
+
+    Runs on every external-change poll, so the per-tick cost is one stat of
+    the recorded git dir's ``FETCH_HEAD``. Each fetch is examined once, and
+    every outcome is final for that fetch -- a refusal, pending edits and a
+    git error included -- so a vault that stays ahead of its remote, is
+    mid-edit, or refuses git reads does not re-run them every tick; the next
+    fetch is examined afresh. The ``.git`` pointer is confirmed against the
+    recorded git dir before any git command runs in the checkout.
+    """
+    if vault.get("localOnly"):
+        return
+    trusted_gitdir, trusted_remote = vault.get("gitDir"), vault.get("remoteUrl")
+    if not trusted_gitdir or not trusted_remote:
+        return
+    real_gitdir = await asyncio.to_thread(os.path.realpath, trusted_gitdir)
+    fetched = await asyncio.to_thread(git_ops.fetch_head_mtime_ms, real_gitdir)
+    state = watch_state(vault)
+    if fetched is None or fetched == state["fetchSeen"]:
+        return
+    state["fetchSeen"] = fetched
+    if fetched <= (await read_settings())["lastSync"].get(vault["id"], -1):
+        return
+    path = vault["localPath"]
+    try:
+        if not await git_ops.gitdir_is_trusted(path, trusted_gitdir):
+            return
+        if not await git_ops.head_is_fetched_tip(
+            path, gitdir=real_gitdir, trusted_remote=trusted_remote
+        ):
+            return
+        if await git_ops.status(path, vault.get("subfolder")):
+            return
+    except git_ops.GitError as exc:
+        logger.debug("md-notebook: external sync check failed for %s: %s", path, exc)
+        return
+    await record_last_sync(vault["id"], at=fetched)
 
 
 # ---------------------------------------------------------------------------
@@ -1259,7 +1316,7 @@ def _snapshot_sync(root: Path) -> dict[str, float]:
 def watch_state(vault: dict[str, Any]) -> dict[str, Any]:
     state = _watches.get(vault["id"])
     if state is None:
-        state = {"rev": 0, "paths": set(), "snapshot": None}
+        state = {"rev": 0, "paths": set(), "snapshot": None, "fetchSeen": None}
         _watches[vault["id"]] = state
     return state
 
@@ -1849,9 +1906,15 @@ async def api_pat(request: web.Request) -> web.Response:
 
 
 async def api_changes(request: web.Request) -> web.Response:
-    """External-change poll: the current revision plus paths touched since."""
+    """External-change poll: the current revision plus paths touched since.
+
+    A pull made outside the app is an external change too: the poll is where
+    :func:`record_external_sync` stamps it. The stamp reaches the page through
+    the settings it already refetches, so the reply itself is unchanged.
+    """
     vault = await require_vault(request)
     state = await scan_changes(vault)
+    await record_external_sync(vault)
     try:
         since = int(request.query.get("since", "0"))
     except ValueError:

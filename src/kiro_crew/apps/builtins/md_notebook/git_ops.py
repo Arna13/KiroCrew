@@ -618,6 +618,98 @@ async def _has_head(dir_: str) -> bool:
     return code == 0
 
 
+def fetch_head_mtime_ms(gitdir: str) -> Optional[int]:
+    """When the checkout behind *gitdir* last fetched, as epoch ms; None if never.
+
+    Read from ``FETCH_HEAD``'s mtime: git rewrites that file on every ``fetch``
+    and ``pull``, whether or not anything new arrived, and nothing else writes
+    it, so it is the one marker a pull made outside the app always leaves. A
+    push leaves no such marker (the reflog is optional and ``gc`` rewrites it),
+    so a push-only flow is seen at the next fetch.
+
+    A plain stat, meant for a caller's worker thread: it runs on every
+    external-change poll, so it must start no git process.
+    """
+    try:
+        st = os.stat(os.path.join(gitdir, "FETCH_HEAD"))
+    except OSError:
+        return None
+    return int(st.st_mtime * 1000)
+
+
+async def gitdir_is_trusted(dir_: str, trusted_gitdir: str) -> bool:
+    """Whether *dir_*'s ``.git`` still resolves to the git dir recorded at clone/attach.
+
+    The same pin :func:`sync` enforces before acting: a redirected ``.git``
+    pointer would otherwise have another repository's state read as this
+    vault's.
+    """
+    current = await _git_dir(dir_)
+    trusted_real = await asyncio.to_thread(os.path.realpath, trusted_gitdir)
+    return current is not None and current == trusted_real
+
+
+# One FETCH_HEAD line: `<oid>\t[not-for-merge]\tbranch '<name>' of <url>`.
+_FETCH_HEAD_LINE = re.compile(
+    r"^(?P<oid>[0-9a-f]{40,64})\t(?:not-for-merge)?\tbranch '(?P<branch>[^']*)' of (?P<url>.+)$"
+)
+
+
+def _anonymized_remote(url: str) -> str:
+    """*url* as git writes it into ``FETCH_HEAD``: no userinfo, no ``.git``, no trailing slash.
+
+    ``git@host:notes.git`` is recorded as ``host:notes`` and ``ssh://git@host/x.git``
+    as ``ssh://host/x``, so the trusted URL must be reduced the same way before
+    the two are compared -- otherwise no SSH remote, the case manual pulls exist
+    for, would ever match.
+    """
+    u = _norm_remote(url)
+    scheme, sep, rest = u.partition("://")
+    if sep:
+        authority, slash, path = rest.partition("/")
+        return f"{scheme}://{authority.rsplit('@', 1)[-1]}{slash}{path}"
+    host, colon, path = u.partition(":")
+    if colon and "/" not in host:
+        return f"{host.rsplit('@', 1)[-1]}:{path}"
+    return u
+
+
+def _fetched_tip_sync(gitdir: str, branch: str, trusted_remote: str) -> Optional[str]:
+    """The oid the last fetch recorded for *branch* from *trusted_remote*, else None."""
+    try:
+        with open(os.path.join(gitdir, "FETCH_HEAD"), encoding="utf-8", errors="replace") as fh:
+            lines = fh.read().splitlines()
+    except OSError:
+        return None
+    wanted = _anonymized_remote(trusted_remote)
+    oids = {
+        m.group("oid")
+        for m in (_FETCH_HEAD_LINE.match(line) for line in lines)
+        if m and m.group("branch") == branch and _anonymized_remote(m.group("url")) == wanted
+    }
+    return oids.pop() if len(oids) == 1 else None
+
+
+async def head_is_fetched_tip(dir_: str, *, gitdir: str, trusted_remote: str) -> bool:
+    """True when HEAD is the tip the last fetch brought in for the checked-out branch.
+
+    The same ``remote_oid == local_oid`` observation :func:`sync` makes right
+    after its own fetch, which is what earns a clean-sync stamp there -- with
+    the provenance sync gets for free by having run the fetch itself: the
+    ``FETCH_HEAD`` line must name the current branch and the trusted remote.
+    A fetch of another branch or another remote, or a ``FETCH_HEAD`` written
+    by hand inside the agent-writable vault, proves nothing about the remote.
+    """
+    branch = await _current_branch(dir_)
+    if branch is None:
+        return False
+    fetched = await asyncio.to_thread(_fetched_tip_sync, gitdir, branch, trusted_remote)
+    if fetched is None:
+        return False
+    code, out, _ = await run_git(["rev-parse", "--verify", "HEAD"], dir_, check=False)
+    return code == 0 and out.strip() == fetched
+
+
 async def clone_vault(
     *,
     url: str,
@@ -1185,9 +1277,7 @@ async def sync(
     # an unrelated same-origin checkout. Verify the canonical git dir still
     # matches the one recorded at attach/clone time.
     if trusted_gitdir is not None:
-        current_gitdir = await _git_dir(dir_)
-        trusted_real = await asyncio.to_thread(os.path.realpath, trusted_gitdir)
-        if current_gitdir is None or current_gitdir != trusted_real:
+        if not await gitdir_is_trusted(dir_, trusted_gitdir):
             raise GitError(
                 "this vault's .git location no longer matches where it was "
                 "created — refusing to sync to avoid acting on an unrelated "

@@ -154,7 +154,7 @@ UI calls. All vault-scoped routes accept `?vault=<id>` and fall back to the firs
 | `/api/notes` | `{notes[]}` with title, `modifiedAt`, `createdAt`, `syncStatus` |
 | `/api/note?path=` | `{path, content, mtime, meta, backlinks[]}` |
 | `/api/search?q=` | `{results[]}`; an empty query returns nothing, not everything |
-| `/api/changes?since=` | `{rev, changed[], watching}` — external-edit poll |
+| `/api/changes?since=` | `{rev, changed[], watching}` — external-edit poll; also where a pull made outside the app is counted as a sync |
 
 ### Write (POST/PUT/DELETE)
 
@@ -311,6 +311,22 @@ disk.
 This replaces the Node original's recursive `fs.watch`. Snapshot comparison needs no extra
 dependency and no background thread, and since the UI is the only consumer and it polls,
 the observable behaviour is the same.
+
+The same poll counts a pull made outside the app as a sync. Auto sync is not available to
+every user (an SSH remote the sandbox cannot reach), so some keep a vault current with
+`git pull` by hand, and `lastSync` is written only by the backend's own sync paths — the
+"Synced N ago" label would otherwise keep reading from the last time the app pulled. The
+poll stats `FETCH_HEAD` (every `fetch` and `pull` rewrites it; a push does not, so a
+push-only flow is seen at the next fetch) and examines each new fetch once. It earns a stamp
+on the same observation the app's own sync does: HEAD is the fetched tip and nothing is
+pending in the vault's scope. A fetch that left local commits unpushed or edits uncommitted
+is not a sync — those notes are still only on this machine. The `FETCH_HEAD` line must name
+the checked-out branch and the trusted remote (compared as git records it: no userinfo, no
+`.git`), so a fetch of another branch or remote, or a `FETCH_HEAD` written by hand in the
+agent-writable vault, earns nothing. The stamp is the fetch time, the `.git` pointer is
+pinned to the recorded `gitDir` as in sync, and `record_last_sync` never moves a stamp
+backwards. The stamp reaches the "Synced N ago" label through the settings the page already
+refetches every minute; the poll's own reply is unchanged.
 
 ## Git Behavior
 
