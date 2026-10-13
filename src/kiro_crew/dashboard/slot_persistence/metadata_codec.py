@@ -1187,6 +1187,16 @@ FIELDS: tuple[Field, ...] = (
             "it after the build when lineage corroborates"
         ),
     ),
+    # NO ``manager`` row, deliberately, and not beside ``created_by``: the two look
+    # alike and are stored in opposite places. The crew log is the ONLY store for who
+    # manages a session -- ``session_control.rebuild_managers_from_log`` reads it from
+    # the log and re-validates it before publishing -- so a copy on this line would be
+    # written on every save, read on every restore and then overwritten every time. A
+    # field nobody trusts is worse than no field: it would itself be the way a revoked
+    # manager came back, because a line can outlive the grant it names. ``created_by``
+    # stays because nothing else records it. WHETHER the log has to be read for a slot
+    # is not on the line either: that is the crew log's own handed-over index, which the
+    # session whose grant a handoff revoked cannot write -- see ``apply`` below.
     Field(
         "folder_id",
         _ALL,
@@ -1670,6 +1680,45 @@ def apply(
     reader's own rollback owns the slot it created.
     """
     applied = AppliedMeta(slot=slot, purpose=purpose, meta=meta)
+    # The handed-over INDEX decides whether this slot's manager has to be read at all.
+    # The line carries neither the manager nor whether one was ever recorded -- the crew
+    # log is the only store for both.
+    #
+    # Unindexed: never handed over, so the creator holds it, and that is DECIDED here
+    # without reading any history. Indexed: UNRESOLVED until the log is read, because an
+    # empty field would otherwise read as "the creator holds it" -- a claim the log may
+    # contradict. Cleared only by ``session_control.resolve_slot_manager`` on an
+    # authoritative read, which keeps a build path that forgets that read fail closed
+    # for exactly the slots where forgetting could hand a revoked giver its reach back.
+    # Set BEFORE the field table runs, so a row that raises still leaves a marked slot
+    # denied rather than half-built and servable.
+    #
+    # Read straight off the line and NOT through a field row, on purpose: a row would
+    # make the slot save own the key, and a save from any slot object that had not
+    # hydrated it would then erase it. Unowned, it is carried through every rebuild of
+    # Published through ``publish_manager`` and not written here, because the attributes
+    # that say who manages a slot are one statement with one writer -- a hydrate that
+    # set a flag alone would be one more place able to write part of it, which is the
+    # shape the funnel exists to remove.
+    from kiro_crew.dashboard.session_control import _was_handed_over, publish_manager
+
+    # WHETHER THIS SLOT WAS EVER HANDED OVER IS NOT READ FROM THE LINE. The line is the
+    # transcript's, and its writers include the session whose grant a handoff revoked,
+    # so a field here is one the losing party can clear -- and clearing it would be the
+    # whole authorization, because an unhanded slot is served by its creator without
+    # reading anything. The answer comes from the fenced crew log's handed-over index
+    # instead, which this slot cannot write.
+    #
+    # Still cheap for the slots that were never handed over, which is nearly all of
+    # them: the index is one small file, read once per process and cached, so this is a
+    # set lookup rather than a per-slot history read. That is the property the marker
+    # bought, kept, with the authority somewhere its subject cannot reach.
+    #
+    # UNDECIDED means unresolved, for every slot. An index that exists and cannot be
+    # read establishes nothing, and the empty set is the unsafe default: it reads as
+    # "never handed over", which serves every slot from its creator.
+    handed_over, index_decided = _was_handed_over(slot)
+    publish_manager(slot, manager="", manager_tab="", unresolved=handed_over or not index_decided)
     read = _Read(state=state, slot=slot, meta=meta, purpose=purpose, applied=applied)
     for row in FIELDS:
         if row.read is not None and purpose.purpose in row.purposes:
