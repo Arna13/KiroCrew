@@ -342,7 +342,9 @@ def test_only_codex_takes_the_steering_request():
     )
 
     assert ACP_BACKENDS_STEERING_REQUEST == frozenset({ACP_BACKEND_CODEX, ACP_BACKEND_GOOSE})
-    assert ACP_BACKENDS_STEERING_REQUEST & ACP_BACKENDS_ACP_RUNTIME == frozenset({ACP_BACKEND_CODEX})
+    assert ACP_BACKENDS_STEERING_REQUEST & ACP_BACKENDS_ACP_RUNTIME == frozenset(
+        {ACP_BACKEND_CODEX}
+    )
 
 
 @pytest.mark.asyncio
