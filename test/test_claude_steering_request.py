@@ -25,13 +25,14 @@ from kiro_crew.acp.types import (
     METHOD_SESSION_STEERING,
     JsonRpcMessage,
 )
-from kiro_crew.testing.wait import async_wait_until, await_until
 from kiro_crew.agent_sdk.backends import (
     ACP_BACKEND_CLAUDE,
     ACP_BACKEND_CODEX,
     ACP_BACKENDS_STEER,
     ACP_BACKENDS_STEERING_REQUEST,
 )
+from kiro_crew.testing.clock import ManualClock
+from kiro_crew.testing.wait import async_wait_until, await_until
 
 PROMPT_ID = 1000
 
@@ -334,7 +335,11 @@ async def test_no_steer_is_sent_while_the_turn_is_parked_on_an_approval():
         assert await client.steer("while you wait") is False
         assert wire.steering_frames() == []
         wire.end_turn()
-        rest = [event async for event in events]
+
+        async def _rest() -> list[Any]:
+            return [event async for event in events]
+
+        rest = await await_until(asyncio.ensure_future(_rest()), what="the rest of the turn")
         assert [e.kind for e in rest] == [EVENT_COMPLETE]
         # Resumed past the approval, the turn takes steers again until it ends.
         assert client._parked_on_permission is False
@@ -348,10 +353,27 @@ async def test_an_answer_behind_a_slow_approval_is_still_read(monkeypatch):
 
     The parked time is not charged, so the steer is settled by its own answer once
     the approval is answered, instead of timing out and queueing a second copy.
+    The client's clock is frozen, and each wait slice the steer spends parked
+    moves it one second, so the approval outlasts the 8s budget in virtual time
+    and nothing before the park can spend any of it.
     """
     import kiro_crew.acp.client as client_mod
 
-    monkeypatch.setattr(client_mod, "STEERING_ANSWER_WAIT_SECS", 0.5)
+    clock = ManualClock()
+    clock.install(monkeypatch, client_mod)
+    monkeypatch.setattr(client_mod, "_STEERING_WAIT_SLICE_SECS", 0.01)
+    parked_slices = [0]
+    real_wait = asyncio.wait
+
+    async def _counting_wait(fs: Any, *, timeout: Any = None, **kwargs: Any) -> Any:
+        # A steer wait slice that runs while the loop is parked is one second of
+        # the approval being up.
+        if timeout == 0.01 and client._parked_on_permission:
+            parked_slices[0] += 1
+            clock.advance(1.0)
+        return await real_wait(fs, timeout=timeout, **kwargs)
+
+    monkeypatch.setattr(client_mod.asyncio, "wait", _counting_wait)
     async with _Tasks() as spawned:
         client = _client()
         wire = _Wire(client)
@@ -387,8 +409,9 @@ async def test_an_answer_behind_a_slow_approval_is_still_read(monkeypatch):
         )
         wire.answer(steering_id, "injected")
         await await_until(parked, what="the approval park")
-        # Several budgets pass while the approval is up.
-        await asyncio.sleep(1.5)
+        # Twelve parked seconds, past the 8s budget: a wait that charged them
+        # would have returned by now.
+        await async_wait_until(lambda: parked_slices[0] >= 12 or steer.done())
         assert not steer.done()
         approved.set()
         assert await await_until(steer, what="the steer") is True
