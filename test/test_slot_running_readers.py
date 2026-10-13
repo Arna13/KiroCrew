@@ -140,6 +140,9 @@ def test_running_and_turn_running_slot_readers_are_enumerated() -> None:
                 ("chat_handlers.py", "api_chat_slot_model"),
                 ("chat_handlers.py", "api_chat_slot_note"),
                 ("chat_handlers.py", "api_chat_slot_reasoning_effort"),
+                # Reload refuses a reserved slot or sibling alias through
+                # _switch_target_busy, as the session_reload verb does.
+                ("chat_handlers.py", "api_chat_slot_reload"),
                 ("chat_api/slot_lifecycle.py", "api_chat_slot_reset_conversation"),
                 ("chat_api/resume.py", "api_chat_slot_resume"),
                 ("chat_handlers.py", "api_chat_slot_workspace"),

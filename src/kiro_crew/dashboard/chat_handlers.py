@@ -5209,7 +5209,10 @@ def _switch_target_busy(
     (the value the probe and the reset act on). Callers keep the atomic
     ``skip_if_busy`` decline in ``SessionManager.reset`` as the backstop for
     a turn that starts after this read: message dispatch takes none of the
-    switch locks, so this is a fast path, not the authority.
+    switch locks, so this is a fast path, not the authority. The two teardown
+    routes read it the same way: reload inside the locks it shares with the
+    switches, reset-conversation (which takes no switch lock) on the key it
+    then discards with ``skip_if_busy``.
 
     *own_turn* is the in-turn ``/agent <name>`` command (``switch_slot_agent``
     called from the slot's own turn, before it acquires a session): that turn
@@ -8227,8 +8230,21 @@ async def api_chat_slot_reload(request: web.Request) -> web.Response:
         return _app_cancel_denied(request, slot, "chat.slot_reload", session_key)
 
     def _busy(session_key: str) -> bool:
+        # The registered provider's own view first, as this route always read
+        # it (any provider object, not only an ``LLMProvider``). Then
+        # ``_switch_target_busy``, the predicate the switch handlers and the
+        # ``session_reload`` verb refuse with: it adds this slot's own
+        # ``running`` reservation and every SIBLING alias's turn on the same
+        # session. Both cover a first turn still in ``provider.start()``, which
+        # has no registered provider to ask -- reloading then finds no session,
+        # reports success and eagerly spawns a second start beside the one in
+        # flight. The menu item is already disabled while this slot runs; this
+        # makes the route agree with it. A fast path: the reset's
+        # ``skip_if_busy`` stays the authority.
         provider = state.sessions.get_provider(session_key)
-        return provider is not None and provider.has_active_turn()
+        if provider is not None and provider.has_active_turn():
+            return True
+        return _switch_target_busy(state, slot, session_key, provider)
 
     return await reload_slot_session(
         state,
@@ -8337,10 +8353,6 @@ async def reload_slot_session(
         refusal = denied(session_key)
         if refusal is not None:
             return refusal
-        if busy(session_key):
-            return web.json_response(
-                {"error": "a turn is in flight", "code": "turn_in_flight"}, status=409
-            )
         # Children guard, shared with api_chat_slot_continue: RUNNING children
         # die with the parent runtime, and _subagents_attached_response
         # documents why queued children and in-flight deliveries count too.
@@ -8363,6 +8375,17 @@ async def reload_slot_session(
         # was torn down.
         if not still_ours(False):
             return slot_not_found()
+        # The busy probe goes LAST, after every await above, for the same
+        # reason the switch handlers re-probe right before their reset: message
+        # dispatch takes neither lock held here, so a turn -- this slot's own
+        # or a sibling alias's cold start, neither of which has a provider to
+        # ask yet -- can begin during the children probe. Read before it, that
+        # turn would be invisible to this check and to the reset's
+        # ``skip_if_busy`` alike, which sees only a registered session.
+        if busy(session_key):
+            return web.json_response(
+                {"error": "a turn is in flight", "code": "turn_in_flight"}, status=409
+            )
         teardown_incomplete = False
 
         async def _reset() -> bool:
