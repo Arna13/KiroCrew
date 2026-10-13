@@ -155,6 +155,43 @@ def make_entry(name: str, region: str, *, account: str = "", verified_at: str = 
             "account": account, "verified_at": verified_at, "note": note[:_NOTE_MAX]}
 
 
+def _well_formed_entry(raw: Any) -> bool:
+    """True when a stored registry entry's ``name`` and ``region`` pass the
+    same field specs the request path enforces.
+
+    The registry file is agent-writable, and a stored entry's name and region
+    flow into ``aws`` argv and into the copyable remediation command exactly
+    like a request's ``profile`` does -- but ``_resolve_profile`` validates only
+    the request parameter, and a request that names no profile is served the
+    registry default unvalidated. Checking here on load is what makes "a deploy
+    only ever runs with a registered profile" also mean a well-formed one. An
+    empty region is admitted: ``make_entry`` fills in the default.
+
+    The stored value itself must pass, not a cleaned copy of it:
+    ``validate_field`` sanitizes a string (control characters, NUL, padding)
+    before matching the pattern and returns the cleaned form, while the entry
+    keeps the raw one. A raw ``"p\\x00"`` that validates as ``"p"`` would still
+    be the string handed to ``aws`` argv, where an embedded NUL raises out of
+    ``subprocess`` as a 500. So an entry is well formed only when validation
+    returns it unchanged.
+    """
+    if not isinstance(raw, dict):
+        return False
+    name = raw.get("name")
+    region = raw.get("region", "")
+    if not isinstance(name, str) or not name or not isinstance(region, str):
+        return False
+    try:
+        clean_name = validate_field(name, PROFILE_SPEC)
+        clean_region = validate_field(region, REGION_SPEC) if region else ""
+    except ValidationError:
+        clean_name, clean_region = "", None
+    if clean_name != name or clean_region != region:
+        logger.warning("deploy profile registry: dropping malformed entry %r", name[:40])
+        return False
+    return True
+
+
 def load_registry() -> dict[str, Any]:
     """Load the profile registry, migrating the legacy v1 single-profile config.
 
@@ -180,7 +217,7 @@ def load_registry() -> dict[str, Any]:
                        account=str(p.get("account", "")),
                        verified_at=str(p.get("verified_at", "")),
                        note=str(p.get("note", "")))
-            for p in raw.get("profiles", []) if isinstance(p, dict) and p.get("name")
+            for p in raw.get("profiles", []) if _well_formed_entry(p)
         ][:_MAX_PROFILES]
         default = str(raw.get("default", ""))
         if default and not any(p["name"] == default for p in profiles):
@@ -196,7 +233,7 @@ def load_registry() -> dict[str, Any]:
                        account=str(p.get("account", "")),
                        verified_at=str(p.get("verified_at", "")),
                        note=str(p.get("note", "")))
-            for p in raw.get("profiles", []) if isinstance(p, dict) and p.get("name")
+            for p in raw.get("profiles", []) if _well_formed_entry(p)
         ][:_MAX_PROFILES]
         default = str(raw.get("default", ""))
         if default and not any(p["name"] == default for p in profiles):
@@ -207,8 +244,9 @@ def load_registry() -> dict[str, Any]:
     # v1 single-profile migration path (apps/deploy-web/data/config.json)
     try:
         legacy = json.loads(_legacy_config_path().read_text(encoding="utf-8"))
-        name = str(legacy.get("profile", ""))
-        if name:
+        if _well_formed_entry({"name": legacy.get("profile", ""),
+                               "region": legacy.get("region", "")}):
+            name = str(legacy["profile"])
             return {"version": 2, "default": name,
                     "profiles": [make_entry(name, str(legacy.get("region", "")))]}
     except (FileNotFoundError, OSError, json.JSONDecodeError, AttributeError, TypeError):
