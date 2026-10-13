@@ -2525,12 +2525,18 @@ Three properties the route holds, each of which fails silently if broken:
   `release_subagent_runtime`), so it takes the same guards the sibling `reload`
   route does, through the same shared helpers rather than a third policy:
   `_app_cancel_denied` on the resolved SESSION key, `provider.has_active_turn()`,
-  `slot.running`, and `_subagents_attached_response`. Each protects work
-  invisible from outside — a turn on the session with no dashboard task behind it
-  (an inbound channel message, which `slot.running` cannot see), a turn
-  mid-write, and children still running after their parent's turn ended.
-  The four probes above are best-effort fast paths; the authoritative guard is
-  the fifth, `discard_conversation(..., skip_if_busy=True)`, which probes the
+  `slot.running`, `_subagents_attached_response`, and `_switch_target_busy`.
+  Each protects work invisible from outside — a turn on the session with no
+  dashboard task behind it (an inbound channel message, which `slot.running`
+  cannot see), a turn mid-write, children still running after their parent's
+  turn ended, and another alias slot of the same session whose first turn is
+  still starting (its provider is not registered yet, and this slot's
+  `running` is False). `_switch_target_busy` is the predicate the slot-switch
+  handlers refuse that window with; it runs LAST, after the children probe,
+  because that probe is an await a turn can begin in. The reload route reads
+  the same predicate as its last check before the reset.
+  The five probes above are best-effort fast paths; the authoritative guard is
+  the sixth, `discard_conversation(..., skip_if_busy=True)`, which probes the
   per-session SEMAPHORE atomically with the session pop and refuses with the
   same `turn_in_flight` 409. It closes the edge the fast paths share: a turn
   holding the semaphore before its prompt is in flight is invisible to

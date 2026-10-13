@@ -95,12 +95,14 @@ def state(alias_a: _ChatSlot, alias_b: _ChatSlot) -> DashboardState:
 
 
 @pytest.fixture(autouse=True)
-def _isolate(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
+def _isolate(_floor_monkeypatch: pytest.MonkeyPatch) -> MagicMock:
     eager = MagicMock(return_value=None)
-    monkeypatch.setattr(chat_handlers, "schedule_eager_spawn", eager)
+    _floor_monkeypatch.setattr(chat_handlers, "schedule_eager_spawn", eager)
     # No children attached: the sub-agent gate is not what these tests are about.
-    monkeypatch.setattr(chat_handlers, "subagents_attached_async", AsyncMock(return_value=False))
-    monkeypatch.setattr(chat_handlers, "sel", lambda: MagicMock())
+    _floor_monkeypatch.setattr(
+        chat_handlers, "subagents_attached_async", AsyncMock(return_value=False)
+    )
+    _floor_monkeypatch.setattr(chat_handlers, "sel", lambda: MagicMock())
     return eager
 
 
