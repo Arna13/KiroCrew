@@ -54,7 +54,7 @@ from kiro_crew.mcp_cleanup import (
 )
 from kiro_crew.mcp_gateway.hashing import hash_command, hash_effective_env
 from kiro_crew.mcp_gateway.secret_uri import remote_header_secret_ref_error
-from kiro_crew.mcp_grant import grant_observed
+from kiro_crew.mcp_grant import grant_layout_drift_suspected, grant_observed
 from kiro_crew.mcp_provenance import ABSENT, WITHHELD_KEY, is_withheld_mute, resolve_write
 from kiro_crew.mcp_utils import kiro_entry_client_id, kiro_entry_scopes, mcp_server_alias
 from kiro_crew.sandbox import (
@@ -2011,16 +2011,17 @@ async def _runtime_grant_present(mcp_url: str, name: str) -> bool | None:
     all — a permission error, a broken mount — degrades to ``None``, and absence
     from the payload renders as the safe "Not verified" instead.
 
-    ``None`` does NOT cover artifact-layout drift, and it is worth being exact
-    about that. If kiro-cli re-keys the paths this mirrors, the stat succeeds
-    against a path that simply is not there, so ``grant_presence`` returns
-    ``False`` and an already-authorized server reads "Sign-in required". That row
-    does NOT recover on its own, and a maintainer must not deprioritize the drift
-    on the assumption that it does: a second sign-in mints artifacts under the
-    NEW key while this keeps stat-ing the old one, so the row goes on asking for
-    a sign-in until this mirror is corrected. The recorded-hash tests pin the
-    mirror only against itself, so such a change would not fail in-repo either —
-    catching it needs an observation of an artifact kiro-cli actually wrote.
+    Artifact-layout drift is not caught HERE, and it is worth being exact about
+    that. If kiro-cli re-keys the paths this mirrors, the stat succeeds against a
+    path that simply is not there, so ``grant_presence`` returns ``False``. A
+    second sign-in does not heal it: it mints artifacts under the NEW key while
+    this keeps stat-ing the old one. The recorded-hash tests pin the mirror only
+    against itself, so such a change would not fail in-repo either. The one
+    observation of what kiro-cli actually wrote is the cache itself, and
+    :func:`probe_all` reads it once per pass: pairs on disk that match no
+    configured server turn this pass's ``False`` answers into ``None`` (see
+    :func:`_unknown_grants_on_layout_drift`). A single-server re-probe does not
+    run that check.
 
     The three-valued answer comes from :func:`mcp_grant.grant_presence`, which the
     persisted connection view resolves through as well -- one spelling of "present,
@@ -3272,11 +3273,42 @@ async def probe_all() -> list[McpServerInfo]:
             out.append(r)  # type: ignore[arg-type]
     for s in out:
         _note_denied_env(s)
+    await _unknown_grants_on_layout_drift(out, rows)
     # Same order as ``list_servers`` reported, so the probe response and
     # ``GET /api/mcp`` list the same servers in the same sequence.
     by_name = {s.name: s for s in out}
     by_name.update((s.name, s) for s in withheld)
     return [by_name[s.name] for s in rows]
+
+
+async def _unknown_grants_on_layout_drift(
+    probed: list[McpServerInfo], rows: list[McpServerInfo]
+) -> None:
+    """Turn "no grant" into "unknown" when the grant cache shows layout drift.
+
+    A ``False`` from :func:`_runtime_grant_present` is only an observation while
+    our key mirror matches what kiro-cli writes. When the cache holds grant pairs
+    and none of them belongs to ANY configured remote server -- disabled ones
+    included, since their pairs are legitimately there --
+    :func:`~kiro_crew.mcp_grant.grant_layout_drift_suspected` says the mirror has drifted,
+    and every absent grant in this pass is reported as ``None``, which renders
+    the safe "Not verified" instead of a confident "Sign-in required".
+
+    The cache entry is corrected too: ``list_servers`` rehydrates
+    ``auth_grant_present`` from it for the whole TTL, so leaving it ``False``
+    would put the wrong answer back on the next page load.
+    """
+    absent = [s for s in probed if s.auth_grant_present is False]
+    if not absent:
+        return
+    configured = [s.url for s in rows if s.is_remote]
+    if not await asyncio.to_thread(grant_layout_drift_suspected, configured):
+        return
+    for s in absent:
+        s.auth_grant_present = None
+        cached = _probe_cache.get(s.name)
+        if cached is not None and cached.auth_grant_present is False:
+            cached.auth_grant_present = None
 
 
 def _note_denied_env(server: McpServerInfo) -> None:

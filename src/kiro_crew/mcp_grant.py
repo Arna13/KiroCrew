@@ -35,6 +35,8 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
+import os
+from collections.abc import Iterable
 from pathlib import Path
 from stat import S_ISREG
 from urllib.parse import urlsplit
@@ -159,6 +161,81 @@ def grant_presence(mcp_url: str, *, cache_dir: Path | None = None) -> bool | Non
         return False
     if None in verdicts:
         return None
+    return True
+
+
+def _cached_pair_keys(directory: Path) -> set[str] | None:
+    """Stems that carry BOTH grant artifacts in ``directory``, or ``None`` if unlistable.
+
+    Names only: the directory is listed and no entry is stat-ed or opened, so no
+    token byte can enter the process. A lone ``.token.json`` is not a pair -- it
+    also matches the single-file SSO naming this directory mixes in.
+    """
+    try:
+        with os.scandir(directory) as entries:
+            names = {entry.name for entry in entries}
+    except (FileNotFoundError, NotADirectoryError):
+        return set()  # nothing was ever written: no pairs, an answer
+    except OSError:
+        return None  # unreadable: nothing knowable, so no claim either way
+    return {
+        name[: -len(_TOKEN_SUFFIX)]
+        for name in names
+        if name.endswith(_TOKEN_SUFFIX)
+        and f"{name[: -len(_TOKEN_SUFFIX)]}{_REGISTRATION_SUFFIX}" in names
+    }
+
+
+# Whether the last canary pass suspected drift, so a probe loop warns once per
+# episode instead of once per pass.
+_drift_warned = False
+
+
+def grant_layout_drift_suspected(
+    configured_urls: Iterable[str], *, cache_dir: Path | None = None
+) -> bool:
+    """Do the cached grant pairs suggest our key mirror no longer matches kiro-cli?
+
+    ``True`` when the cache holds at least one token/registration pair and NOT ONE
+    of them carries the key of any configured url. That is the shape a kiro-cli
+    re-key leaves behind: the pairs it wrote are real, and our derivation names
+    none of them, so a ``False`` from :func:`grant_presence` is no longer an
+    observation. A caller that renders the answer then reports it as unknown.
+
+    No pairs at all is a user who never signed in, and one matching pair proves the
+    mirror still works -- both answer ``False``, so the ordinary "Sign-in required"
+    is untouched. An unlistable directory also answers ``False``: no evidence of
+    drift is not evidence of it. Warns once per drift episode, with a count and
+    never a key, because the keys name which endpoints this machine is signed in to.
+
+    Names only, never contents -- see :func:`_cached_pair_keys`. Blocking for the
+    same reason as :func:`grant_presence`, so async callers route it off the loop.
+    """
+    global _drift_warned
+    directory = cache_dir if cache_dir is not None else kiro_oauth_cache_dir()
+    pairs = _cached_pair_keys(directory)
+    if not pairs:
+        _drift_warned = False
+        return False
+    expected: set[str] = set()
+    for url in configured_urls:
+        # A malformed configured url (bad port, broken IPv6 literal, an
+        # un-encodable host) fails only its own probe row; it must not abort
+        # this whole pass. It cannot own a pair kiro-cli wrote either.
+        try:
+            expected.add(grant_key(url))
+        except (ValueError, UnicodeError):
+            continue
+    if pairs & expected:
+        _drift_warned = False
+        return False
+    if not _drift_warned:
+        _drift_warned = True
+        logger.warning(
+            "MCP grant cache holds %d token/registration pair(s) matching no configured "
+            "server (layout drift?); reporting OAuth grant presence as unknown",
+            len(pairs),
+        )
     return True
 
 

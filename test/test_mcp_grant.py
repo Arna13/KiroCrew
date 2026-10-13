@@ -182,3 +182,92 @@ class TestKiroOauthCacheDirResolvesThroughTheSharedDefault:
             "mcp_grant function(s) call Path.home() directly instead of "
             f"routing through kiro_oauth_cache_dir(): {offenders}"
         )
+
+
+def _write_pair(cache: Path, key: str) -> None:
+    cache.mkdir(parents=True, exist_ok=True)
+    (cache / f"{key}.token.json").write_text("{}")
+    (cache / f"{key}.registration.json").write_text("{}")
+
+
+class TestGrantLayoutDriftSuspected:
+    """Cached grant pairs that match no configured server read as drift.
+
+    A drifted key mirror makes every authorized server look signed out. The only
+    evidence on this machine is the pairs kiro-cli actually wrote, so pairs that
+    belong to no configured url turn a confident "no grant" into "unknown".
+    """
+
+    URL = "https://mcp.example.com/mcp"
+
+    @pytest.fixture(autouse=True)
+    def _reset_warn_once(self, _floor_monkeypatch: pytest.MonkeyPatch) -> None:
+        _floor_monkeypatch.setattr(mcp_grant, "_drift_warned", False)
+
+    def test_pairs_matching_no_configured_server_are_drift(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        _write_pair(tmp_path, "f" * 64)
+        with caplog.at_level("WARNING", logger="kiro_crew.mcp_grant"):
+            assert mcp_grant.grant_layout_drift_suspected([self.URL], cache_dir=tmp_path)
+        warnings = [r for r in caplog.records if "layout drift?" in r.getMessage()]
+        assert len(warnings) == 1
+        # A count, never a key: the keys name which endpoints are signed in.
+        assert "f" * 64 not in caplog.text
+        assert mcp_grant.grant_key(self.URL) not in caplog.text
+
+    def test_the_warning_fires_once_per_episode(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        _write_pair(tmp_path, "f" * 64)
+        with caplog.at_level("WARNING", logger="kiro_crew.mcp_grant"):
+            for _ in range(3):
+                assert mcp_grant.grant_layout_drift_suspected([self.URL], cache_dir=tmp_path)
+        assert sum("layout drift?" in r.getMessage() for r in caplog.records) == 1
+
+    def test_a_matching_pair_proves_the_mirror(self, tmp_path: Path) -> None:
+        _write_pair(tmp_path, "f" * 64)
+        _write_pair(tmp_path, mcp_grant.grant_key(self.URL))
+        other = "https://other.example.com/mcp"
+        assert not mcp_grant.grant_layout_drift_suspected([other, self.URL], cache_dir=tmp_path)
+
+    @pytest.mark.parametrize(
+        "bad_url", ["https://h:99999/mcp", "https://h:abc/mcp", "http://[::1/mcp"]
+    )
+    def test_a_malformed_configured_url_is_skipped_not_raised(
+        self, tmp_path: Path, bad_url: str
+    ) -> None:
+        _write_pair(tmp_path, mcp_grant.grant_key(self.URL))
+        assert not mcp_grant.grant_layout_drift_suspected([bad_url, self.URL], cache_dir=tmp_path)
+        assert mcp_grant.grant_layout_drift_suspected([bad_url], cache_dir=tmp_path)
+
+    def test_no_pairs_is_a_user_who_never_signed_in(self, tmp_path: Path) -> None:
+        # A lone token file is the single-file SSO naming, not a grant pair.
+        (tmp_path / f"{'a' * 64}.token.json").write_text("{}")
+        (tmp_path / f"{'b' * 64}.json").write_text("{}")
+        assert not mcp_grant.grant_layout_drift_suspected([self.URL], cache_dir=tmp_path)
+
+    def test_a_missing_cache_directory_is_not_drift(self, tmp_path: Path) -> None:
+        missing = tmp_path / "nope"
+        assert not mcp_grant.grant_layout_drift_suspected([self.URL], cache_dir=missing)
+
+    def test_an_unlistable_cache_directory_is_not_drift(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _write_pair(tmp_path, "f" * 64)
+
+        def _denied(_path):
+            raise PermissionError("denied")
+
+        monkeypatch.setattr(mcp_grant.os, "scandir", _denied)
+        assert not mcp_grant.grant_layout_drift_suspected([self.URL], cache_dir=tmp_path)
+
+    def test_no_artifact_is_opened(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        _write_pair(tmp_path, "f" * 64)
+
+        def _refuse(*_args, **_kwargs):
+            raise AssertionError("a grant artifact was opened")
+
+        monkeypatch.setattr(Path, "open", _refuse)
+        monkeypatch.setattr("builtins.open", _refuse)
+        assert mcp_grant.grant_layout_drift_suspected([self.URL], cache_dir=tmp_path)

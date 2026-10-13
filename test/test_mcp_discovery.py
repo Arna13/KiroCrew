@@ -3385,6 +3385,57 @@ class TestProbeRemote:
 
         lookup.assert_awaited_once_with("https://example.com/mcp", audit_absence=True)
 
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("pair_owner", "expected"),
+        [("nobody", None), ("signed-in", False), ("no-pairs", False)],
+    )
+    async def test_probe_all_reports_an_absent_grant_as_unknown_on_layout_drift(
+        self, tmp_path, monkeypatch, pair_owner, expected
+    ) -> None:
+        """Grant pairs that match no configured server make "no grant" unknowable.
+
+        That is what a kiro-cli re-key leaves behind: real pairs our derivation
+        names none of. The pass must then report ``None`` (renders "Not verified"),
+        in the cached entry too, so the next page load does not revert it. A pair
+        that matches a configured server, or no pairs at all, keeps ``False``.
+        """
+        from kiro_crew import mcp_grant
+        from kiro_crew.mcp_discovery import probe_all
+
+        _clear_cache()
+        monkeypatch.setattr(mcp_grant, "_drift_warned", False)
+        cache = tmp_path / "cache"
+        cache.mkdir()
+        monkeypatch.setattr(mcp_grant, "kiro_oauth_cache_dir", lambda: cache)
+        signed_in = "https://signed-in.example.com/mcp"
+        key = {"nobody": "f" * 64, "signed-in": mcp_grant.grant_key(signed_in)}.get(pair_owner)
+        if key:
+            (cache / f"{key}.token.json").write_text("{}")
+            (cache / f"{key}.registration.json").write_text("{}")
+
+        rows = [
+            McpServerInfo(name="remote", url="https://example.com/mcp"),
+            McpServerInfo(name="other", url=signed_in, disabled=True),
+        ]
+        monkeypatch.setattr("kiro_crew.mcp_discovery.list_servers", lambda: rows)
+        monkeypatch.setattr("kiro_crew.mcp_discovery._spawn_excluded", lambda: set())
+
+        async def fake_probe(server):
+            server.status = "needs_auth"
+            server.auth_challenge = True
+            server.auth_grant_present = False
+            _cache_probe(server)
+            return server
+
+        monkeypatch.setattr("kiro_crew.mcp_discovery.probe_server", fake_probe)
+        try:
+            result = {s.name: s for s in await probe_all()}
+            assert result["remote"].auth_grant_present is expected
+            assert _probe_cache["remote"].auth_grant_present is expected
+        finally:
+            _clear_cache()
+
     def test_importing_this_module_does_not_pull_in_the_mint_engine(self) -> None:
         """The grant helpers are shared through a leaf module, not through the mint.
 
