@@ -331,10 +331,18 @@ async def test_proven_steers_awaiting_the_terminal_count_toward_the_cap():
 
 
 def test_only_codex_takes_the_steering_request():
-    """A mutation pin: a backend added here would inherit this steer transport."""
-    from kiro_crew.agent_sdk.backends import ACP_BACKENDS_STEERING_REQUEST
+    """A mutation pin: a runtime backend added here would inherit this steer transport.
 
-    assert ACP_BACKENDS_STEERING_REQUEST == frozenset({ACP_BACKEND_CODEX})
+    goose is a member on ``AcpClient``'s own verb and never runs on this handle.
+    """
+    from kiro_crew.agent_sdk.backends import (
+        ACP_BACKEND_GOOSE,
+        ACP_BACKENDS_ACP_RUNTIME,
+        ACP_BACKENDS_STEERING_REQUEST,
+    )
+
+    assert ACP_BACKENDS_STEERING_REQUEST == frozenset({ACP_BACKEND_CODEX, ACP_BACKEND_GOOSE})
+    assert ACP_BACKENDS_STEERING_REQUEST & ACP_BACKENDS_ACP_RUNTIME == frozenset({ACP_BACKEND_CODEX})
 
 
 @pytest.mark.asyncio
