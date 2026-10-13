@@ -5333,13 +5333,7 @@ def _pid_cmdline(pid: int, proc_root: Path | None = None) -> bytes:
     evidence for a verdict that is already "refuse". An explicit *proc_root*
     permits fixture-owned process tables on every host.
     """
-    if sys.platform != "linux" and proc_root is None:
-        return b""
-    root = proc_root if proc_root is not None else Path("/proc")
-    try:
-        return (root / str(pid) / "cmdline").read_bytes()
-    except OSError:
-        return b""
+    return platform_compat.read_proc_cmdline(pid, proc_root=proc_root)
 
 
 def _pid_parent_and_token(pid: int, proc_root: Path | None = None) -> tuple[int | None, str | None]:
