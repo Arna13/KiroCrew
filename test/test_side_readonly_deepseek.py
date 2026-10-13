@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 import shutil
 import subprocess
 from collections.abc import AsyncIterator
@@ -426,9 +427,10 @@ async def test_a_governance_ceiling_refuses_the_deepseek_read(tmp_path, _governa
 
 @pytest.mark.asyncio
 async def test_a_filesystem_read_ceiling_refuses_the_deepseek_read(tmp_path, _governance):
-    # Native separators on both sides, as the governance path matcher reads them.
-    cwd = str(tmp_path)
-    _governance({"filesystem": {"read": {"mode": "deny", "deny": [f"{cwd}/secret/**"]}}})
+    # The matcher normalizes the item to native separators and reads the pattern
+    # verbatim, so the pattern is built with them too.
+    denied = os.path.join(str(tmp_path), "secret", "**")
+    _governance({"filesystem": {"read": {"mode": "deny", "deny": [denied]}}})
     provider = await _side_turn(
         tmp_path,
         _tool_call("call_p", "read", {"file_path": str(tmp_path / "secret" / "plan.txt")}),
