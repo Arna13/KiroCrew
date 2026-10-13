@@ -1287,6 +1287,44 @@ A cached plain-flag overlay fails the rewriter fingerprint and is regenerated. T
 interpreter path in the entry's `command` is the one value the codec cannot
 cover: the CLI runs it, not the stub.
 
+### Rust stub
+
+`packages/kirocrew-stub-rs` builds `kirocrew-mcp-stub-rs`, a port of
+`kiro_crew.mcp_gateway.stub` that speaks the same Register / `ensure_backend` /
+bridge / reconnect protocol and computes the same Register payload, so Rust and
+Python stubs share pools. `stub_impl.rust_stub_binary()` decides which one an
+overlay launches: `KIROCREW_MCP_STUB_IMPL`, else the raw
+`mcp_gateway.stub_impl` key, is `auto` (default), `rust` or `python`. `auto`
+and `rust` take `target/release/kirocrew-mcp-stub-rs` in this checkout only on
+Linux, only when it is executable, and only when the crate-source digest it
+embeds (`build.rs`) equals `stub_impl._source_digest()` over the checkout's
+crate source; anything else keeps the Python stub (`rust` and a stale build log
+why). The overlay fingerprint carries the choice, so flipping it regenerates
+overlays. `_build_stub_entry` changes only the launch line: the Rust binary in
+place of the interpreter, and `--install-context-b64` inside the envelope, which
+carries what a Python stub would read off its own interpreter (`sys.executable`,
+the package directory, the code-fingerprint root, the distribution version) and
+the `platform_compat.isolated_python_argv()` prefix.
+
+The port leaves two things to Python and execs into the Python stub for them,
+with the same flags (minus `--install-context-b64`), env and stdio:
+
+- A stub whose `KIROCREW_STUB_SESSION_TOKEN` does not verify, before Register:
+  the co-tenancy veto on `KIROCREW_SESSION_KEY` (`mcp_caller.host_pid_is_shared`)
+  and the `session_pid_<pid>.txt` walk run only in Python's identity ladder.
+- The direct-exec fallback: the Python process runs only `stub.fallback_exec`
+  (no second handshake), which refuses an unresolvable `secret://` env with
+  exit 78 and keeps the session token only for a control plane that passes
+  gatewayd's `_spawns_own_control_plane` vetting, then execs the backend in its
+  place.
+
+An overlay whose context records no interpreter prefix keeps both in Rust:
+rung 3 without the veto, and a fallback that refuses `secret://` the same way
+but always drops the token. The mirrored constants (managed server names, MCP
+subcommands, tenant-nonce servers, env-scrub prefixes, limits) are pinned to the
+Python ones by `test_stub_rs_conformance.py`, which reads the Rust source and so
+runs without a Rust build.
+
 ### Overlay scope: user-level agents only
 
 The rewriter reads `~/.kiro/agents/` and writes one overlay per agent NAME, so the
