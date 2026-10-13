@@ -2064,7 +2064,12 @@ async def api_chat_slot_drop(request: web.Request) -> web.Response:
     (unattributable caller, crew-member ownership, app ownership of the slot
     and its transcript), and a non-person caller is held to the same agent
     tag-grants policy, judged over the same diff: a drop is exactly the tag
-    replace that caller could send to ``PUT /tags``. The person is never gated.
+    replace that caller could send to ``PUT /tags``. On top of that verdict the
+    target must pass the ``chat_tag`` ``set_state`` rule — a row-backed
+    workflow state with ``add-remove`` policy — so an agent never moves a card
+    into a state it cannot move it out of. An optional ``base_tags_revision``
+    makes the write compare-and-set, as on ``PUT /tags``. The person is never
+    gated.
     """
     state: DashboardState = request.app["state"]
     name = request.match_info["slot"]
@@ -2106,6 +2111,18 @@ async def api_chat_slot_drop(request: web.Request) -> web.Response:
     # can be recreated for another conversation before this POST arrives. The
     # board sends none and keeps its behaviour.
     expected_created = str(body.get("expected_created") or "")
+    # Optional compare-and-set precondition, the one ``PUT /tags`` reads: the
+    # tags revision the caller saw when it resolved the slot. The drop strips
+    # every status tag and keeps the rest, so a tag the person toggled after
+    # that read would be judged and written on a list the caller never saw.
+    # The board sends none and keeps its behaviour.
+    raw_base = body.get("base_tags_revision")
+    if raw_base is not None and not isinstance(raw_base, str):
+        return web.json_response(
+            {"error": "base_tags_revision must be a string", "code": "base_not_string"},
+            status=400,
+        )
+    base_tags_revision: str | None = raw_base or None
     is_agent, origin_source, origin_caller, member_principal = slot_tag_write_principal(
         request, request_app, what="slot drop"
     )
@@ -2177,6 +2194,27 @@ async def api_chat_slot_drop(request: web.Request) -> web.Response:
             or not app_owns_transcript(state._slots, request_app, authorized_history_key)
         ):
             return _rejected("session was deleted or rebound", "session_gone")
+        if base_tags_revision is not None and base_tags_revision != slot.tags_revision:
+            # Decided under the lock every tags writer holds, like PUT /tags:
+            # nothing is written and the caller re-reads the session's tags.
+            sel().log_api_access(
+                caller=audit_caller,
+                operation="chat.slot_drop",
+                outcome="rejected",
+                source=origin_source,
+                resources=f"{name}->{column_id}",
+                error="stale base revision",
+            )
+            return web.json_response(
+                {
+                    "error": "tags changed since the session was read",
+                    "code": "stale_base",
+                    "base_tags_revision": base_tags_revision,
+                    "tags_revision": slot.tags_revision,
+                    "tags": slot.tags,
+                },
+                status=409,
+            )
         kept = [t for t in slot.tags if t in tag_index and not tag_index[t].get("status")]
         prior_tags = slot.tags
         written_tags = kept + [target_id]
@@ -2184,6 +2222,18 @@ async def api_chat_slot_drop(request: web.Request) -> web.Response:
             # The same verdict PUT /tags gives this caller for the same diff,
             # over the one grants snapshot read above. A refusal writes nothing.
             refusal = agent_slot_tags_refusal(state, list(prior_tags), written_tags, snapshot)
+            if refusal is None:
+                # Then the ``chat_tag`` ``set_state`` rule on the target: a
+                # drop moves a card INTO a workflow state, and an agent may only
+                # enter a state it can also leave. ``PUT /tags`` admits an
+                # ``add-only`` target, which would park the card where no agent
+                # move can take it out again. Status and policy both come from
+                # the protected row, never from the agent-writable vocabulary.
+                target_policy, target_is_status = snapshot.grant(target_id)
+                if not target_is_status:
+                    refusal = ("not_a_status_tag", target_id)
+                elif target_policy != "add-remove":
+                    refusal = ("tag_policy_denied", target_id)
             if refusal is not None:
                 code, tag_id = refusal
                 sel().log_api_access(

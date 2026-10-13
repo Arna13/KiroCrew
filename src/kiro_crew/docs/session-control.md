@@ -827,8 +827,12 @@ write them; the `/api/chat/tag-columns` write endpoints refuse both.
 filters on and removes its other status tags; plain labels stay. `session` takes
 the same references as `chat_session_pin`. A column that does not filter on
 exactly one status tag, or that follows live state, cannot take a card: the tool
-answers "Not moved" and writes nothing. The tag rules of `chat_tag_assign` hold:
-a status the person reserved cannot be entered or left. An app agent moves only
+answers "Not moved" and writes nothing. The rules of `chat_tag` `set_state`
+hold: the column's status must be one an agent may both add and remove, so a
+status the person reserved or made add-only cannot be entered, and one it
+cannot remove cannot be left. If the session's tags change between the tool's
+read and its write, nothing is written and the tool asks you to call it again.
+`column` matches a column name case-insensitively. An app agent moves only
 its own sessions and a crew member only a session it owns or created.
 
 ## Pins

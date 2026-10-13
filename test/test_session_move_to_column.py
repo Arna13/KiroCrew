@@ -123,9 +123,32 @@ class TestDropRoute:
         assert slot.tags == ["todo", "label"]
 
     @pytest.mark.asyncio
-    async def test_the_verdict_matches_put_tags_for_the_same_diff(self, tmp_path):
-        """A drop is the replace an agent could send to PUT /tags, so the two
-        routes must answer it the same way, refusal or not."""
+    async def test_an_agent_cannot_enter_an_add_only_state(self, tmp_path):
+        """The ``chat_tag`` ``set_state`` rule: an agent enters only a state it
+        could also leave, so a card is never parked where no agent can move it."""
+        _, app, slot = _board(tmp_path, done="add-only")
+        status, body, saves = await _drop(app, {"column_id": "col-done"}, _INTERNAL)
+        assert status == 403
+        assert body == {"error": "tag_policy_denied:done", "code": "tag_policy_denied"}
+        assert slot.tags == ["todo", "label"] and saves == 0
+
+    @pytest.mark.asyncio
+    async def test_an_agent_cannot_enter_a_row_the_store_says_is_not_a_status(self, tmp_path):
+        """Status comes from the protected row, not the agent-writable vocabulary:
+        a tag the vocabulary calls a status but whose row says label is refused."""
+        _, app, slot = _board(tmp_path, done=None)
+        chat_tag_grants.mint_grant("done", policy="add-remove", status=False)
+        chat_tag_grants.refresh_cache()
+        status, body, saves = await _drop(app, {"column_id": "col-done"}, _INTERNAL)
+        assert status == 403
+        assert body == {"error": "not_a_status_tag:done", "code": "not_a_status_tag"}
+        assert slot.tags == ["todo", "label"] and saves == 0
+
+    @pytest.mark.asyncio
+    async def test_the_drop_refuses_whatever_put_tags_refuses_for_the_same_diff(self, tmp_path):
+        """A drop is the replace an agent could send to PUT /tags, so it may never
+        admit a diff PUT /tags refuses. It is stricter on one point only: the
+        ``set_state`` rule on the target, which refuses an ``add-only`` state."""
         for done in ("add-remove", "add-only", "none"):
             _, app, _slot = _board(tmp_path, done=done)
             d_status, d_body, _ = await _drop(app, {"column_id": "col-done"}, _INTERNAL)
@@ -138,8 +161,10 @@ class TestDropRoute:
                         headers=_INTERNAL,
                     )
                     p_status, p_body = resp.status, await resp.json()
-            assert d_status == p_status, done
-            assert d_body.get("code") == p_body.get("code"), done
+            if p_status != 200:
+                assert (d_status, d_body.get("code")) == (p_status, p_body.get("code")), done
+            expected = 403 if done == "add-only" else p_status
+            assert d_status == expected, done
 
     @pytest.mark.asyncio
     async def test_the_browser_drag_is_not_held_to_the_agent_policy(self, tmp_path):
@@ -183,6 +208,84 @@ class TestDropRoute:
         status, body, _ = await _drop(app, {"column_id": "col-done"}, _INTERNAL)
         assert status == 200 and body["ok"] is True
         assert slot.tags == ["label", "done"]
+
+    @pytest.mark.asyncio
+    async def test_an_app_cannot_move_a_session_whose_transcript_another_app_owns(self, tmp_path):
+        """The transcript fence, not the slot fence: the app owns the slot object,
+        but the slot writes into a session another app's slot also writes."""
+        state, app, slot = _board(tmp_path)
+        slot._app = "an-app"
+        other = _ChatSlot("s2")
+        other._app = "other-app"
+        state._slots["s2"] = other
+        slot.linked_session_key = "dashboard:s2"
+        _mark(app, {"app": "an-app"})
+        status, _, saves = await _drop(app, {"column_id": "col-done"}, _INTERNAL)
+        assert status == 404 and saves == 0
+        assert slot.tags == ["todo", "label"]
+
+    @pytest.mark.asyncio
+    async def test_transcript_ownership_is_asked_again_under_the_lock(self, tmp_path):
+        """The second ``app_owns_transcript`` call: ownership that holds at the
+        door but is gone once the lock is held writes nothing."""
+        _, app, slot = _board(tmp_path)
+        slot._app = "an-app"
+        _mark(app, {"app": "an-app"})
+        with patch(
+            "kiro_crew.dashboard.chat_tags.app_owns_transcript", side_effect=[True, False]
+        ) as owns:
+            status, body, saves = await _drop(app, {"column_id": "col-done"}, _INTERNAL)
+        assert owns.call_count == 2
+        assert status == 200 and body["ok"] is False and body["code"] == "session_gone"
+        assert slot.tags == ["todo", "label"] and saves == 0
+
+    @pytest.mark.asyncio
+    async def test_a_caller_whose_own_slot_is_gone_is_refused_like_put_tags(self, tmp_path):
+        """A ``dashboard:`` key naming a popped slot cannot be attributed; read as
+        the person it would get the person's authority. Same answer as PUT /tags."""
+        _, app, slot = _board(tmp_path)
+        gone = {"X-Session-Key": "dashboard:chat-gone-1"}
+        status, body, saves = await _drop(app, {"column_id": "col-done"}, gone)
+        async with TestClient(TestServer(app)) as client:
+            with patch(_SAVE, return_value=True):
+                resp = await client.put(
+                    "/api/chat/slots/s1/tags", json={"tags": ["label", "done"]}, headers=gone
+                )
+                p_status, p_body = resp.status, await resp.json()
+        assert (status, body["code"]) == (403, "caller_unattributable")
+        assert (p_status, p_body["code"]) == (status, body["code"])
+        assert slot.tags == ["todo", "label"] and saves == 0
+
+    @pytest.mark.asyncio
+    async def test_a_stale_tags_revision_writes_nothing(self, tmp_path):
+        _, app, slot = _board(tmp_path)
+        seen = slot.tags_revision
+        slot.tags = ["todo", "label", "extra"]
+        slot.tags_revision = "after-the-read"
+        status, body, saves = await _drop(
+            app, {"column_id": "col-done", "base_tags_revision": seen}, _INTERNAL
+        )
+        assert status == 409 and body["code"] == "stale_base"
+        assert body["tags_revision"] == "after-the-read"
+        assert slot.tags == ["todo", "label", "extra"] and saves == 0
+
+    @pytest.mark.asyncio
+    async def test_the_current_tags_revision_moves_the_card(self, tmp_path):
+        _, app, slot = _board(tmp_path)
+        status, body, _ = await _drop(
+            app, {"column_id": "col-done", "base_tags_revision": slot.tags_revision}, _INTERNAL
+        )
+        assert status == 200 and body["ok"] is True
+        assert slot.tags == ["label", "done"]
+
+    @pytest.mark.asyncio
+    async def test_a_non_string_tags_revision_is_refused(self, tmp_path):
+        _, app, slot = _board(tmp_path)
+        status, body, saves = await _drop(
+            app, {"column_id": "col-done", "base_tags_revision": 7}, _INTERNAL
+        )
+        assert status == 400 and body["code"] == "base_not_string"
+        assert saves == 0
 
     @pytest.mark.asyncio
     async def test_a_member_cannot_move_a_session_it_does_not_own(self, tmp_path):
@@ -229,7 +332,7 @@ class TestDropRoute:
 
 _SLOTS = [
     {"key": "chat-1-100", "title": "Caller", "created": "c1"},
-    {"key": "chat-3-300", "title": "Worker", "created": "c3"},
+    {"key": "chat-3-300", "title": "Worker", "created": "c3", "tags_revision": "r3"},
 ]
 _COLUMNS = [
     {"id": "col-todo", "name": "Todo", "tag_ids": ["todo"]},
@@ -270,9 +373,19 @@ class TestTool:
         out, dash = _move({"session": "Worker", "column": "Done"})
         (drop,) = _drops(dash)
         assert drop.path == "/api/chat/slots/chat-3-300/drop"
-        assert drop.body == {"column_id": "col-done", "expected_created": "c3"}
+        assert drop.body == {
+            "column_id": "col-done",
+            "expected_created": "c3",
+            "base_tags_revision": "r3",
+        }
         assert drop.session_key == "dashboard:chat-1-100"
         assert out == "Moved session `chat-3-300` into column `Done`. Tags now: `spike`, `Done`."
+
+    def test_a_stale_tags_revision_reads_as_call_again(self) -> None:
+        reply = {"error": "tags changed since the session was read", "code": "stale_base"}
+        out, _ = _move({"session": "chat-3-300", "column": "Done"}, _routes(reply=reply))
+        assert out.startswith("Error: the tags on `chat-3-300` changed")
+        assert "call session_move_to_column again" in out
 
     def test_a_column_name_resolves_case_insensitively(self) -> None:
         _, dash = _move({"session": "chat-3-300", "column": "done"})

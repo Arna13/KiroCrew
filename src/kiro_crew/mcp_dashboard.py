@@ -659,12 +659,15 @@ def _board_tools() -> tuple[Tool, ...]:
                 "Move a LIVE session's card into a sidebar board column, the same as "
                 "dragging it there. ``session`` is a slot key or 'dashboard:<slot>' "
                 "session key from chat_folder_tree, or a session's exact title when "
-                "that title is unique. ``column`` is a column id or exact name (see "
-                "chat_tag_column_list). The session takes the one status tag the "
+                "that title is unique. ``column`` is a column id or a column name, "
+                "matched case-insensitively (see chat_tag_column_list); a name two "
+                "columns share is refused. The session takes the one status tag the "
                 "column filters on and loses its other status tags; plain labels "
                 "stay. A column with no single status tag, and a live-state lane, "
-                "cannot take a card, and the result says so. The tag rules of "
-                "chat_tag_assign apply: a status the person reserved is refused. An "
+                "cannot take a card, and the result says so. The rules of chat_tag "
+                "set_state apply: the column's status must be one an agent may both "
+                "add and remove, so a status the person reserved or made add-only "
+                "is refused (tag_policy_denied). An "
                 "app agent may move only its own sessions; a crew member only a "
                 "session it owns or created."
             ),
@@ -675,7 +678,10 @@ def _board_tools() -> tuple[Tool, ...]:
                         "type": "string",
                         "description": "Slot key, 'dashboard:<slot>' session key, or exact unique session title.",
                     },
-                    "column": {"type": "string", "description": "Column id or exact name."},
+                    "column": {
+                        "type": "string",
+                        "description": "Column id, or column name (case-insensitive).",
+                    },
                 },
                 "required": ["session", "column"],
             },
@@ -4562,6 +4568,12 @@ def _run_session_move_to_column(args: dict[str, Any], ctx: ToolContext) -> str:
     slot_created = str(slot_row.get("created") or "")
     if slot_created:
         body["expected_created"] = slot_created
+    # The tags revision read with the slot above: the drop compares-and-sets
+    # against it like chat_tag_assign's PUT, so a tag toggled in between is
+    # not judged or written on a list this call never saw.
+    base_rev = str(slot_row.get("tags_revision") or "")
+    if base_rev:
+        body["base_tags_revision"] = base_rev
     try:
         d = ctx.client.post(
             f"/api/chat/slots/{quote(slot_key, safe='')}/drop",
@@ -4573,6 +4585,12 @@ def _run_session_move_to_column(args: dict[str, Any], ctx: ToolContext) -> str:
             return redact(
                 f"Error: column `{column_name}` was removed before the move. Nothing "
                 "was written — call chat_tag_column_list for the current columns."
+            )
+        if refused.code == "stale_base":
+            return redact(
+                f"Error: the tags on `{slot_key}` changed while this call was "
+                "resolving the session. Nothing was written — call "
+                "session_move_to_column again; it re-reads the session."
             )
         return redact(f"Error: {refused.error}")
     if d.get("ok") is not True:

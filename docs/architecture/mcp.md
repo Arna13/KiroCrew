@@ -3832,16 +3832,22 @@ channel agents, at the permission prompt and again at dispatch.
 **Moving a card is a tag write, not a board write.** `session_move_to_column`
 resolves the session through the scoped `_visible_chat_slots`, verifies the
 caller strictly, resolves `column` with `_resolve_chat_tag_column`, and posts
-`{column_id, expected_created}` to `POST /api/chat/slots/<slot>/drop`, the route
+`{column_id, expected_created, base_tags_revision}` to
+`POST /api/chat/slots/<slot>/drop`, the route
 the board's drag calls. Because it changes a session's tags and not the layout,
 it follows the tag-assignment rules rather than the column rules: the route
 applies the unattributable-caller refusal, the crew-member `member_owns_slot`
 fence and the App Kit slot and transcript ownership checks `PUT /tags` applies,
-re-checks `expected_created` under the tags write lock, and holds every
+re-checks `expected_created` and `base_tags_revision` (409 `stale_base`, the
+compare-and-set `chat_tag_assign` gets) under the tags write lock, and holds every
 non-person caller (decided by `slot_tag_write_principal`, the enumeration
-`PUT /tags` uses) to `agent_slot_tags_refusal` over the same prior-to-new diff. A
-drop is exactly the replace that caller could send to `PUT /tags`, so it gets
-the same verdict and cannot be a bypass of it. The person's drag is never gated.
+`PUT /tags` uses) to `agent_slot_tags_refusal` over the same prior-to-new diff, so
+a drop can never be a bypass of `PUT /tags`. It is then held to the `chat_tag`
+`set_state` rule on the target as well: the column's status must be a
+row-backed workflow state with `add-remove` policy (`not_a_status_tag`,
+`tag_policy_denied` otherwise). `PUT /tags` admits an `add-only` state, which a
+drop would turn into a card no agent can move out again. The person's drag is
+never gated.
 The route's rejections carry a `code`: `not_status_lane` and `state_lane` read as
 "Not moved" (calling again changes nothing), while `session_gone` comes back as an
 error telling the caller to re-resolve the session. The member chat-route gate admits
