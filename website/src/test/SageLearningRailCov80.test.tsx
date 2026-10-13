@@ -164,14 +164,25 @@ describe('LearningRail create', () => {
   it('explains a refused name, naming the character the server refused', async () => {
     api.createNamespace.mockRejectedValue(Object.assign(
       new Error("invalid namespace name: 'отчет' (use lowercase a-z ...)"),
-      { code: 'invalid_namespace_name', char: 'о' },
+      { code: 'invalid_namespace_name', char: 'О' },
     ))
     mount()
     await userEvent.click(await screen.findByRole('button', { name: /New namespace/i }))
     await userEvent.type(screen.getByRole('textbox', { name: /New namespace name/i }), 'Отчет{Enter}')
-    expect(await screen.findByText(/^“о” can’t be used in a namespace name\./)).toBeInTheDocument()
+    expect(await screen.findByText(/^“О” isn’t a Latin letter \(a–z\), so it can’t be used in a namespace name\./)).toBeInTheDocument()
     expect(screen.getByText(/lowercase Latin letters \(a–z\)/)).toBeInTheDocument()
     expect(screen.queryByText(/use lowercase a-z/)).not.toBeInTheDocument()
+  })
+
+  it('names a refused non-letter without calling it a letter', async () => {
+    api.createNamespace.mockRejectedValue(Object.assign(
+      new Error('invalid namespace name'), { code: 'invalid_namespace_name', char: '/' },
+    ))
+    mount()
+    await userEvent.click(await screen.findByRole('button', { name: /New namespace/i }))
+    await userEvent.type(screen.getByRole('textbox', { name: /New namespace name/i }), 'team/a{Enter}')
+    expect(await screen.findByText(/^“\/” can’t be used in a namespace name\./)).toBeInTheDocument()
+    expect(screen.queryByText(/isn’t a Latin letter/)).not.toBeInTheDocument()
   })
 
   it('states the rule alone when the refusal names no character', async () => {

@@ -414,12 +414,27 @@ describe('maxChatWidth', () => {
 // lowercase Latin slug, and what the user gets is that rule in the app's own
 // language, naming the character the server refused.
 describe('projectErrorText', () => {
-  it('names the refused character and the rule', () => {
+  it('says a refused letter is not a Latin letter, then states the rule', () => {
     const err = new PapyrusApiError('invalid project name', 400, '', 'invalid_project_name', '论')
     const text = projectErrorText(err)
-    expect(text).toContain('“论”')
+    expect(text).toMatch(/^“论” isn’t a Latin letter \(a–z\), so it can’t be used in a paper name\./)
     expect(text).toContain('lowercase Latin letters (a–z)')
     expect(text).not.toContain('invalid project name')
+  })
+
+  it('says so for a capital that renders like the Latin one the rule allows', () => {
+    // Cyrillic capital O: drawn exactly like Latin "O".
+    const err = new PapyrusApiError('invalid project name', 400, '', 'invalid_project_name', 'О')
+    expect(projectErrorText(err)).toContain('isn’t a Latin letter')
+  })
+
+  it('names a refused non-letter without calling it a letter', () => {
+    for (const char of ['/', 'U+202E']) {
+      const err = new PapyrusApiError('invalid project name', 400, '', 'invalid_project_name', char)
+      const text = projectErrorText(err)
+      expect(text).toMatch(new RegExp(`^“${char.replace('+', '\\+')}” can’t be used in a paper name\\.`))
+      expect(text).not.toContain('isn’t a Latin letter')
+    }
   })
 
   it('states the rule alone when no single character is to blame', () => {

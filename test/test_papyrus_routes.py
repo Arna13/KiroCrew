@@ -364,15 +364,19 @@ class TestProjects:
         ("typed", "char"),
         [
             ("\u8bba\u6587", "\u8bba"),
-            ("\u041e\u0442\u0447\u0435\u0442", "\u043e"),
+            # The capital the user typed, not the lowercase Cyrillic letter that
+            # renders like the Latin "o" the rule allows.
+            ("\u041e\u0442\u0447\u0435\u0442", "\u041e"),
             ("M\u00fcnchen", "\u00fc"),
+            # Not the U+0307 that lowercasing the dotted capital I produces.
+            ("\u0130stanbul", "\u0130"),
         ],
     )
     async def test_create_explains_a_name_in_another_script(
         self, enabled: None, data_root: Path, typed: str, char: str
     ) -> None:
-        """#10470: a coded JSON 400 naming the refused character, which the dashboard
-        renders in the user's language -- and nothing is created."""
+        """A coded JSON 400 naming the refused character as typed, which the
+        dashboard renders in the user's language -- and nothing is created."""
         with pytest.raises(web.HTTPBadRequest) as caught:
             await routes._handle_create_project(
                 _request("POST", "/api/apps/papyrus/projects", {"name": typed})
@@ -383,6 +387,25 @@ class TestProjects:
         assert body["char"] == char
         assert "lowercase a-z" in body["error"]
         assert not any(store.projects_dir().iterdir())
+
+    async def test_clone_names_the_character_of_the_requested_name(
+        self, enabled: None, data_root: Path
+    ) -> None:
+        with mock.patch.object(gitops, "clone", mock.AsyncMock()) as clone:
+            with pytest.raises(web.HTTPBadRequest) as caught:
+                await routes._handle_clone_project(
+                    _request(
+                        "POST",
+                        "/api/apps/papyrus/projects/clone",
+                        {
+                            "url": "https://example.com/g/p.git",
+                            "name": "\u041e\u0442\u0447\u0435\u0442",
+                        },
+                    )
+                )
+        clone.assert_not_called()
+        body = json.loads(caught.value.text or "")
+        assert (body["code"], body["char"]) == ("invalid_project_name", "\u041e")
 
     async def test_create_explains_a_traversal_without_echoing_a_control(
         self, enabled: None, data_root: Path

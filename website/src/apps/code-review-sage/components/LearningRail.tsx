@@ -18,15 +18,20 @@ import { guideCaution } from '../../../guide/trustRoot'
 
 /** A refused namespace name is explained in the app's language; the backend's
  *  English is for logs. The name is the namespace's folder, so it stays a
- *  lowercase Latin slug on purpose, and `char` names what stopped it. Read off
- *  the error's fields rather than `instanceof SageApiError`, so the copy does not
- *  depend on which module instance threw. */
+ *  lowercase Latin slug on purpose, and `char` names what stopped it. A refused
+ *  letter is said not to be a Latin letter, because a Cyrillic or Greek capital
+ *  renders exactly like the Latin one the rule allows. Read off the error's
+ *  fields rather than `instanceof SageApiError`, so the copy does not depend on
+ *  which module instance threw. */
 function errorText(err: Error): string {
   const { code, char } = err as Error & { code?: unknown; char?: unknown }
   if (code !== 'invalid_namespace_name') return err.message
-  return typeof char === 'string' && char
-    ? i18nT('apps.codeReviewSage.components.learningRail.invalid_namespace_name_char', { char })
-    : i18nT('apps.codeReviewSage.components.learningRail.invalid_namespace_name')
+  if (typeof char !== 'string' || !char) {
+    return i18nT('apps.codeReviewSage.components.learningRail.invalid_namespace_name')
+  }
+  return /^\p{L}$/u.test(char)
+    ? i18nT('apps.codeReviewSage.components.learningRail.invalid_namespace_name_letter', { char })
+    : i18nT('apps.codeReviewSage.components.learningRail.invalid_namespace_name_char', { char })
 }
 
 export default function LearningRail() {

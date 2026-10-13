@@ -5141,9 +5141,9 @@ def test_extract_tags_ignores_masked_code_in_any_script() -> None:
     ],
 )
 def test_extract_tags_keeps_a_word_whose_script_uses_combining_marks(word: str) -> None:
-    """#10470: Python's ``\\w`` has no combining marks, so these tags used to
-    register as their first letter -- ``#हिन्दी`` as ``ह`` -- a different tag from
-    the one typed. The whole word is the tag."""
+    """Python's ``\\w`` has no combining marks, so a tag scanner built on it alone
+    would register these as their first letter -- ``#हिन्दी`` as ``ह`` -- a
+    different tag from the one typed. The whole word is the tag."""
     from kiro_crew.apps.builtins.md_notebook import notes as notes_mod
 
     # NFC can reorder a run of marks (canonical ordering), so the tag is the word's NFC form.

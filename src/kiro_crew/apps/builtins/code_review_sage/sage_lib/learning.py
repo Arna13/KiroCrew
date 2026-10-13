@@ -57,12 +57,9 @@ DEFAULT_NAMESPACE = "default"
 # ASCII on purpose: the name IS the directory, so it must mean one thing on every
 # platform and filesystem. A refusal names the offending character
 # (`create_namespace`'s `char`) so the dashboard can explain the rule in the
-# user's own language.
+# user's own language. The class is `kiro_crew.slugs.SLUG_CHARS`, which tests
+# pin it to.
 _NS_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,62}[a-z0-9]$")
-
-# Every character `_NS_NAME_RE` admits anywhere in a name. Reporting only: the
-# regex (and `_is_valid_ns_name`) alone decide.
-_NS_NAME_CHARS = "abcdefghijklmnopqrstuvwxyz0123456789._-"
 
 
 def _is_valid_ns_name(name: str) -> bool:
@@ -181,14 +178,18 @@ def list_namespaces(root: Path | None = None) -> list[str]:
 
 def create_namespace(name: str, root: Path | None = None) -> dict:
     """Create a new namespace with an empty learnings file."""
+    typed = name
     name = name.strip().lower().replace(" ", "-")
     if not _is_valid_ns_name(name):
         # `code` + `char` are what the dashboard renders, in the user's language;
-        # the English `error` is for logs and catalog-less callers.
+        # the English `error` is for logs and catalog-less callers. `char` comes
+        # from what the user typed, before lowercasing, so it is a character they
+        # will recognize -- not a lowercase stand-in that can look like an
+        # allowed Latin letter.
         return {
             "ok": False,
             "code": "invalid_namespace_name",
-            "char": refused_slug_char(name, _NS_NAME_CHARS),
+            "char": refused_slug_char(typed),
             "error": (
                 f"invalid namespace name: {name!r} (use lowercase a-z, 0-9, '.', '_' "
                 "or '-', starting and ending with a letter or digit, 2-64 chars)"
