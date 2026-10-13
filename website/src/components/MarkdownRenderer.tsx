@@ -77,6 +77,7 @@ import {
   PathProbeCtx,
   ReadOnlyCodeCtx,
   SessionActionCtx,
+  type InsideLink,
   type LinkUnfurl,
   type PathActions,
   type SessionActions,
@@ -108,6 +109,9 @@ export { pendingImageBoxStyle, reservedImageClass, reservedImageStyle } from './
 export { rehypeSanitize, remarkVerbatimUnknownTags } from './markdown/sanitize'
 export { rehypeStableRootKeys } from './markdown/treeTransforms'
 export { dispatchLightbox, Lightbox } from './markdown/Lightbox'
+
+/** A leading URL scheme (`https:`, `mailto:`, `vscode:`), RFC 3986 spelling. */
+const URL_SCHEME_RE = /^[a-z][a-z\d+.-]*:/i
 
 /** Default markdown anchor, unless a `LinkOverrideCtx` provider claims the href.
  *
@@ -157,6 +161,10 @@ function MdAnchor({ node, href, children }: React.AnchorHTMLAttributes<HTMLAncho
       if (!decodedHref.startsWith('//')) localHref = decodedHref
     } catch { /* keep it a normal link */ }
   }
+  // Where the link goes, for the code spans in its label (`InsideLinkCtx`): a
+  // scheme or a protocol-relative `//host` leaves the dashboard; anything else
+  // is a local address.
+  const linkKind: InsideLink = href && (URL_SCHEME_RE.test(href) || href.startsWith('//')) ? 'external' : 'local'
   // Decoded but NOT narrowed to root-relative: the app mints its own share links
   // absolute, and the recognizer's origin check is what refuses a foreign one.
   let sessionCandidate: string | null = null
@@ -335,7 +343,7 @@ function MdAnchor({ node, href, children }: React.AnchorHTMLAttributes<HTMLAncho
   if (target && meta) {
     return (
       <LinkChip meta={meta} href={target}>
-        <InsideLinkCtx.Provider value={true}>{children}</InsideLinkCtx.Provider>
+        <InsideLinkCtx.Provider value={linkKind}>{children}</InsideLinkCtx.Provider>
       </LinkChip>
     )
   }
@@ -375,7 +383,7 @@ function MdAnchor({ node, href, children }: React.AnchorHTMLAttributes<HTMLAncho
         ? 'text-muted'
         : 'text-accent underline underline-offset-2 decoration-accent/40 hover:decoration-accent'}
     >
-      <InsideLinkCtx.Provider value={true}>{children}</InsideLinkCtx.Provider>
+      <InsideLinkCtx.Provider value={linkKind}>{children}</InsideLinkCtx.Provider>
       {/* The not-open explanation reaches touch / keyboard / AT users as a
           visually-hidden description APPENDED to the anchor's accessible name —
           a native `title` renders only on mouse hover, so without this the muted
