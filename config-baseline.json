@@ -4394,6 +4394,36 @@
       "defaultValue": false
     },
     {
+      "path": "research_lab",
+      "kind": "core",
+      "type": "object",
+      "required": false,
+      "deprecated": false,
+      "sensitive": false,
+      "tags": [],
+      "label": "Research Lab",
+      "help": "What chat agents may do in the Research Lab app. Off by default and separate from the app's own enable switch.",
+      "hasChildren": true,
+      "enumValues": null,
+      "defaultValue": {
+        "agent_create_campaigns": false
+      }
+    },
+    {
+      "path": "research_lab.agent_create_campaigns",
+      "kind": "core",
+      "type": "boolean",
+      "required": false,
+      "deprecated": false,
+      "sensitive": false,
+      "tags": [],
+      "label": "Let chat agents file Research Lab campaigns",
+      "help": "On: while the Research Lab app is enabled, chat agents get the research_lab_create_campaign and research_lab_campaign_status tools. An agent offers first and files the campaign only after you agree; the campaign is created NOT started, marked as created by an agent, and nothing runs until you press Start in the Research Lab. The tools cannot start, pause, stop, steer or delete a campaign. Off, the default: neither tool is offered and the agent routes refuse. A session already open keeps the tool list it was given, so a change reaches the next session.",
+      "hasChildren": false,
+      "enumValues": null,
+      "defaultValue": false
+    },
+    {
       "path": "decisions",
       "kind": "core",
       "type": "object",

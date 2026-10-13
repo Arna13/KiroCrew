@@ -376,6 +376,7 @@ from kiro_crew.config.sections import (  # noqa: F401
     resolve_selected_backend,
     yolo_duration_to_secs,
 )
+from kiro_crew.config.service_sections import ResearchLabConfig
 
 # Superseded-default registry. Leaf module: stdlib only, so importing it
 # here creates no cycle. The same module owns the one-shot adoption of the
@@ -3899,6 +3900,14 @@ class KiroCrewConfig:
             "its default.",
         ),
     )
+    research_lab: ResearchLabConfig = field(
+        default_factory=ResearchLabConfig,
+        metadata=_meta(
+            "Research Lab",
+            "What chat agents may do in the Research Lab app. Off by default and "
+            "separate from the app's own enable switch.",
+        ),
+    )
     decisions: DecisionsConfig = field(
         default_factory=DecisionsConfig,
         metadata=_meta(
@@ -4340,6 +4349,7 @@ class KiroCrewConfig:
             "knowledge": asdict(self.knowledge),
             "heartbeat": asdict(self.heartbeat),
             "monitoring": asdict(self.monitoring),
+            "research_lab": asdict(self.research_lab),
             "decisions": asdict(self.decisions),
             "skills": asdict(self.skills),
             "session_summary": asdict(self.session_summary),
@@ -5657,6 +5667,11 @@ def build_config(
     monitoring_prefer_structured_arming = _sections.SectionReader(
         MonitoringConfig, monitoring_data
     ).read("prefer_structured_arming", _safe_bool)
+    # Same reasoning as "monitoring" above: a document written before this section
+    # existed has none, and the miss resolves to the off position.
+    research_lab_agent_create_campaigns = _sections.SectionReader(
+        ResearchLabConfig, _coerced_section(data, "research_lab", _degraded)
+    ).read("agent_create_campaigns", _safe_bool)
     tunnel_data = _coerced_section(data, "tunnel", _degraded)
     skills_data = _coerced_section(data, "skills", _degraded)
     session_summary_data = _coerced_section(data, "session_summary", _degraded)
@@ -5906,6 +5921,7 @@ def build_config(
         instances=_build_instances_config(connect_timeout_raw, instances_data, mint_timeout_raw),
         heartbeat=HeartbeatConfig(default_deliver=heartbeat_default_deliver),
         monitoring=_build_monitoring_config(monitoring_data, monitoring_prefer_structured_arming),
+        research_lab=ResearchLabConfig(agent_create_campaigns=research_lab_agent_create_campaigns),
         decisions=DecisionsConfig.from_raw(decisions_data),
         skills=_build_skills_config(skills_data),
         session_summary=_build_session_summary_config(session_summary_data),

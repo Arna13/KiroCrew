@@ -1049,6 +1049,11 @@ def register_routes(app: web.Application) -> None:
         "/api/apps/auto-research/campaigns/{id}/report-status", _handle_report_status
     )
     app.router.add_get("/api/apps/auto-research/campaigns/{id}/stream", _handle_stream)
+    # The two agent routes behind the Research Lab MCP tools, kept in their own
+    # module with their own guards (see agent_api's docstring).
+    from kiro_crew.apps.builtins.auto_research.agent_api import register_agent_routes
+
+    register_agent_routes(app)
 
     async def _start_watchdog(_app: web.Application) -> None:
         global _watchdog_task

@@ -3155,6 +3155,42 @@ POD_STATUS_SCHEMA = ToolSchema(
 # what makes an unexpected argument an "Error:" string instead of unvalidated input.
 POD_LS_SCHEMA = ToolSchema(tool_name="pod_ls", fields=[])
 
+# ── Tool Schemas (Research Lab app) ──
+#
+# ``research_lab_create_campaign`` and ``research_lab_campaign_status`` are the
+# agent's ONLY credentialed path to the Research Lab (same pattern as
+# ``ops_mission_control_api``: the MCP server process holds the internal secret;
+# the agent never sees a credential). Each tool reaches exactly one route, and
+# ``RESEARCH_LAB_AGENT_CALLS`` is the whole set: the gateway admits these two leaf
+# paths to the internal secret and no other Research Lab route, so starting,
+# pausing, stopping, nudging, adding questions to or deleting a campaign stays a
+# dashboard action. Both the tool handlers and the gateway routes read the
+# constants below, so the two halves cannot name different paths.
+RESEARCH_LAB_CREATE_PATH = "/api/apps/auto-research/agent/create-campaign"
+RESEARCH_LAB_STATUS_PATH = "/api/apps/auto-research/agent/campaign-status"
+RESEARCH_LAB_AGENT_CALLS: frozenset[tuple[str, str]] = frozenset(
+    {("POST", RESEARCH_LAB_CREATE_PATH), ("GET", RESEARCH_LAB_STATUS_PATH)}
+)
+# The campaign execution modes (``storage.VALID_EXECUTION_MODES`` in the app).
+RESEARCH_LAB_MODES = frozenset({"agent", "workflow"})
+# Bounds one research question; the gateway route enforces the same cap.
+RESEARCH_LAB_MAX_QUESTION = 4_000
+# A campaign id is 8 lowercase hex characters (``session_keys.is_campaign_id``).
+_RESEARCH_LAB_ID_RE = re.compile(r"^[a-f0-9]{8}$")
+
+RESEARCH_LAB_CREATE_CAMPAIGN_SCHEMA = ToolSchema(
+    tool_name="research_lab_create_campaign",
+    fields=[
+        FieldSpec("question", str, required=True, max_len=RESEARCH_LAB_MAX_QUESTION),
+        FieldSpec("mode", str, allowed=RESEARCH_LAB_MODES, default=""),
+    ],
+)
+
+RESEARCH_LAB_CAMPAIGN_STATUS_SCHEMA = ToolSchema(
+    tool_name="research_lab_campaign_status",
+    fields=[FieldSpec("id", str, required=True, max_len=8, pattern=_RESEARCH_LAB_ID_RE)],
+)
+
 ISSUE_RADAR_RECORD_INVESTIGATION_SCHEMA = ToolSchema(
     tool_name="issue_radar_record_investigation",
     fields=[
@@ -4282,6 +4318,8 @@ MCP_CORE_SCHEMAS: dict[str, ToolSchema] = {
     "pod_down": POD_DOWN_SCHEMA,
     "pod_status": POD_STATUS_SCHEMA,
     "pod_ls": POD_LS_SCHEMA,
+    "research_lab_create_campaign": RESEARCH_LAB_CREATE_CAMPAIGN_SCHEMA,
+    "research_lab_campaign_status": RESEARCH_LAB_CAMPAIGN_STATUS_SCHEMA,
     # Registered even though ``issue_radar_crew_read`` takes no arguments: an
     # unregistered tool's args pass through raw, and the empty-field schema is
     # also what makes an unknown arg an "Error:" string instead of a stdio-loop

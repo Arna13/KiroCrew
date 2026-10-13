@@ -1,18 +1,22 @@
 """An app's tools are advertised only while the app is enabled.
 
-The nine tools of the ``apps`` domain under :mod:`kiro_crew.mcp_tools` reach
-four built-in apps -- Issue Radar, Dev Fleet, Ops Mission Control and Design
-Tweak -- whose gateway routes refuse a call with HTTP 403 while the app is
-disabled (Dev Fleet's routes and the app reverse proxy Design Tweak sits behind
-name the refusal ``app_not_enabled``, Ops Mission Control ``app_disabled``,
-Issue Radar carries no code). ``tools/list`` therefore omits a tool while its
+The eleven tools of the ``apps`` domain under :mod:`kiro_crew.mcp_tools` reach
+five built-in apps -- Issue Radar, Dev Fleet, Ops Mission Control, Design Tweak
+and the Research Lab -- whose gateway routes refuse a call with HTTP 403 while
+the app is disabled (Dev Fleet's routes, the Research Lab's agent routes and the
+app reverse proxy Design Tweak sits behind name the refusal ``app_not_enabled``,
+Ops Mission Control ``app_disabled``, Issue Radar carries no code). ``tools/list`` therefore omits a tool while its
 app is disabled: a session with none of the apps enabled sees none of them,
 instead of tools that can only refuse.
 
 The listing and the call must agree from ONE predicate: the ``installed.json``
 reader in :mod:`kiro_crew.apps.manager` that every one of those routes consults.
 These tests write real ``installed.json`` records into the isolated test home
-rather than stubbing the reader, so what is pinned is the agreement itself.
+rather than stubbing the reader, so what is pinned is the agreement itself. The
+Research Lab tools need a second switch on top of the app's,
+``research_lab.agent_create_campaigns``; it is pinned ON here so these tests keep
+measuring the app gate alone, and ``test_research_lab_agent_tools`` pins the
+second switch.
 """
 
 from __future__ import annotations
@@ -32,13 +36,31 @@ ISSUE_RADAR_TOOLS = frozenset(
 DEV_FLEET_TOOLS = frozenset({"pod_up", "pod_down", "pod_status", "pod_ls"})
 OPS_MISSION_CONTROL_TOOLS = frozenset({"ops_mission_control_api"})
 DESIGN_TWEAK_TOOLS = frozenset({"design_tweak_update_thread"})
+RESEARCH_LAB_TOOLS = frozenset({"research_lab_create_campaign", "research_lab_campaign_status"})
 APP_TOOLS = {
     "issue-radar": ISSUE_RADAR_TOOLS,
     "dev-fleet": DEV_FLEET_TOOLS,
     "ops-mission-control": OPS_MISSION_CONTROL_TOOLS,
     "design-tweak": DESIGN_TWEAK_TOOLS,
+    "auto-research": RESEARCH_LAB_TOOLS,
 }
-ALL_APP_TOOLS = ISSUE_RADAR_TOOLS | DEV_FLEET_TOOLS | OPS_MISSION_CONTROL_TOOLS | DESIGN_TWEAK_TOOLS
+ALL_APP_TOOLS = (
+    ISSUE_RADAR_TOOLS
+    | DEV_FLEET_TOOLS
+    | OPS_MISSION_CONTROL_TOOLS
+    | DESIGN_TWEAK_TOOLS
+    | RESEARCH_LAB_TOOLS
+)
+
+
+@pytest.fixture(autouse=True)
+def _research_lab_agent_tools_opted_in(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The Research Lab's own switch ON, so every test here measures the app gate."""
+    from kiro_crew.config.loader import KiroCrewConfig
+    from kiro_crew.config.sections import ResearchLabConfig
+
+    pinned = KiroCrewConfig(research_lab=ResearchLabConfig(agent_create_campaigns=True))
+    monkeypatch.setattr(KiroCrewConfig, "load", classmethod(lambda cls: pinned))
 
 
 def _write_installed(name: str, *, enabled: bool) -> Path:
@@ -192,6 +214,7 @@ def test_tool_apps_name_the_apps_whose_routes_gate_the_calls() -> None:
     name the app is installed under, which is what the app reverse proxy reads.
     """
     from kiro_crew.apps.builtins import design_tweak as design_tweak_pkg
+    from kiro_crew.apps.builtins.auto_research import agent_api as research_lab_agent_api
     from kiro_crew.apps.builtins.dev_fleet import agent_pod_api
     from kiro_crew.apps.builtins.issue_radar.backend import store as issue_radar_store
     from kiro_crew.apps.builtins.ops_mission_control.backend import store as omc_store
@@ -204,6 +227,7 @@ def test_tool_apps_name_the_apps_whose_routes_gate_the_calls() -> None:
         **{tool: agent_pod_api.APP_NAME for tool in DEV_FLEET_TOOLS},
         **{tool: omc_store.APP_NAME for tool in OPS_MISSION_CONTROL_TOOLS},
         **{tool: design_tweak_manifest["name"] for tool in DESIGN_TWEAK_TOOLS},
+        **{tool: research_lab_agent_api.APP_NAME for tool in RESEARCH_LAB_TOOLS},
     }
     assert apps_tools.TOOL_APPS == expected
     assert set(expected.values()) == set(APP_TOOLS)

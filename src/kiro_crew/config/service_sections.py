@@ -1,7 +1,8 @@
 """Sections that configure the gateway's background services.
 
 Owns the DTOs and defaults for ``taskrunner``, ``messaging``,
-``cron_history``, ``monitoring``, ``heartbeat`` and ``watchdog``. The monitoring
+``cron_history``, ``monitoring``, ``research_lab``, ``heartbeat`` and
+``watchdog``. The monitoring
 runtime bounds come from ``monitoring.limits``, their single owner.
 ``config.sections`` re-exports every name; this module never imports it, the
 loader, schema or validation.
@@ -179,6 +180,31 @@ class MonitoringConfig:
             "retained USER_STOP outcome that refuses a re-arm, so moving such a "
             "session to the prompt loop needs its owner to clear that record in "
             "the dashboard's monitor popover first.",
+        ),
+    )
+
+
+@dataclass
+class ResearchLabConfig:
+    """What chat agents may do in the Research Lab app.
+
+    Off by default, and independent of the app's own enable switch: turning the
+    Research Lab on gives the dashboard user the Lab, not chat agents any tools.
+    """
+
+    agent_create_campaigns: bool = field(
+        default=False,
+        metadata=_meta(
+            "Let chat agents file Research Lab campaigns",
+            "On: while the Research Lab app is enabled, chat agents get the "
+            "research_lab_create_campaign and research_lab_campaign_status tools. "
+            "An agent offers first and files the campaign only after you agree; the "
+            "campaign is created NOT started, marked as created by an agent, and "
+            "nothing runs until you press Start in the Research Lab. The tools "
+            "cannot start, pause, stop, steer or delete a campaign. Off, the "
+            "default: neither tool is offered and the agent routes refuse. A "
+            "session already open keeps the tool list it was given, so a change "
+            "reaches the next session.",
         ),
     )
 

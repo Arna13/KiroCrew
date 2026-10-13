@@ -143,6 +143,14 @@ _ROUTES = [
     ("GET", f"{BASE}/campaigns/{{id}}/stream", "_handle_stream"),
 ]
 
+# The two agent routes ``register_routes`` mounts last; their handlers live in
+# ``agent_api``, not on the facade.
+_AGENT_ROUTES = [
+    ("POST", f"{BASE}/agent/create-campaign", "handle_agent_create"),
+    ("HEAD", f"{BASE}/agent/campaign-status", "handle_agent_status"),
+    ("GET", f"{BASE}/agent/campaign-status", "handle_agent_status"),
+]
+
 # PRAGMA table_info(campaigns) on a freshly created DB:
 # (cid, name, type, notnull, dflt_value, pk).
 _SCHEMA = [
@@ -170,6 +178,7 @@ _SCHEMA = [
     (21, "depth_decay", "REAL", 1, "0.5", 0),
     (22, "reserve_fraction", "REAL", 1, "0.15", 0),
     (23, "model", "TEXT", 1, "''", 0),
+    (24, "created_by", "TEXT", 0, None, 0),
 ]
 
 # The table as the first release created it; every later column is migrated in.
@@ -395,7 +404,7 @@ class TestRouteRegistration:
         app = web.Application()
         h.register_routes(app)
         routes = [(r.method, r.resource.canonical, r.handler.__name__) for r in app.router.routes()]
-        assert routes == _ROUTES
+        assert routes == _ROUTES + _AGENT_ROUTES
         for _method, _path, name in _ROUTES:
             handler = next(r.handler for r in app.router.routes() if r.handler.__name__ == name)
             assert handler is getattr(h, name)

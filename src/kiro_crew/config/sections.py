@@ -102,6 +102,7 @@ from kiro_crew.config.service_sections import (  # noqa: F401
     HeartbeatConfig,
     MessagingConfig,
     MonitoringConfig,
+    ResearchLabConfig,
     TaskRunnerConfig,
     WatchdogConfig,
 )

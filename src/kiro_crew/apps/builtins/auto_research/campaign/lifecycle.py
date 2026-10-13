@@ -215,7 +215,19 @@ def _fork_name(source: str) -> str:
     return (_FORK_NAME_PREFIX + base[: 50 - len(_FORK_NAME_PREFIX)]).strip()
 
 
-def create_campaign(config: dict) -> dict:
+#: The one ``created_by`` value a campaign row may carry; ``None`` is the Lab page.
+CREATED_BY_AGENT = "agent"
+
+
+def create_campaign(config: dict, *, created_by: str | None = None) -> dict:
+    """Store a new campaign in the ``ready`` state and return its id, name and status.
+
+    ``created_by`` is a keyword argument, never a config key: the dashboard route
+    passes its whole request body as ``config``, so a body could otherwise claim the
+    agent marker for a campaign a person filed.
+    """
+    if created_by not in (None, CREATED_BY_AGENT):
+        raise ValueError(f"unknown campaign provenance {created_by!r}")
     campaign_id = uuid.uuid4().hex[:8]
     name = config.get("name") or config["question"][:50].strip()
     parent_id = config.get("parent_id") or None
@@ -238,8 +250,8 @@ def create_campaign(config: dict) -> dict:
         "INSERT INTO campaigns (id,name,question,sub_questions,sources,scope_constraints,"
         "max_cycles,idle_secs,success_criteria,auto_approve,parent_id,parallel_workers,"
         "execution_mode,max_subquestions_per_round,depth_decay,reserve_fraction,"
-        "model,status,created_at) "
-        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "model,status,created_at,created_by) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (
             campaign_id,
             name,
@@ -260,6 +272,7 @@ def create_campaign(config: dict) -> dict:
             _campaign_model(config),
             CampaignStatus.READY,
             time.time(),
+            created_by,
         ),
     )
     db.commit()

@@ -210,6 +210,10 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             # agent's / backend's default — never a hardcoded id).
             if "model" not in cols:
                 conn.execute("ALTER TABLE campaigns ADD COLUMN model TEXT NOT NULL DEFAULT ''")
+            # Who filed the campaign: NULL for the Research Lab page, 'agent' for a
+            # chat agent's research_lab_create_campaign call. Set only at creation.
+            if "created_by" not in cols:
+                conn.execute("ALTER TABLE campaigns ADD COLUMN created_by TEXT")
             conn.commit()
             _INITIALIZED_DBS.add(key)
         except Exception:

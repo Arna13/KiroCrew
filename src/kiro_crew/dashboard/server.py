@@ -615,6 +615,24 @@ _STRICT_INTERNAL_API_PATHS = frozenset(
         "/api/apps/dev-fleet/pod/down",
         "/api/apps/dev-fleet/pod/status",
         "/api/apps/dev-fleet/pod/list",
+        # Research Lab agent surface -- the two routes behind the
+        # ``research_lab_create_campaign`` / ``research_lab_campaign_status`` MCP
+        # tools (``apps/builtins/auto_research/agent_api.py``). A chat agent has no
+        # dashboard credential (same three reasons as the Dev Fleet entries above),
+        # so without these entries it cannot file research in the Lab at all.
+        #
+        # STRICT, not mixed: no browser calls these; the Research Lab page uses the
+        # app's own ``/campaigns`` routes with cookie auth. Each handler re-asserts
+        # local origin AND ``internal_auth`` itself, for the reclassification reason
+        # the Dev Fleet entries give.
+        #
+        # TWO EXACT leaf paths, never ``/api/apps/auto-research`` or its
+        # ``/campaigns`` route: this matcher is exact-or-prefix, and the
+        # ``/campaigns/{id}`` neighbourhood holds start, pause, stop, nudge,
+        # add-question and delete, which must stay dashboard-only. Create stores
+        # the campaign not started, so admitting it grants no agent spend.
+        "/api/apps/auto-research/agent/create-campaign",
+        "/api/apps/auto-research/agent/campaign-status",
         "/api/session-tool-policy",
         # NOTE: "/api/hooks/agent" is deliberately NOT here. It is an inbound
         # webhook for EXTERNAL callers (CI runners, review bots) that hold no

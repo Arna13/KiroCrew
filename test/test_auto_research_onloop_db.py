@@ -143,6 +143,7 @@ _DB_TOUCHING_FNS = frozenset(
         "_read_export_row",
         "_persist_report_slug",
         "_read_question_row",
+        "_stored_status",
     }
 )
 

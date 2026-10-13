@@ -25,6 +25,7 @@ every existing patch site.
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Callable
 from typing import Any
 from urllib.parse import quote
@@ -38,6 +39,8 @@ from kiro_crew.validation import (
     _ISSUE_RADAR_CREW_PHASES,
     _ISSUE_RADAR_CREW_SKIP_SCOPES,
     OPS_MISSION_CONTROL_ALLOWED_CALLS,
+    RESEARCH_LAB_AGENT_CALLS,
+    RESEARCH_LAB_MAX_QUESTION,
     sanitize_json_values,
 )
 
@@ -517,6 +520,64 @@ def schemas() -> list[dict[str, Any]]:
                 "required": [],
             },
         },
+        {
+            "name": "research_lab_create_campaign",
+            "description": (
+                "File a research question as a Research Lab campaign, so the deep "
+                "research runs in the Lab (multi-cycle, with findings and a report "
+                "on the Research Lab page) instead of as files in this chat. OFFER "
+                "first: when the user asks for deep, thorough or multi-step "
+                'research, ask "Create this as a Research Lab campaign?" and call '
+                "this only after they say yes. Never call it unprompted. "
+                "The campaign is created NOT STARTED: nothing runs and nothing is "
+                "spent until the user opens it in the Research Lab, reviews it and "
+                "presses Start. This tool cannot start, pause, stop or steer a "
+                "campaign. Give the user the returned link as a Markdown link. "
+                "Refused while another campaign is active."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "question": {
+                        "type": "string",
+                        "description": (
+                            "The research question in the user's own terms, with the "
+                            "context the chat already established (20 to "
+                            f"{RESEARCH_LAB_MAX_QUESTION} characters)"
+                        ),
+                    },
+                    "mode": {
+                        "type": "string",
+                        "enum": ["agent", "workflow"],
+                        "description": (
+                            "agent (default): one research agent works the question "
+                            "cycle by cycle. workflow: a dynamic workflow plans the "
+                            "sub-questions up front"
+                        ),
+                    },
+                },
+                "required": ["question"],
+            },
+        },
+        {
+            "name": "research_lab_campaign_status",
+            "description": (
+                "Read one Research Lab campaign's status: its state (ready = not "
+                "started yet), cycles run, how many found something new, the latest "
+                "cycle summary and any question it is waiting on. Read-only. Pass "
+                "the id research_lab_create_campaign returned."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "id": {
+                        "type": "string",
+                        "description": "The campaign id, 8 lowercase hex characters",
+                    },
+                },
+                "required": ["id"],
+            },
+        },
     ]
 
 
@@ -535,6 +596,8 @@ TOOL_APPS: dict[str, str] = {
     "pod_down": "dev-fleet",
     "pod_status": "dev-fleet",
     "pod_ls": "dev-fleet",
+    "research_lab_create_campaign": "auto-research",
+    "research_lab_campaign_status": "auto-research",
 }
 
 
@@ -584,7 +647,32 @@ def advertised() -> list[dict[str, Any]]:
             continue
         if state is False:
             hidden.update(tool for tool, owner in TOOL_APPS.items() if owner == app)
+    if not RESEARCH_LAB_TOOLS <= hidden and not _research_lab_agent_tools_opted_in():
+        hidden.update(RESEARCH_LAB_TOOLS)
     return [spec for spec in schemas() if spec["name"] not in hidden]
+
+
+#: The Research Lab tools. Unlike every other app's tools they need a second switch:
+#: enabling the app gives the dashboard user the Lab, and only
+#: ``research_lab.agent_create_campaigns`` gives chat agents a way into it.
+RESEARCH_LAB_TOOLS = frozenset({"research_lab_create_campaign", "research_lab_campaign_status"})
+
+
+def _research_lab_agent_tools_opted_in() -> bool:
+    """Whether the owner turned ``research_lab.agent_create_campaigns`` on.
+
+    Hides on a read fault, the opposite of the app gate above. That gate hides a
+    tool whose call would only be refused, a convenience; this one is the opt-in
+    itself, off on every install until its owner turns it on, so an unreadable
+    answer keeps the tool list what it was without the opt-in. The gateway route
+    reads the same key and refuses on its own.
+    """
+    try:
+        from kiro_crew.config.loader import KiroCrewConfig
+
+        return KiroCrewConfig.load().research_lab.agent_create_campaigns is True
+    except Exception:
+        return False
 
 
 def _crew_session_key() -> tuple[str, str]:
@@ -1034,6 +1122,133 @@ def issue_radar_crew_record(name: str, args: dict[str, Any]) -> str:
     return redact("\n".join(_cw_lines))
 
 
+#: The dashboard path that opens one campaign in the Research Lab. The gateway route
+#: builds the same link (``agent_api.campaign_link``); a test pins the two together.
+_RESEARCH_LAB_LINK = "/auto-research?campaign={id}"
+#: The two routes, spelled as literals so the internal-path coverage walk can read
+#: them at rest; a test pins both to ``validation.RESEARCH_LAB_AGENT_CALLS``.
+_RESEARCH_LAB_CREATE_URL = "/api/apps/auto-research/agent/create-campaign"
+_RESEARCH_LAB_STATUS_URL = "/api/apps/auto-research/agent/campaign-status"
+_RESEARCH_LAB_ID_SHAPE = re.compile(r"[a-f0-9]{8}")
+#: Ceiling on the status text handed to the model. The gateway already caps each
+#: field of its fixed projection; this bounds the whole answer as well.
+_RESEARCH_LAB_STATUS_CAP = 12_000
+
+
+def _research_lab_call(
+    method: str,
+    path: str,
+    *,
+    session_key: str,
+    body: dict[str, Any] | None = None,
+    campaign_id: str = "",
+) -> dict[str, Any]:
+    """Send one Research Lab call for the calling session, or refuse it.
+
+    ``RESEARCH_LAB_AGENT_CALLS`` is the whole surface: filing a campaign that does
+    not start, and reading one campaign. Any other method or path -- starting,
+    pausing, resuming or stopping a campaign, nudging it, adding a question,
+    deleting it, listing every campaign -- is refused here before anything is sent,
+    and the gateway refuses the internal secret on those routes as well.
+
+    ``session_key`` is the caller's own, from the strict identity gate, and it is
+    the key sent on the wire: the route acts for that session and refuses a call
+    that names none.
+    """
+    if (method, path) not in RESEARCH_LAB_AGENT_CALLS:
+        return {
+            "error": f"{method} {path} is not part of the Research Lab agent surface",
+            "code": "not_agent_surface",
+        }
+    if (method, path) == ("POST", _RESEARCH_LAB_CREATE_URL):
+        return mcp_core._post(_RESEARCH_LAB_CREATE_URL, body or {}, session_key=session_key)
+    return mcp_core._get(
+        f"{_RESEARCH_LAB_STATUS_URL}?id={quote(campaign_id, safe='')}", session_key=session_key
+    )
+
+
+def _research_lab_session_key() -> tuple[str, str]:
+    """The calling session's strictly-resolved key, or the refusal to return."""
+    return mcp_core.require_strict_session_key(
+        "Error: the Research Lab tools act for one chat session, and this call "
+        "could not be tied to one. A subagent resolves to its parent's session, so "
+        "run this from the chat the user is in."
+    )
+
+
+def _research_lab_error(verb: str, payload: dict[str, Any]) -> str | None:
+    """The error line for a refused Research Lab call, or None when it succeeded."""
+    if payload.get("ok") is True and not payload.get("error"):
+        return None
+    _code = payload.get("code")
+    _suffix = f" [{_code}]" if isinstance(_code, str) and _code else ""
+    _why = payload.get("error") or "no result"
+    return f"Error: {verb} failed{_suffix}: {redact(str(_why))}"
+
+
+def research_lab_create_campaign(name: str, args: dict[str, Any]) -> str:
+    _rl_sk, _rl_sk_err = _research_lab_session_key()
+    if not _rl_sk:
+        return _rl_sk_err
+    # Redacted on the way IN: the question persists in the campaign row and the
+    # worker's brief, so a credential quoted into it is scrubbed before it is stored.
+    _rl_body: dict[str, Any] = {"question": redact(args["question"])}
+    if args.get("mode"):
+        _rl_body["mode"] = args["mode"]
+    _rl_resp = _research_lab_call(
+        "POST", _RESEARCH_LAB_CREATE_URL, session_key=_rl_sk, body=_rl_body
+    )
+    _rl_err = _research_lab_error("creating the Research Lab campaign", _rl_resp)
+    if _rl_err:
+        return _rl_err
+    _rl_id = str(_rl_resp.get("id") or "")
+    if not _RESEARCH_LAB_ID_SHAPE.fullmatch(_rl_id):
+        return "Error: the Research Lab answered without a campaign id."
+    _rl_link = _RESEARCH_LAB_LINK.format(id=_rl_id)
+    _rl_name = redact(str(_rl_resp.get("name") or ""))[:120]
+    return "\n".join(
+        [
+            f"Created Research Lab campaign `{_rl_id}`"
+            + (f" ({_rl_name})" if _rl_name else "")
+            + f", status `{_rl_resp.get('status') or 'ready'}`.",
+            "It is NOT started: nothing runs until the user opens it in the Research "
+            "Lab, reviews it and presses Start.",
+            f"Give the user this link: [Open in Research Lab]({_rl_link})",
+            f'Check on it later with research_lab_campaign_status(id="{_rl_id}").',
+        ]
+    )
+
+
+def research_lab_campaign_status(name: str, args: dict[str, Any]) -> str:
+    _rs_sk, _rs_sk_err = _research_lab_session_key()
+    if not _rs_sk:
+        return _rs_sk_err
+    _rs_id = args["id"]
+    _rs_resp = _research_lab_call(
+        "GET", _RESEARCH_LAB_STATUS_URL, session_key=_rs_sk, campaign_id=_rs_id
+    )
+    _rs_err = _research_lab_error(f"reading Research Lab campaign {_rs_id!r}", _rs_resp)
+    if _rs_err:
+        return _rs_err
+    # Redact BEFORE truncating, so the cap cannot cut a credential in half and leave
+    # a fragment the redaction pattern cannot match.
+    _rs_text = redact(
+        json.dumps(
+            {
+                "campaign": _rs_resp.get("campaign"),
+                "link": _RESEARCH_LAB_LINK.format(id=_rs_id),
+            },
+            ensure_ascii=False,
+            default=str,
+        )
+    )
+    if len(_rs_text) > _RESEARCH_LAB_STATUS_CAP:
+        _rs_text = (
+            _rs_text[:_RESEARCH_LAB_STATUS_CAP] + f"\n… truncated ({len(_rs_text)} chars total)."
+        )
+    return _rs_text
+
+
 HANDLERS: dict[str, Callable[[str, dict[str, Any]], str]] = {
     "issue_radar_record_investigation": issue_radar_record_investigation,
     "ops_mission_control_api": ops_mission_control_api,
@@ -1044,4 +1259,6 @@ HANDLERS: dict[str, Callable[[str, dict[str, Any]], str]] = {
     "pod_ls": pod_ls,
     "issue_radar_crew_read": issue_radar_crew_read,
     "issue_radar_crew_record": issue_radar_crew_record,
+    "research_lab_create_campaign": research_lab_create_campaign,
+    "research_lab_campaign_status": research_lab_campaign_status,
 }
