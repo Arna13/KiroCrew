@@ -121,10 +121,88 @@ _SETTING_ORDER: dict[str, tuple[Any, ...]] = {
     "dashboard.tailscale.enabled": (False, True),
     "dashboard.tailscale.trust_identity": (False, True),
     "dashboard.tailscale.bind_refresh_chains": (True, False),
+    # ``login`` lets one session move between every device of the same tailnet
+    # login; ``node`` pins it to one device.
+    "dashboard.tailscale.pin_scope": ("node", "login"),
     "instances.enabled": (False, True),
+    # On, an agent may add documents to the knowledge library
+    # (``knowledge_add_document``); off, that tool refuses.
+    "knowledge.auto_add_documents": (False, True),
     "skills.approval_required": (True, False),
     "telemetry.beacon_enabled": (False, True),
 }
+
+#: Card-editable config paths (``_EDITABLE_CONFIG``) that no value can widen
+#: what an agent may do: models, efforts, timeouts, budgets, display and
+#: background-work switches. Every editable path is in exactly one of this set,
+#: ``_SETTING_ORDER`` or ``_CODE_EXEC_SETTINGS``, so a new path is classified
+#: before a card can show it.
+_CANNOT_WIDEN_SETTINGS: frozenset[str] = frozenset(
+    {
+        "agent.chat_turn_timeout_secs",
+        "agent.completion_keep",
+        "agent.completion_keep_chars",
+        "agent.fallback_model",
+        "agent.model",
+        "agent.provider",
+        "agent.reasoning_effort",
+        "agent.refusal_fallback_model",
+        "agent.role_efforts.background",
+        "agent.role_efforts.subagent",
+        "agent.role_models.background",
+        "agent.role_models.subagent",
+        "agent.soft_stop_budget_secs",
+        "agent.tool_search",
+        "auto_update",
+        "computer_use.max_tree_nodes",
+        "computer_use.screenshot_max_px",
+        "dashboard.crewmate_threads",
+        "dashboard.dynamic_dashboard_cards",
+        "dashboard.folder_sort",
+        "dashboard.mcp_probe_timeout_secs",
+        "dashboard.prevent_sleep",
+        "dashboard.recent_tint_count",
+        # Stored only: the edition's login handler re-checks every flag against
+        # its own allowlist before it runs anything.
+        "dashboard.sso_login_flags",
+        "dashboard.terminal.completion.enabled",
+        "dashboard.terminal.reuse_current",
+        "dashboard.title_refresh_every_turns",
+        "dashboard.update_nudge",
+        "dashboard.user_role",
+        "dashboard.user_role_other",
+        "dashboard.user_technical_level",
+        "decisions.bucket",
+        "decisions.model_route.complex",
+        "decisions.model_route.medium",
+        "decisions.model_route.simple",
+        "decisions.nudge_wake.llm_model",
+        "decisions.nudge_wake.provider",
+        "knowledge.auto_ingest_artifacts",
+        "knowledge.dedup_every_n_sweeps",
+        "knowledge.embed_rate_limit",
+        "knowledge.extraction_effort",
+        "knowledge.extraction_model",
+        "knowledge.extraction_pool_size",
+        "knowledge.folder_ingest_chunk_budget",
+        "knowledge.import_chunk_budget",
+        "knowledge.sweep_chunk_budget",
+        "monitoring.prefer_structured_arming",
+        "session.autocompact_pct",
+        "session.compact_wait_secs",
+        "session.pool_agent",
+        "session.pool_size",
+        "session.pool_ttl_secs",
+        "session.timeout_secs",
+        "session_summary.enabled",
+        # Generated skills still wait for approval unless
+        # ``skills.approval_required`` (ordered above) is turned off.
+        "skills.auto_create_from_sessions",
+        # Local recording only: the write route refuses the enable on a host
+        # where it would start sending data out.
+        "telemetry.enabled",
+    }
+)
 
 #: Settings whose VALUE is a command this machine then runs, so changing one is
 #: ``code_exec`` the same as installing an MCP server: the diff is a widen/tighten
@@ -132,8 +210,12 @@ _SETTING_ORDER: dict[str, tuple[Any, ...]] = {
 #: has none of. ``dashboard.terminal.shell`` is the shell the dashboard terminal
 #: launches; an agent that sets it chooses what program runs on every new
 #: terminal, so the card says it runs code regardless of the before/after values.
+#: ``agent.acp_backend`` picks the harness program every new session runs, and
+#: harnesses differ in how they are made to ask before a tool runs
+#: (``agent_sdk.backends.ACP_BACKEND_ROUTING``), so no fixed order fits it either.
 _CODE_EXEC_SETTINGS: frozenset[str] = frozenset(
     {
+        "agent.acp_backend",
         "dashboard.terminal.shell",
     }
 )
