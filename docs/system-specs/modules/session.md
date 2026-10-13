@@ -1101,14 +1101,14 @@ against sweep completeness, and are torn down at `close_all`.
   retain the existing notice-only downgrade.
 - **Compaction threshold precedence** (`SessionManager.effective_autocompact_pct`): the session's own override (the context popover slider, `set_autocompact_pct`), else the default the session's crew member declares (`agents.<name>.autocompact_pct`; 0 or a negative value inherits, a positive value is held to the global's 5–90 range at load), else the global `session.autocompact_pct`. The crew is the identity the allocation resolved (`_Session.capability_member`), read against the manager's live `_cfg`, so a config edit reaches running sessions on their next reading and a session with no crew follows the global. The value cannot live in the kiro agent JSON, which kiro-cli rejects on any unknown field. `GET/POST /api/chat/slots/{slot}/autocompact` report it as `agent_pct` with the crew's redacted name as `agent` (both null when none is declared; a slot with no live session answers for the crew its next session starts under) so the popover shows which default a cleared slider returns to. The `kirocrew chat` REPL compacts at the same number for the crew its run resolves to.
 - **Context compaction**: at ≥ configured threshold (`session.autocompact_pct`, default 70%, valid 5–90), compacts **in place** on a member of
-  `ACP_BACKENDS_COMPACT` — kiro-cli, claude, codex, opencode and goose. They divide by WHERE
+  `ACP_BACKENDS_COMPACT` — kiro-cli, claude, codex, opencode, goose and pi. They divide by WHERE
   the
   done signal lands, which is `ACP_BACKENDS_INLINE_COMPACTION`: kiro-cli sends a
   `/compact` **prompt** (`session/prompt` + `_kiro.dev/compaction/status` watch —
   never the string form of `_kiro.dev/commands/execute`, which kiro-cli 2.14.0
-  exits rc=0 on) and its result arrives afterwards, while claude, codex, opencode and
-  goose finish the whole compaction inside the prompt turn. claude and opencode emit no
-  status at all, and goose emits only a `Compaction complete` chunk; codex reports the compaction as a `tool_call` pair marked
+  exits rc=0 on) and its result arrives afterwards, while claude, codex, opencode,
+  goose and pi finish the whole compaction inside the prompt turn. claude and opencode emit no
+  status at all, goose emits only a `Compaction complete` chunk and pi only a `Compaction completed` chunk; codex reports the compaction as a `tool_call` pair marked
   `_meta.contextCompaction` (translated by
   `_dispatch.parse_codex_compaction_update`) that arrives before the prompt
   response, so its terminal is read from the stream like kiro-cli's.
@@ -1153,9 +1153,8 @@ against sweep completeness, and are torn down at `close_all`.
   - A backend in none of the three is **declined and logged at WARNING**, naming
     the missing membership. Declining is the safe action, since the alternative
     ends a conversation and no harness earns that by never having been
-    classified, but it is not a settled condition and the log says so. pi is that
-    case today: it looks inline in SOURCE but has no driven capture, which is the
-    bar `ACP_BACKENDS_COMPACT` holds its members to.
+    classified, but it is not a settled condition and the log says so. No known
+    backend is in this case.
 
   Every surface that refuses a manual `/compact` picks among three sentences via
   `messaging.commands.compact_refusal_arm`, so a surface supplies wording only and

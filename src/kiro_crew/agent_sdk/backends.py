@@ -1215,7 +1215,7 @@ ACP_BACKENDS_STEERING_REQUEST = frozenset({ACP_BACKEND_CODEX})
 # sends. They do not all answer it the same way, and that split is
 # ``ACP_BACKENDS_INLINE_COMPACTION``: kiro-cli ACKs the prompt then emits
 # ``_kiro.dev/compaction/status``, which ``wait_for_compaction()`` picks up, while
-# claude-agent-acp, codex-acp, opencode and goose finish the whole compaction inside
+# claude-agent-acp, codex-acp, opencode, goose and pi finish the whole compaction inside
 # the ``session/prompt`` turn.
 #
 # opencode is a member on a LIVE capture against opencode 1.18.30, and it joins
@@ -1257,24 +1257,16 @@ ACP_BACKENDS_STEERING_REQUEST = frozenset({ACP_BACKEND_CODEX})
 # drive did: ``Agent::reply`` routes ``/compact`` through ``execute_command`` to
 # ``handle_compact_command``, and ``command_starts_turn("/compact")`` is false.
 #
-# pi is NOT a member, and the reason is the evidence CLASS rather than the feature.
-# It advertises a ``compact`` built-in and dispatches it before any model turn --
-# pi-acp 0.0.33 intercepts it in ``prompt()``, awaits ``session.proc.compact(...)``
-# and returns ``{ stopReason: "end_turn" }``. So the source says inline.
-#
-# What it lacks is a driven capture, and this set asks for one: the bar opencode and
-# goose met is a live session whose ``usage_update.used`` was seen to fall. Source
-# says what the code WOULD do; a capture says what the harness DID. For a membership
-# whose wrong answer makes ``wait_for_compaction`` report a completion that did not
-# happen, the second is the bar, and holding every member to it is what keeps this
-# set's memberships comparable to each other. pi could not be driven where this was
-# written -- it answers ``Authentication required`` -- so it waits for someone who can
-# drive it rather than entering on the weaker class.
-#
-# Until then pi is unclassified, which is a better position than the one it held: it
-# takes the ``COMPACT_ARM_UNCLASSIFIED`` refusal, which promises nothing, and the gate
-# logs a WARNING naming the memberships it lacks, instead of being told its harness
-# manages compaction itself on no evidence at all.
+# pi is a member on a LIVE drive against pi-acp 0.0.34 over pi 1.2.0, taken with
+# ``scripts/capture_acp_compaction.py`` and a locally served model named in pi's own
+# ``models.json``. Over four ordinary turns its ``usage_update.used`` climbed
+# 12773 -> 25127 -> 37481 -> 49834. A ``/compact`` prompt then answered pi's own
+# ``Compaction completed`` chunk and returned ``stopReason: end_turn`` with no
+# ``usage_update`` and no status frame after it, and the next ORDINARY turn -- which
+# added another ~12k-token prompt -- read 37518, below the pre-compact peak. The
+# drive is committed as evidence: ``test/fixtures/acp_frames/pi/compact-live.jsonl``.
+# The source agrees: pi-acp intercepts ``/compact`` in ``prompt()``, awaits
+# ``session.proc.compact(...)`` and returns ``{ stopReason: "end_turn" }``.
 #
 # kas is a member on a LIVE drive against kiro-cli 2.29.0's relay (``--agent-engine
 # v3``), and it is the one member that is not handed the ``/compact`` prompt. Sent
@@ -1291,7 +1283,7 @@ ACP_BACKENDS_STEERING_REQUEST = frozenset({ACP_BACKEND_CODEX})
 # :data:`ACP_BACKENDS_HARNESS_MANAGED_COMPACTION` too: membership here opens the
 # MANUAL command, and the threshold still leaves KAS to its own summarization.
 #
-# deepseek is the other non-member, and it is not the same case as pi:
+# deepseek is the one non-member:
 # :data:`ACP_BACKENDS_CONTEXT_RECYCLE` carries the consequence, because deepseek
 # reports no compaction at all, so a decline leaves its context unbounded.
 ACP_BACKENDS_COMPACT = frozenset(
@@ -1302,6 +1294,7 @@ ACP_BACKENDS_COMPACT = frozenset(
         ACP_BACKEND_OPENCODE,
         ACP_BACKEND_GOOSE,
         ACP_BACKEND_KAS,
+        ACP_BACKEND_PI,
     }
 )
 
@@ -1354,8 +1347,7 @@ ACP_BACKENDS_COMPACT = frozenset(
 # by exclusion would be the same unproven claim this set exists to remove, only
 # louder. What such a harness gets instead is a WARNING from the gate naming both
 # memberships it lacks, and the refusal arm that promises nothing -- so the leak is
-# reported rather than either denied or answered by ending the conversation. pi is
-# that case today.
+# reported rather than either denied or answered by ending the conversation.
 ACP_BACKENDS_HARNESS_MANAGED_COMPACTION = frozenset({ACP_BACKEND_KAS})
 
 # Backends whose FULL context is answered by recycling the session, because no
@@ -1423,14 +1415,16 @@ ACP_BACKENDS_CONTEXT_RECYCLE = frozenset({ACP_BACKEND_DEEPSEEK})
 # ``Compaction complete`` chunk and ends with ``stopReason: end_turn``, with no status
 # frame after it.
 #
-# pi is absent for the reason recorded on ``ACP_BACKENDS_COMPACT``: its source says
-# inline, no capture confirms it, and the two memberships move together when one does.
+# pi is a member on the capture recorded on ``ACP_BACKENDS_COMPACT``: its ``/compact``
+# turn carries the ``Compaction completed`` chunk and ends with ``stopReason:
+# end_turn``, with no status frame after it.
 ACP_BACKENDS_INLINE_COMPACTION = frozenset(
     {
         ACP_BACKEND_CLAUDE,
         ACP_BACKEND_CODEX,
         ACP_BACKEND_OPENCODE,
         ACP_BACKEND_GOOSE,
+        ACP_BACKEND_PI,
     }
 )
 
