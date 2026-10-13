@@ -86,18 +86,21 @@ describe('ChatInput reasoning effort on the model chip', () => {
     expect(chip).toHaveAccessibleName('Model: claude-opus-4.7 · Reasoning effort: Default · High')
   })
 
-  it('does not say "Default" twice when the model is inherited and the effort is the default', () => {
-    // The inherited-default MODEL marker and the default-effort readout are
-    // the same word for two unrelated facts; back to back they read as one
-    // stutter. The chip keeps the model's marker and the bare level; the
-    // accessible name still says which default the level is.
+  it('does not mark an inherited default model on the chip', () => {
+    // The id already names the model the user chose as their default, so a
+    // "default" word beside it adds nothing; the accessible name still says
+    // it is inherited. The effort readout keeps its own "Default · High".
     renderInput({ effortIsDefault: true, modelIsInheritedDefault: true })
     const chip = screen.getByTestId('composer-model-chip')
-    expect(chip).toHaveTextContent(/^claude-opus-4\.7·default·High$/)
-    expect(chip).not.toHaveTextContent('Default · High')
+    expect(chip).toHaveTextContent(/^claude-opus-4\.7·Default · High$/)
     expect(chip).toHaveAccessibleName(
       'This session runs on the default model (claude-opus-4.7). It has no model of its own, so it changes if the default does. Click to pin one. · Reasoning effort: Default · High',
     )
+  })
+
+  it('says Default once when the model is inherited and no level is set', () => {
+    renderInput({ reasoningEffort: '', modelIsInheritedDefault: true })
+    expect(screen.getByTestId('composer-model-chip')).toHaveTextContent(/^claude-opus-4\.7·Default$/)
   })
 
   it('names only the model when the capability is off', () => {

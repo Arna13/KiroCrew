@@ -36,9 +36,9 @@ function ChatEffortEvidence({ state }: { state: State }) {
   }))
   const compact = state === 'compact'
   // 'inherited-default': the slot pinned no model (it runs the agent's
-  // default) AND runs at the configured default effort. The chip already says
-  // "default" for the model, so the effort keeps its bare level ("High"), not
-  // "Default · High" -- the accessible name still carries the full form.
+  // default) AND runs at the configured default effort. The chip shows the
+  // bare model id with no "default" marker, and the effort reads
+  // "Default · High" -- the accessible name says the model is inherited.
   const inheritedDefault = state === 'inherited-default'
   // 'tiny-split-pane-models' is the short pane with its picker OPEN: the pane
   // hangs from the viewport top so its chip sits ~300px down, and the picker
