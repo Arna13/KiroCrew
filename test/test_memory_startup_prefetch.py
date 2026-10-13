@@ -87,6 +87,30 @@ async def test_no_model_file_means_no_prefetch(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_preparation_reads_the_memory_databases_in_order_first(monkeypatch, tmp_path):
+    from kiro_crew import page_cache
+
+    gateway = _gateway(monkeypatch, embed_fn=None)
+    gateway.vector_memory._db_path = tmp_path / "memory.db"
+    gateway.ctx_builder.memory._index_db = tmp_path / "memory_index.db"
+    gateway.dashboard_state._knowledge_store = SimpleNamespace(_db_path=str(tmp_path / "kb.db"))
+    asked: list[list] = []
+    opened_before: list[int] = []
+    monkeypatch.setattr(page_cache, "prefetch", lambda paths, name="": asked.append(list(paths)))
+    gateway.vector_memory.init.side_effect = lambda: opened_before.append(len(asked))
+    try:
+        await gateway._wait_for_memory_preparation()
+        # Memory first (preparation reads it next), then the knowledge library
+        # (the first search reads it); all after readiness, off the boot path.
+        assert asked == [
+            [tmp_path / "memory.db", tmp_path / "memory_index.db", str(tmp_path / "kb.db")]
+        ]
+        assert opened_before == [1], "the read must start before the store opens"
+    finally:
+        await asyncio.to_thread(gateway._stop_memory_startup)
+
+
+@pytest.mark.asyncio
 async def test_a_failing_prefetch_does_not_fail_preparation(monkeypatch):
     backend = _Backend(fail=True)
     gateway = _gateway(monkeypatch, embed_fn=lambda text: [0.0])
