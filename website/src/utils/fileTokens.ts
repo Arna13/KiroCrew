@@ -248,6 +248,16 @@ export function restoreUnreferencedImages(content: string, meta?: Record<string,
   return [imgMd, content].filter(Boolean).join('\n\n')
 }
 
+/** Every `@rel` spelling the send path accepts for `p`: its trailing path
+ *  suffixes, LONGEST first (`/repo/src/a.ts` -> `repo/src/a.ts`, `src/a.ts`,
+ *  `a.ts`). `buildRelMap` tries them in this order, and the queued-cancel
+ *  restore picks one from the same set, so a mention the restore writes is one
+ *  the next send resolves. */
+function pathSuffixes(p: string): string[] {
+  const segs = p.split('/')
+  return segs.slice(1).map((_, i) => segs.slice(i + 1).join('/'))
+}
+
 /** Walk path segments to find the shortest @suffix present in text.
  *  Matching uses `mentionTokenRegex` -- the SAME boundary contract the
  *  reconciliation uses -- so a mention the reconciliation counts by its
@@ -261,10 +271,7 @@ export function restoreUnreferencedImages(content: string, meta?: Record<string,
  *  inline, so the file is still attached, as its own marker line. */
 export function buildRelMap(paths: string[], text: string): Map<string, string> {
   const map = new Map<string, string>()
-  const suffixesOf = (p: string) => {
-    const segs = p.split('/')
-    return segs.slice(1).map((_, i) => segs.slice(i + 1).join('/'))
-  }
+  const suffixesOf = pathSuffixes
   for (const p of paths) {
     // Sibling candidate set for the prefix rule: every OTHER path's own
     // suffixes. A suffix of p that a longer sibling suffix literally extends
@@ -676,6 +683,32 @@ export interface RestoredComposerState {
   text: string
   /** Attachment paths (images included) to re-stage into pendingFiles. */
   files: string[]
+  /** Path -> the `@rel` mention(s) the restore wrote back for it, in the
+   *  shape the composer's alias bookkeeping records for a picked file, so a
+   *  restored mention and its chip stay reconciled (deleting the mention
+   *  unstages the chip; removing the chip strips the mention). Present only
+   *  when an inline marker was restored. */
+  aliases?: Record<string, string[]>
+}
+
+/** Every occurrence of the exact marker text `marker` in `text` that the send
+ *  path could have written: it starts at the start of the text or after
+ *  whitespace, and ends at whitespace or the end. MARKER_TRAILER_SEP is
+ *  whitespace here, as it is for every marker reader. `inline` is true when
+ *  other text shares the marker's line (the same position rule
+ *  `resolveFileSegment` uses to tell a mention from a bare upload). */
+function markerOccurrences(text: string, marker: string): Array<{ at: number; end: number; inline: boolean }> {
+  const out: Array<{ at: number; end: number; inline: boolean }> = []
+  for (let at = text.indexOf(marker); at !== -1; at = text.indexOf(marker, at + 1)) {
+    const end = at + marker.length
+    if (at > 0 && !/\s/.test(text[at - 1])) continue
+    if (end < text.length && !/\s/.test(text[end])) continue
+    const lineStart = text.lastIndexOf('\n', at - 1) + 1
+    const nl = text.indexOf('\n', end)
+    const rest = text.slice(lineStart, at) + text.slice(end, nl === -1 ? text.length : nl)
+    out.push({ at, end, inline: rest.trim().length > 0 })
+  }
+  return out
 }
 
 /**
@@ -710,7 +743,8 @@ export interface RestoredComposerState {
  * Deliberately left VERBATIM, because their path boundary is not provable
  * from the wire text alone (any whitespace-bounded capture can truncate a
  * spaced path, staging a nonexistent file and re-sending the wrong one):
- *  - embedded (@-mention) markers sitting inline in prose;
+ *  - embedded (@-mention) markers sitting inline in prose, when the entry
+ *    carries no attachment list (see `files` below);
  *  - own-line markers whose remainder contains whitespace — equally a spaced
  *    bare-upload path and a line-start mention followed by prose;
  *  - `[attached_dir N]` markers (always inline in prose);
@@ -733,14 +767,22 @@ export interface RestoredComposerState {
  * `files` is the entry's own ORDERED non-image attachment list when the
  * server echoed one (slot-detail `queue[]` item or `queue_push` frame),
  * the same list `[attached_file N]` indexes on a user row: marker N names
- * `files[N-1]`. With it the own-line claim needs no shape rule — the marker
- * line is matched by EXACT text, so a spaced bare-upload path
- * (`/tmp/My Report.pdf`) is claimed whole, the shape the wire text alone
- * could never prove. Inline (@-mention) markers and `[attached_dir N]`
- * markers stay verbatim either way: their composer spelling is the `@rel`
- * the user typed, which neither the wire text nor the list records. An
- * entry without a list (a legacy entry, an older gateway) takes the shape
- * rules above unchanged. The round-trip arbiter gates both paths.
+ * `files[N-1]`. With it every claim is matched by EXACT text, so a path's
+ * boundary is known, spaces included:
+ *  - an own-line marker is a bare upload: the line goes, the path re-stages
+ *    (`/tmp/My Report.pdf` whole — the shape the wire text alone could
+ *    never prove);
+ *  - a marker with other text on its line is an @-mention: every occurrence
+ *    of it, with the MARKER_TRAILER_SEP the send put on either side, becomes
+ *    `@<suffix>` — the shortest trailing suffix of the path that no other
+ *    staged path shares, from the same suffix set `buildRelMap` resolves —
+ *    and the path re-stages. The user may have typed a longer spelling
+ *    (`@src/a.ts` for `a.ts`); the wire does not record it, and any suffix
+ *    that resolves back to the same file sends the same bytes, which the
+ *    arbiter checks.
+ * `[attached_dir N]` markers stay verbatim either way. An entry without a
+ * list (a legacy entry, an older gateway) takes the shape rules above
+ * unchanged. The round-trip arbiter gates both paths.
  */
 export function restoreQueuedContent(content: string, files?: readonly string[]): RestoredComposerState {
   const staged: string[] = []
@@ -762,13 +804,25 @@ export function restoreQueuedContent(content: string, files?: readonly string[])
     }
   }
 
-  const claims: Array<{ path: string; matched: string }> = []
+  const claims: Array<{ path: string; matched: string; mention?: string }> = []
   if (files?.length) {
     // The list names each marker's exact path, so the claim is the exact
-    // own-line token `[attached_file N] files[N-1]` — whitespace in the path
+    // token `[attached_file N] files[N-1]` — whitespace in the path
     // included. A marker the list does not account for is not claimed.
+    // Mention spelling: the shortest suffix no OTHER staged path (list or
+    // image block) shares, else this path's longest suffix; `buildRelMap`
+    // walks the same set, so the arbiter below proves it binds back here.
+    const all = [...staged, ...files]
     files.forEach((path, i) => {
       const line = `[attached_file ${i + 1}] ${path}`
+      const occurrences = markerOccurrences(text, line)
+      const suffixes = pathSuffixes(path)
+      if (occurrences.some((o) => o.inline) && suffixes.length) {
+        const shared = new Set(all.filter((q) => q !== path).flatMap(pathSuffixes))
+        const rel = [...suffixes].reverse().find((s) => !shared.has(s)) ?? suffixes[0]
+        claims.push({ path, matched: line, mention: `@${rel}` })
+        return
+      }
       const esc = line.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
       if (new RegExp(`^${esc}[ \\t]*$`, 'm').test(text)) claims.push({ path, matched: line })
     })
@@ -781,7 +835,22 @@ export function restoreQueuedContent(content: string, files?: readonly string[])
       claims.push({ path: m[2], matched: m[0] })
     }
   }
+  const aliases: Record<string, string[]> = {}
   for (const c of claims) {
+    staged.push(c.path)
+    if (c.mention) {
+      // Every occurrence becomes the mention, right to left so earlier
+      // offsets stay valid. A separator touching the marker is always the
+      // send's own (it emits one beside a user-typed hair space too), so
+      // exactly one is dropped on each side, as `resolveFileSegment` does.
+      for (const o of markerOccurrences(text, c.matched).reverse()) {
+        const start = text[o.at - 1] === MARKER_TRAILER_SEP ? o.at - 1 : o.at
+        const end = text[o.end] === MARKER_TRAILER_SEP ? o.end + 1 : o.end
+        text = text.slice(0, start) + c.mention + text.slice(end)
+      }
+      aliases[c.path] = [c.mention]
+      continue
+    }
     const esc = c.matched.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
     // Remove the marker line together with exactly ONE adjacent newline — the
     // producer's own separator (`[llmRaw, tokens].join('\n')` appends trailing
@@ -789,7 +858,6 @@ export function restoreQueuedContent(content: string, files?: readonly string[])
     // instead). Consuming the separator here is what lets the surrounding
     // user text survive byte-exact, leading/trailing whitespace included.
     text = text.replace(new RegExp(`^${esc}\\n|\\n?${esc}$`, 'm'), '')
-    staged.push(c.path)
   }
 
   // FINAL ARBITER — the definition of lossless, applied literally: a claim
@@ -805,7 +873,7 @@ export function restoreQueuedContent(content: string, files?: readonly string[])
   if (dedupedFiles.length && prepareSendPayload(text, dedupedFiles).txt !== content) {
     return { text: content, files: [] }
   }
-  return { text, files: dedupedFiles }
+  return Object.keys(aliases).length ? { text, files: dedupedFiles, aliases } : { text, files: dedupedFiles }
 }
 
 /* ------------------------------------------------------------------------- */

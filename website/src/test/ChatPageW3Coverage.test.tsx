@@ -283,7 +283,7 @@ interface RenderOpts {
   /** Server-side queue for the active slot. The mount fetch is authoritative —
    *  `hydrateQueuedBubbles` rebuilds the queued rows from THIS list and drops
    *  any pre-seeded ones, so a preloaded `queued` message never survives. */
-  queue?: { id: string; content: string }[]
+  queue?: { id: string; content: string; meta?: Record<string, unknown> }[]
 }
 
 function renderChatPage(messages: ChatMessage[], opts: RenderOpts = {}) {
@@ -767,6 +767,24 @@ describe('ChatPage — queued message actions', () => {
     expect(inputProps!.value).not.toContain('[attached_file')
     await waitFor(() => expect(inputProps!.pendingFiles).toEqual(['/tmp/report.docx']))
     expect(apiMocks.cancelQueuedMessage).toHaveBeenCalledWith('chat-1', 'q1')
+  })
+
+  it('cancelling a foreign card with an inline mention restores a readable mention and a live chip (#14617)', async () => {
+    // A reload empties the stash, so the row's own list is all the parser
+    // has. The inline marker comes back as `@a.txt`, never raw wire text,
+    // and the file is staged again. The alias is recorded too, so deleting
+    // the restored mention by hand unstages the chip, as for a picked file.
+    const serialized = prepareSendPayload('check @a.txt, please', ['/repo/a.txt']).txt
+    expect(serialized).toContain('[attached_file 1] /repo/a.txt')
+    await renderWithQueue([
+      { id: 'q1', content: serialized, meta: { files: ['/repo/a.txt'] } },
+      { id: 'q2', content: 'then deploy' },
+    ])
+    act(() => { queueProps!.onCancel('q1') })
+    await waitFor(() => expect(inputProps!.value).toBe('check @a.txt, please'))
+    await waitFor(() => expect(inputProps!.pendingFiles).toEqual(['/repo/a.txt']))
+    act(() => { inputProps!.onChange('check please') })
+    await waitFor(() => expect(inputProps!.pendingFiles).toEqual([]))
   })
 
   it('cancelling two cards in a row keeps both drafts instead of overwriting the first', async () => {

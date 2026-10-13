@@ -208,10 +208,10 @@ export function useQueuedMessageActions({
       // another tab's card, an edited entry — falls to the strict parser,
       // handed the entry's own attachment list when the server echoed one
       // on the row (`meta.files`, the same list a user row carries): with
-      // it the parser matches each own-line marker by exact text, so a
-      // spaced path restores whole; without it the parser claims only
-      // byte-exact round-trippable shapes and is never worse than the
-      // verbatim restore this replaced.
+      // it the parser matches each marker by exact text, so a spaced path
+      // restores whole and an inline marker comes back as an `@` mention;
+      // without it the parser claims only byte-exact round-trippable shapes
+      // and is never worse than the verbatim restore this replaced.
       const stashed = queuedSendStash.get(queueId)
       if (stashed) queuedSendStash.delete(queueId)
       const hit = stashed && stashed.sent === msg.content
@@ -226,15 +226,17 @@ export function useQueuedMessageActions({
       // patterns are anchored at offset 0, so a quote on the head would hide
       // an image block behind it and the file would restore as literal text.
       const parsed = hit
-        ? { text: stashed.raw, files: stashed.files }
+        ? { text: stashed.raw, files: stashed.files, aliases: stashed.aliases }
         : restoreQueuedContent(rowQuote ? stripQuoteBlock(msg.content, rowQuote) : msg.content, queueEntryAttachments(msg.meta).files)
-      const { files, text } = parsed
-      // The stash also carries the alias map the send-clear dropped; the
-      // parser fallback cannot know it, and a restore without aliases falls
-      // into the documented reload-limitation class rather than corrupting.
+      const { files, text, aliases } = parsed
+      // The stash carries the alias map the send-clear dropped. The parser
+      // carries one only for a mention it wrote back from an inline marker
+      // (the entry's list proved the path), so that chip and mention stay
+      // reconciled too; any other parser restore has none, which falls into
+      // the documented reload-limitation class rather than corrupting.
       const quote = hit ? stashed.quote : rowQuote
-      if (quote) restoreDraftRef.current?.(text, files, hit ? stashed.aliases : undefined, quote)
-      else restoreDraftRef.current?.(text, files, hit ? stashed.aliases : undefined)
+      if (quote) restoreDraftRef.current?.(text, files, aliases, quote)
+      else restoreDraftRef.current?.(text, files, aliases)
     }
     // Optimistically remove the card; the WS echo is a no-op if already gone.
     dispatch(cancelQueuedMessage({ slot, queue_id: queueId }))

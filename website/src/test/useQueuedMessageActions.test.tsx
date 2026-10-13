@@ -219,6 +219,19 @@ describe('useQueuedMessageActions — cancel', () => {
     expect(restoreDraft).toHaveBeenCalledWith(sent, [], undefined)
   })
 
+  it('a foreign card with an inline mention restores the mention, the chip and its alias (#14617)', () => {
+    // After a reload there is no stash. The row's list proves the inline
+    // marker's path, so the composer gets a readable mention instead of raw
+    // wire text, the file re-stages, and the alias rides along so the chip
+    // and the mention stay reconciled the way a picked file's do.
+    const sent = 'check [attached_file 1] /repo/a.txt\u200a, please'
+    const restoreDraft = vi.fn()
+    const rows = [{ ...queued('q1', sent), meta: { queueId: 'q1', files: ['/repo/a.txt'] } } as ChatMessage]
+    const { get } = renderActions({ rows, restoreDraft })
+    act(() => { get().onCancel('q1') })
+    expect(restoreDraft).toHaveBeenCalledWith('check @a.txt, please', ['/repo/a.txt'], { '/repo/a.txt': ['@a.txt'] })
+  })
+
   it('an entry edited to drop its first attachment restores the renumbered survivor from the replaced list', () => {
     // Two attachments; the edit removed marker 1, so the server renumbered
     // the survivor to 1 and pruned the list to match, and the `queue_edit`

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { addPendingFile, extendsConsumably, findUnreferencedAttachments, foldWinSep, isWindowsShapedPath, mentionBoundary, mentionBoundaryFor, mentionTokenRegex, normalizeWindowsPath, parseFiles, prepareSendPayload, buildFileLabels, resolveFileSegment, mdImageDest, mdImageDestToPath, restoreQueuedContent, restoreUnreferencedImages, serializeDirTokens, servedUploadMb } from '../utils/fileTokens'
+import { addPendingFile, extendsConsumably, findUnreferencedAttachments, foldWinSep, isWindowsShapedPath, MARKER_TRAILER_SEP, mentionBoundary, mentionBoundaryFor, mentionTokenRegex, normalizeWindowsPath, parseFiles, prepareSendPayload, buildFileLabels, resolveFileSegment, mdImageDest, mdImageDestToPath, restoreQueuedContent, restoreUnreferencedImages, serializeDirTokens, servedUploadMb } from '../utils/fileTokens'
 
 describe('buildFileLabels uniqueness', () => {
   it('disambiguates paths that share a basename', () => {
@@ -721,11 +721,14 @@ describe('restoreQueuedContent with the entry\'s own attachment list', () => {
     expect(r.files).toEqual([])
   })
 
-  it('still leaves an inline mention verbatim — its @rel spelling is not on the list', () => {
+  it('restores an inline spaced-path mention as an @ mention when the list names it', () => {
+    // The list proves the path's boundary, spaces included, so the marker
+    // comes back as the shortest suffix that resolves to it on re-send.
     const { txt, filePaths } = prepareSendPayload('see @My Report.pdf for details', [spaced])
     const r = restoreQueuedContent(txt, filePaths)
-    expect(r.text).toBe(txt)
-    expect(r.files).toEqual([])
+    expect(r.text).toBe('see @My Report.pdf for details')
+    expect(r.files).toEqual([spaced])
+    expect(r.aliases).toEqual({ [spaced]: ['@My Report.pdf'] })
   })
 
   it('a list whose path disagrees with the marker text claims nothing', () => {
@@ -743,6 +746,118 @@ describe('restoreQueuedContent with the entry\'s own attachment list', () => {
     const r = restoreQueuedContent(txt, filePaths)
     expect(r.text).toBe('read')
     expect(r.files).toEqual([odd])
+  })
+})
+
+describe('restoreQueuedContent: inline mention markers (#14617)', () => {
+  // After a reload the queue-id stash is gone, so this parser is the only
+  // restore path. With the entry's own list an inline marker's path is
+  // exact, so it restores as a readable `@` mention and the file re-stages,
+  // instead of staying as raw wire text (`[attached_file 1] /repo/a.txt`
+  // plus the invisible separator) with its file dropped.
+
+  const SEP = MARKER_TRAILER_SEP
+
+  /** What a cancel restores once the stash is empty: the row's own content
+   *  and its own list, exactly what the hook hands the parser. */
+  const cancelAfterReload = (raw: string, staged: string[]) => {
+    const { txt, filePaths } = prepareSendPayload(raw, staged)
+    return { txt, r: restoreQueuedContent(txt, filePaths) }
+  }
+
+  it('a punctuated inline mention restores the chip and a readable mention', () => {
+    const { txt, r } = cancelAfterReload('check @a.txt, please', ['/repo/a.txt'])
+    // The wire shape the composer would otherwise get back verbatim.
+    expect(txt).toBe(`check [attached_file 1] /repo/a.txt${SEP}, please`)
+    expect(r.text).toBe('check @a.txt, please')
+    expect(r.text).not.toContain(SEP)
+    expect(r.files).toEqual(['/repo/a.txt'])
+    expect(r.aliases).toEqual({ '/repo/a.txt': ['@a.txt'] })
+  })
+
+  it('a whitespace-bounded inline mention restores the chip and a readable mention', () => {
+    const { txt, r } = cancelAfterReload('check @a.txt now', ['/repo/a.txt'])
+    expect(txt).toBe('check [attached_file 1] /repo/a.txt now')
+    expect(r.text).toBe('check @a.txt now')
+    expect(r.files).toEqual(['/repo/a.txt'])
+    expect(r.aliases).toEqual({ '/repo/a.txt': ['@a.txt'] })
+  })
+
+  it('drops the separator on both sides of a wrapped mention', () => {
+    const { txt, r } = cancelAfterReload('see (@a.txt) here', ['/repo/a.txt'])
+    expect(txt).toBe(`see (${SEP}[attached_file 1] /repo/a.txt${SEP}) here`)
+    expect(r.text).toBe('see (@a.txt) here')
+    expect(r.files).toEqual(['/repo/a.txt'])
+  })
+
+  it('keeps a hair space the user typed beside the mention', () => {
+    // The send emits its own separator beside a typed one, so exactly one
+    // comes off and the user's stays.
+    const { r } = cancelAfterReload(`check @a.txt${SEP}, please`, ['/repo/a.txt'])
+    expect(r.text).toBe(`check @a.txt${SEP}, please`)
+    expect(r.files).toEqual(['/repo/a.txt'])
+  })
+
+  it('a line-start mention followed by prose restores', () => {
+    const { r } = cancelAfterReload('@data.csv is broken', ['/tmp/data.csv'])
+    expect(r.text).toBe('@data.csv is broken')
+    expect(r.files).toEqual(['/tmp/data.csv'])
+  })
+
+  it('restores every occurrence of a file mentioned twice', () => {
+    const { r } = cancelAfterReload('diff @a.txt against @a.txt, again', ['/repo/a.txt'])
+    expect(r.text).toBe('diff @a.txt against @a.txt, again')
+    expect(r.files).toEqual(['/repo/a.txt'])
+  })
+
+  it('writes the shortest suffix that still names the file, which re-sends the same bytes', () => {
+    // The wire does not record the `@src/a.ts` spelling the user typed; any
+    // suffix that resolves back to the same path sends identical content.
+    const { txt, r } = cancelAfterReload('fix @src/a.ts.', ['/repo/src/a.ts'])
+    expect(r.text).toBe('fix @a.ts.')
+    expect(prepareSendPayload(r.text, r.files).txt).toBe(txt)
+  })
+
+  it('widens the suffix for two files that share a basename', () => {
+    const { txt, r } = cancelAfterReload('compare @x/a.txt with @y/a.txt', ['/repo/x/a.txt', '/repo/y/a.txt'])
+    expect(r.text).toBe('compare @x/a.txt with @y/a.txt')
+    expect(r.files).toEqual(['/repo/x/a.txt', '/repo/y/a.txt'])
+    expect(r.aliases).toEqual({ '/repo/x/a.txt': ['@x/a.txt'], '/repo/y/a.txt': ['@y/a.txt'] })
+    expect(prepareSendPayload(r.text, r.files).txt).toBe(txt)
+  })
+
+  it('restores an inline mention beside a bare upload and a pasted image', () => {
+    const staged = ['/tmp/shot.png', '/repo/a.txt', '/repo/b.log']
+    const { txt, r } = cancelAfterReload('look at @a.txt, then the log', staged)
+    expect(r.text).toBe('look at @a.txt, then the log')
+    expect(new Set(r.files)).toEqual(new Set(staged))
+    expect(r.aliases).toEqual({ '/repo/a.txt': ['@a.txt'] })
+    expect(prepareSendPayload(r.text, r.files).txt).toBe(txt)
+  })
+
+  it('without the list an inline marker stays verbatim: the path boundary is unproven', () => {
+    const { txt } = prepareSendPayload('check @a.txt, please', ['/repo/a.txt'])
+    const r = restoreQueuedContent(txt)
+    expect(r.text).toBe(txt)
+    expect(r.files).toEqual([])
+    expect(r.aliases).toBeUndefined()
+  })
+
+  it('marker-shaped text glued to a word is not a mention the send wrote', () => {
+    const glued = 'see x[attached_file 1] /repo/a.txt now'
+    const r = restoreQueuedContent(glued, ['/repo/a.txt'])
+    expect(r.text).toBe(glued)
+    expect(r.files).toEqual([])
+  })
+
+  it('the round-trip arbiter still gates an inline claim', () => {
+    // An own-line mention mid-text re-serializes as an appended marker, so the
+    // whole restore stays verbatim, the inline mention beside it included.
+    const { txt, filePaths } = prepareSendPayload('@data.csv\nthen check @a.txt now', ['/tmp/data.csv', '/repo/a.txt'])
+    const r = restoreQueuedContent(txt, filePaths)
+    expect(r.text).toBe(txt)
+    expect(r.files).toEqual([])
+    expect(r.aliases).toBeUndefined()
   })
 })
 
