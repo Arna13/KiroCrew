@@ -139,6 +139,25 @@ def test_a_stubbed_app_server_is_not_duplicated(tmp_path, monkeypatch):
     assert [e["name"] for e in elements] == ["kirocrew-core"]
 
 
+def test_unreadable_settings_withhold_the_app_servers_too(tmp_path, monkeypatch):
+    """The withheld verdicts cover every server the function would have mounted."""
+    from kiro_crew.acp import session_mcp
+
+    unreadable = session_mcp.NativeSettingsUnreadable(
+        session_mcp.NATIVE_SOURCE_PROJECT, tmp_path / "settings.json"
+    )
+
+    def _raise(_work_dir):
+        raise unreadable
+
+    monkeypatch.setattr(session_mcp, "native_settings_sources", _raise)
+    mount = _mount(monkeypatch, tmp_path, _spec(dict(PINNED)), {"mochi:mochi": dict(PINNED)})
+
+    assert mount.elements == []
+    assert mount.withheld["mochi:mochi"] is unreadable
+    assert set(session_mcp.IDENTITY_BOUND_SERVERS) <= set(mount.withheld)
+
+
 def _write_manifest(root, name, servers):
     app = root / name
     app.mkdir()

@@ -189,74 +189,29 @@ def builtin_app_mcp_servers() -> frozenset[str]:
     builtin-owned installs exactly like :func:`builtin_app_names`, so a shadowing
     user app cannot contribute declared servers.
 
+    The keys of :func:`_builtin_app_mcp_server_configs`, the one enumeration
+    :func:`builtin_app_host_cli_mcp_launches` also reads, so the two can never
+    disagree on which servers are shipped. Filesystem I/O; callers warm it ONCE
+    off the event loop. A source or manifest that fails to read is skipped
+    (fail-closed), never widening the trusted set.
+    """
+    return frozenset(_builtin_app_mcp_server_configs())
+
+
+def _builtin_app_mcp_server_configs() -> dict[str, tuple[str, object]]:
+    """Map ``"<app>:<server>"`` to ``(app_name, cfg)`` for shipped builtin servers.
+
     Enumerates its own manifest loop (mirroring :func:`builtin_app_names`) rather
     than sharing state with it, to keep that security-sensitive function
-    untouched. Filesystem I/O; callers warm it ONCE off the event loop. A source
-    or manifest that fails to read is skipped (fail-closed), never widening the
-    trusted set.
+    untouched. Every key is a server a shipped, builtin-owned manifest declares,
+    and ``cfg`` is its raw ``mcpServers`` value, unvalidated, so each caller
+    applies its own narrowing on top.
     """
     # Deferred import: manager imports this module at load time (see
     # builtin_app_names), so the reverse edge resolves lazily.
     from kiro_crew.apps.manager import builtin_owns_installed
 
-    servers: set[str] = set()
-    owned: dict[str, bool] = {}
-    for source in _builtin_manifest_sources():
-        try:
-            entries = sorted(source.iterdir())
-        except OSError:
-            continue
-        for entry in entries:
-            try:
-                root = entry.resolve(strict=True)
-                if not root.is_dir() or not root.is_relative_to(source):
-                    continue
-                manifest_path = (root / "app.json").resolve(strict=True)
-                if not manifest_path.is_file() or not manifest_path.is_relative_to(root):
-                    continue
-                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-            except (OSError, UnicodeError, json.JSONDecodeError):
-                continue
-            if not isinstance(manifest, dict):
-                continue
-            name = manifest.get("name")
-            mcp_servers = manifest.get("mcpServers")
-            if not (isinstance(name, str) and name and isinstance(mcp_servers, dict)):
-                continue
-            if name not in owned:
-                owned[name] = builtin_owns_installed(name)
-            if not owned[name]:
-                continue
-            for server_name in mcp_servers:
-                if isinstance(server_name, str) and server_name:
-                    servers.add(f"{name}:{server_name}")
-    return frozenset(servers)
-
-
-def builtin_app_host_cli_mcp_launches() -> dict[str, tuple[str, tuple[str, ...]]]:
-    """Builtin app MCP servers that run the gateway's OWN code, with their shipped args.
-
-    Maps ``"<app>:<server>"`` to ``(app_name, args)`` for every server a shipped,
-    builtin-owned manifest declares as ``command: "kirocrew"`` (the host CLI) with
-    a list of string ``args`` and no ``url``. Those are the app servers
-    ``bridges._pin_host_cli_command`` pins to this gateway's interpreter, so they
-    are Kiro Crew's own process exactly as the managed ``kirocrew-*`` servers are,
-    and the only app servers a per-session identity element may be built for.
-
-    The launch comes from the IMMUTABLE manifest, never from the mutable global
-    MCP config or an agent spec, so a hand-edited ``mochi:mochi`` entry naming a
-    different program cannot obtain the element (and with it the session token).
-    An app shipping its own binary is not the gateway's code and is left out.
-
-    Enumerates its own manifest loop, mirroring :func:`builtin_app_mcp_servers`,
-    rather than refactoring that security-sensitive function. Same sources, same
-    builtin-owned narrowing, same fail-closed skips.
-    """
-    # Deferred import: manager imports this module at load time (see
-    # builtin_app_names), so the reverse edge resolves lazily.
-    from kiro_crew.apps.manager import builtin_owns_installed
-
-    launches: dict[str, tuple[str, tuple[str, ...]]] = {}
+    servers: dict[str, tuple[str, object]] = {}
     owned: dict[str, bool] = {}
     for source in _builtin_manifest_sources():
         try:
@@ -285,14 +240,41 @@ def builtin_app_host_cli_mcp_launches() -> dict[str, tuple[str, tuple[str, ...]]
             if not owned[name]:
                 continue
             for server_name, cfg in mcp_servers.items():
-                if not (isinstance(server_name, str) and server_name and isinstance(cfg, dict)):
-                    continue
-                if cfg.get("command") != "kirocrew" or "url" in cfg:
-                    continue
-                args = cfg.get("args") or []
-                if not isinstance(args, list) or not all(isinstance(a, str) for a in args):
-                    continue
-                launches[f"{name}:{server_name}"] = (name, tuple(args))
+                if isinstance(server_name, str) and server_name:
+                    servers[f"{name}:{server_name}"] = (name, cfg)
+    return servers
+
+
+def builtin_app_host_cli_mcp_launches() -> dict[str, tuple[str, tuple[str, ...]]]:
+    """Builtin app MCP servers that run the gateway's OWN code, with their shipped args.
+
+    Maps ``"<app>:<server>"`` to ``(app_name, args)`` for every server a shipped,
+    builtin-owned manifest declares as ``command: "kirocrew"`` (the host CLI) with
+    a list of string ``args`` and no ``url``. Those are the app servers
+    ``bridges._pin_host_cli_command`` pins to this gateway's interpreter, so they
+    are Kiro Crew's own process exactly as the managed ``kirocrew-*`` servers are,
+    and the only app servers a per-session identity element may be built for.
+
+    The launch comes from the IMMUTABLE manifest, never from the mutable global
+    MCP config or an agent spec, so a hand-edited ``mochi:mochi`` entry naming a
+    different program cannot obtain the element (and with it the session token).
+    An app shipping its own binary is not the gateway's code and is left out.
+
+    Filters :func:`_builtin_app_mcp_server_configs`, the same enumeration
+    :func:`builtin_app_mcp_servers` takes its keys from, so every launch is by
+    construction a server that function trusts. Same sources, same
+    builtin-owned narrowing, same fail-closed skips.
+    """
+    launches: dict[str, tuple[str, tuple[str, ...]]] = {}
+    for key, (name, cfg) in _builtin_app_mcp_server_configs().items():
+        if not isinstance(cfg, dict):
+            continue
+        if cfg.get("command") != "kirocrew" or "url" in cfg:
+            continue
+        args = cfg.get("args") or []
+        if not isinstance(args, list) or not all(isinstance(a, str) for a in args):
+            continue
+        launches[key] = (name, tuple(args))
     return launches
 
 

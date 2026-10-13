@@ -1833,7 +1833,10 @@ def kiro_control_plane_servers(
             exc,
             agent,
         )
-        return NativeControlPlaneMount([], {name: exc for name in IDENTITY_BOUND_SERVERS})
+        # The verdict covers the whole population this function mounts, the
+        # builtin app servers included, so a withheld one is named as such.
+        unreadable = (*IDENTITY_BOUND_SERVERS, *builtin_app_identity_launches())
+        return NativeControlPlaneMount([], {name: exc for name in unreadable})
     out: list[dict[str, Any]] = []
     withheld_by_name: dict[str, NativeMountWithholding | NativeSettingsUnreadable] = {}
     # Crew's managed servers first, in their established order, then the builtin
