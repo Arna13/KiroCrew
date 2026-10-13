@@ -937,7 +937,22 @@ badge label, but the "runs without asking" acknowledgement rides a separate `wid
 so a capabilities card that both launches code and expands auto-approval reads `code_exec`
 and still requires the acknowledgement; an old signed record missing the flag derives it
 from its capability impact. A setting whose value is a command this machine runs
-(`dashboard.terminal.shell`) is `code_exec` whatever its before/after. A reminder that runs once is a `schedule.create` card with `at` (a local
+(`dashboard.terminal.shell`) is `code_exec` whatever its before/after. An `mcp.share`
+card (`{server, shared}`) shares one MCP server across chats in one press through the
+same `POST /api/mcp-gateway/servers/stub` the Settings button sends. Sharing is
+`code_exec`: the shared copy runs outside the chat sandbox, so the card lists each
+`Command` it approves and the declared `Env` names, and its apply step carries the
+`expected_launch` of that display, so a launch that moved before the press is refused.
+A launch it cannot display refuses the card (`launch_unreadable`). Stopping is
+`tighten`. Undo of a share stops sharing; a stop offers no Undo (`reshare_needs_review`),
+because sharing again would approve whatever launch was read before the stop, possibly
+one an agent edited. Its primary button names the action ("Share server" / "Stop
+sharing"). Commands are shown whole, never shortened. It refuses the leakage classes
+(`share_refused`, one line naming the class) and shows a `Saves` row only when the
+gateway measured the per-chat copies running now. With page-wide sharing off, a
+sharing card also turns it on (a second apply step, `POST /api/mcp-gateway/enable`),
+shows that as a `Sharing Off -> On` row, and names every other marked server that
+starts sharing with it. A reminder that runs once is a `schedule.create` card with `at` (a local
 ISO-8601 date-time, no offset) instead of `cron_expr`. `search_docs` searches and pages
 through `kiro_crew/docs/*.md` only, by the directory's own listing, and `find_ui` searches
 the packaged dashboard location index

@@ -62,6 +62,7 @@ KIND_TEMPLATE_UPDATE = "template.update"
 KIND_MCP_INSTALL = "mcp.install"
 KIND_MCP_ADD_CUSTOM = "mcp.add_custom"
 KIND_MCP_TOGGLE = "mcp.toggle"
+KIND_MCP_SHARE = "mcp.share"
 KIND_CONNECTION_CONNECT = "connection.connect"
 KIND_SECRET_SAVE = "secret.save"
 KIND_TRUST_APP = "trust.app"
@@ -318,6 +319,16 @@ KINDS: dict[str, KindDef] = {
             "Enable/disable an MCP server ({name, enabled}) or one tool ({server, tool, enabled}).",
             _obj({"name": _STR, "server": _STR, "tool": _STR, "enabled": _BOOL}, ["enabled"]),
             ("enabled",),
+        ),
+        KindDef(
+            KIND_MCP_SHARE,
+            "Share an MCP server across chats so one copy runs instead of one per chat "
+            "({server, shared}). Saves memory. The shared copy runs outside the chat "
+            "sandbox, so the card shows the exact command it approves and is rated as "
+            "running code. Refused for servers that give each chat its own credentials "
+            "or desktop.",
+            _obj({"server": _STR, "shared": _BOOL}, ["server", "shared"]),
+            (),
         ),
         KindDef(
             KIND_CONNECTION_CONNECT,
@@ -677,6 +688,12 @@ def validate_params(kind: str, params: Any) -> dict[str, Any]:
                 "enabled": enabled,
             }
         return {"name": _clean_str(p, "name", pattern=_MCP_NAME_RE), "enabled": enabled}
+    if kind == KIND_MCP_SHARE:
+        _only(p, {"server", "shared"})
+        return {
+            "server": _clean_str(p, "server", pattern=_MCP_NAME_RE),
+            "shared": _clean_bool(p, "shared"),
+        }
     if kind == KIND_CONNECTION_CONNECT:
         _only(p, {"slug"})
         return {"slug": _clean_str(p, "slug", max_len=64, pattern=_SLUG_RE)}
@@ -1308,6 +1325,63 @@ def build_preview(
         ]
         out["risk"] = RISK_NORMAL if p["enabled"] else RISK_TIGHTEN
         out["apply"] = [_toggle_step(p, p["enabled"])]
+    elif kind == KIND_MCP_SHARE:
+        if not snapshot.get("exists"):
+            raise _fail("not_found", "that MCP server is not configured")
+        if not snapshot.get("can_share"):
+            raise _fail("not_shareable", "this server has no stdio pipe, so it cannot be shared")
+        blocked = snapshot.get("share_blocked")
+        if p["shared"] and blocked:
+            raise _fail(
+                "share_refused", SHARE_REFUSAL_LINES.get(blocked, "Can't share this server")
+            )
+        if bool(snapshot.get("shared")) == p["shared"]:
+            raise _fail("no_change", "it is already in that state")
+        name = p["server"]
+        out["title"] = f"Share {name}" if p["shared"] else f"Stop sharing {name}"
+        out["changes"] = [
+            {
+                "label": name,
+                "before": "Shared" if snapshot.get("shared") else "One per chat",
+                "after": "Shared" if p["shared"] else "One per chat",
+            }
+        ]
+        saves = snapshot.get("saves_bytes")
+        if p["shared"] and isinstance(saves, int) and not isinstance(saves, bool) and saves > 0:
+            out["changes"].append({"label": "Saves", "after": format_mb(saves)})
+        if p["shared"]:
+            # A shared copy runs outside the chat sandbox, so this card approves
+            # running exactly this launch there. Show it, pin it, and rate it as
+            # running code; a launch that cannot be shown cannot be approved.
+            expected = snapshot.get("expected_launch")
+            commands = [c for c in snapshot.get("launch_commands") or [] if isinstance(c, str)]
+            if not isinstance(expected, str) or not expected or not commands:
+                raise _fail(
+                    "launch_unreadable",
+                    "Can't read what this server runs. Open MCP Management to share it.",
+                )
+            # Shown whole, never shortened: the card approves every byte of it,
+            # and a launch too long to display has no expected_launch at all.
+            for command in commands:
+                out["changes"].append({"label": "Command", "after": command})
+            env_lines = [n for n in snapshot.get("launch_env_lines") or [] if isinstance(n, str)]
+            for line in env_lines:
+                out["changes"].append({"label": "Env", "after": line})
+            out["risk"] = RISK_CODE_EXEC
+            out["apply"] = [_share_step(name, True, expected_launch=expected)]
+            if snapshot.get("sharing_on") is False:
+                # Sharing does nothing while the page-wide switch is off, and
+                # turning it on starts every server already marked: say so.
+                out["changes"].append({"label": "Sharing", "before": "Off", "after": "On"})
+                others = [n for n in snapshot.get("other_marked") or [] if isinstance(n, str)]
+                if others:
+                    out["changes"].append(
+                        {"label": "Also starts sharing", "after": ", ".join(others)}
+                    )
+                out["apply"].append(step("POST", "/api/mcp-gateway/enable", {"enabled": True}))
+        else:
+            out["risk"] = RISK_TIGHTEN
+            out["apply"] = [_share_step(name, False)]
     elif kind == KIND_CONNECTION_CONNECT:
         if not snapshot.get("known"):
             raise _fail("not_found", f"no connection provider '{p['slug']}'")
@@ -1425,6 +1499,27 @@ def _toggle_step(p: dict[str, Any], enabled: bool) -> dict[str, Any]:
             {"server": p["server"], "tool": p["tool"], "enabled": enabled},
         )
     return step("POST", "/api/mcp/toggle", {"name": p["name"], "enabled": enabled})
+
+
+#: One line per class of server that can never be shared, keyed by
+#: :func:`kiro_crew.mcp_gateway.launch_approval.share_refusal`'s code.
+SHARE_REFUSAL_LINES: dict[str, str] = {
+    "credential_vending": "Can't share: gives each chat its own credentials",
+    "needs_tenant_nonce": "Can't share: each chat needs its own copy",
+    "computer_use": "Can't share: it controls this computer",
+}
+
+
+def format_mb(value: int) -> str:
+    """A measured byte count as whole decimal megabytes, the unit the dashboard uses."""
+    return f"{max(1, round(value / 1_000_000))} MB"
+
+
+def _share_step(name: str, shared: bool, *, expected_launch: str | None = None) -> dict[str, Any]:
+    body: dict[str, Any] = {"name": name, "stub": shared}
+    if expected_launch is not None:
+        body["expected_launch"] = expected_launch
+    return step("POST", "/api/mcp-gateway/servers/stub", body)
 
 
 def _capability_plan(member: str, revision: str, draft: dict[str, Any]) -> list[dict[str, Any]]:
@@ -1647,6 +1742,14 @@ def _build_undo(
         return [step("PATCH", f"/api/agents/detail/{_q(p['template'])}", old)], None
     if kind == KIND_MCP_TOGGLE:
         return [_toggle_step(p, bool(before.get("enabled")))], None
+    if kind == KIND_MCP_SHARE:
+        if not before.get("shared"):
+            return [_share_step(p["server"], False)], None
+        # Undoing "stop sharing" would share again, approving whatever launch
+        # was read then to run outside the sandbox -- possibly one an agent
+        # edited and nobody approved. Sharing again goes through a new card or
+        # the Settings button, which show the launch first.
+        return None, "reshare_needs_review"
     if kind == KIND_SECRET_SAVE:
         if before.get("exists"):
             return None, "overwrites_existing"
@@ -1778,6 +1881,13 @@ def describe_manual_change(
     if route == ("POST", "/api/mcp/toggle-tool"):
         verb = "enabled" if b.get("enabled", True) else "disabled"
         return f"{verb} MCP tool {s(b.get('server'))}/{s(b.get('tool'))}"
+    if route == ("POST", "/api/mcp-gateway/servers/stub"):
+        if "name" not in b:
+            return None
+        verb = "shared" if b.get("stub") is True else "stopped sharing"
+        return f"{verb} MCP server {s(b.get('name'))} across chats"
+    if route == ("POST", "/api/mcp-gateway/enable"):
+        return f"turned MCP server sharing {'on' if b.get('enabled') is True else 'off'}"
     if route == ("POST", "/api/connections/mint"):
         return f"started connecting {s(b.get('slug'))}"
     if route == ("POST", "/api/connections/disconnect"):
@@ -1824,6 +1934,8 @@ HOOKED_ROUTES: frozenset[tuple[str, str]] = frozenset(
         ("POST", "/api/mcp/apply"),
         ("POST", "/api/mcp/toggle"),
         ("POST", "/api/mcp/toggle-tool"),
+        ("POST", "/api/mcp-gateway/servers/stub"),
+        ("POST", "/api/mcp-gateway/enable"),
         ("POST", "/api/connections/mint"),
         ("GET", "/api/connections/mint"),
         ("POST", "/api/connections/disconnect"),

@@ -62,7 +62,9 @@ import logging
 import os
 import re
 import secrets
+import shlex
 import time
+import unicodedata
 from collections import OrderedDict
 from pathlib import Path
 from typing import Any, Callable
@@ -165,6 +167,19 @@ class CardError(Exception):
 def canonical(value: Any) -> str:
     """The one serialization two bodies or snapshots are compared through."""
     return json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+
+
+#: Snapshot fields that are live readings, not state the card changes: an RSS
+#: total moves between preview and press, so it never counts as a change.
+_VOLATILE_SNAPSHOT_KEYS: dict[str, tuple[str, ...]] = {catalog.KIND_MCP_SHARE: ("saves_bytes",)}
+
+
+def comparable_snapshot(kind: str, snapshot: Any) -> Any:
+    """*snapshot* without the live readings :func:`canonical` must not compare."""
+    drop = _VOLATILE_SNAPSHOT_KEYS.get(kind)
+    if not drop or not isinstance(snapshot, dict):
+        return snapshot
+    return {k: v for k, v in snapshot.items() if k not in drop}
 
 
 def clean_reason(reason: Any) -> str:
@@ -1877,6 +1892,73 @@ def _mcp_exists(name: str) -> bool:
     return _find_server_spec_anywhere(name) is not None
 
 
+def _visible(text: str) -> str:
+    """*text* with every Unicode category-C code point escaped.
+
+    The card shows the command it approves; a bidi override or a zero-width
+    character could make what the operator reads differ from what runs. The MCP
+    page escapes the same set (``visibleLaunchText``).
+    """
+    out: list[str] = []
+    for ch in text:
+        if not unicodedata.category(ch).startswith("C"):
+            out.append(ch)
+            continue
+        code = ord(ch)
+        out.append(f"\\x{code:02x}" if code <= 0xFF else f"\\u{{{code:04x}}}")
+    return "".join(out)
+
+
+def _mcp_share_snapshot(name: str) -> dict[str, Any]:
+    """What an ``mcp.share`` card replaces, read from the same sources as the MCP page.
+
+    The row scan, the stub roster, the refusal classes and the memory reading
+    are the ones ``GET /api/mcp-gateway/servers`` uses, so the card and the
+    switch cannot disagree about a server. ``saves_bytes`` is measured from the
+    copies running now and absent when there is no reading.
+    """
+    from kiro_crew.config.loader import KiroCrewConfig
+    from kiro_crew.dashboard.handlers import mcp as mcp_handlers
+    from kiro_crew.mcp_gateway import direct_copies
+    from kiro_crew.mcp_gateway.launch_approval import share_refusal
+
+    row = mcp_handlers._collect_server_rows().get(name)
+    if row is None:
+        return {"exists": False}
+    gateway = KiroCrewConfig.load().mcp_gateway
+    roster = list(gateway.stub_servers)
+    shared = name in set(roster)
+    snap: dict[str, Any] = {
+        "exists": True,
+        "can_share": row.get("transport") == "stdio",
+        "shared": shared,
+        "share_blocked": share_refusal(name),
+        # Sharing only runs when the page-wide switch is on. Turning it on also
+        # starts every other server already marked, so the card names them.
+        "sharing_on": bool(gateway.enabled),
+        "other_marked": sorted(n for n in roster if n != name),
+    }
+    if shared:
+        return snap
+    copies = direct_copies.measure({name: row.get("commands", ())}).get(name)
+    if copies is not None and copies.saves_bytes is not None:
+        snap["saves_bytes"] = copies.saves_bytes
+    # A shared backend runs outside the session sandbox, so a sharing card
+    # shows the exact launch it approves and pins it: a launch that moves
+    # between this read and the press is refused.
+    launches = mcp_handlers.launch_resolve.resolve_launches([name], refresh_specs=False)
+    display = mcp_handlers.display_launches(name, launches.get(name, ()))
+    snap["launch_commands"] = [_visible(shlex.join(c)) for c in display.get("commands", [])]
+    # The display's own env lines (``KEY=value`` or ``KEY=<hidden sha256:...>``),
+    # not just the names: a value such as ``LD_PRELOAD=...`` is part of what runs.
+    snap["launch_env_lines"] = [
+        _visible(line) for env in display.get("envs", []) for line in env if isinstance(line, str)
+    ]
+    if display.get("complete") and display.get("expected_launch"):
+        snap["expected_launch"] = display["expected_launch"]
+    return snap
+
+
 #: Recorded for a scope whose file exists but cannot be read: an unknown is
 #: never taken as "not there".
 _MCP_SCOPE_UNREADABLE = "unreadable"
@@ -2009,6 +2091,11 @@ def after_shows_the_write(
         return bool(written) and after.get("revision") == written
     if kind == catalog.KIND_MCP_TOGGLE:
         return after.get("enabled") is bool(p.get("enabled"))
+    if kind == catalog.KIND_MCP_SHARE:
+        if after.get("shared") is not bool(p.get("shared")):
+            return False
+        # A share that the page-wide switch leaves off saves nothing.
+        return not p.get("shared") or after.get("sharing_on") is not False
     if kind == catalog.KIND_TRUST_APP:
         return after.get("trusted") is True
     if kind == catalog.KIND_DENIED_COMMAND and p.get("action") == "toggle":
@@ -2179,6 +2266,8 @@ def _sync_read_state(
             disabled = raw_disabled if isinstance(raw_disabled, list) else []
             return {"exists": exists, "enabled": p["tool"] not in disabled}
         return {"exists": exists, "enabled": not bool(entry.get("disabled"))}
+    if kind == catalog.KIND_MCP_SHARE:
+        return _mcp_share_snapshot(p["server"])
     if kind == catalog.KIND_SECRET_SAVE:
         from kiro_crew.config.loader import config_dir
         from kiro_crew.secrets import SecretVault

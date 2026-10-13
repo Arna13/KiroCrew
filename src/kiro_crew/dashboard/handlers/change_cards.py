@@ -990,7 +990,9 @@ async def _run_card_step(
                 current = await cards.read_state(
                     rec["kind"], rec["params"], [], state=state, app=request.app
                 )
-                if cards.canonical(current) != cards.canonical(rec["before"]):
+                if cards.canonical(
+                    cards.comparable_snapshot(rec["kind"], current)
+                ) != cards.canonical(cards.comparable_snapshot(rec["kind"], rec["before"])):
                     store.abort_step(rec)
                     unsaved = await _published_or_refusal(request, rec, revert)
                     if unsaved is not None:
