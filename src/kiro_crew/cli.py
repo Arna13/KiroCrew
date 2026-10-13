@@ -3080,6 +3080,18 @@ Examples:
     )
     mem_retired.add_argument("--restore", dest="restore_id", default=None, help="Restore this id")
     mem_retired.add_argument("--limit", type=int, default=20, help="How many to list")
+    mem_forget = mem_sub.add_parser(
+        "forget",
+        help="Delete one semantic memory key after you confirm it (owner only; "
+        "needs a terminal and the running gateway)",
+    )
+    mem_forget.add_argument("key", help="Semantic memory key to forget")
+    mem_forget.add_argument(
+        "--superseded-by",
+        dest="superseded_by",
+        default=None,
+        help="Live key that replaces this one; recorded on the tombstone",
+    )
     mem_import = mem_sub.add_parser("import", help="Import memory from JSON file")
     mem_import.add_argument("file", help="Path to JSON file (export format)")
     mem_import.add_argument(

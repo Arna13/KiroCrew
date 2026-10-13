@@ -2852,7 +2852,7 @@ before reading transcript bodies, opening learned memory or billing a model.
 | PUT | `/api/memory/history` | Overwrite today's summary file (gated) |
 | GET | `/api/memory/semantic` | List all semantic entries |
 | PUT | `/api/memory/semantic` | Create/update (validates key, allowlist, injection; gated) |
-| DELETE | `/api/memory/semantic/{key}` | Tombstone + log event (gated) |
+| DELETE | `/api/memory/semantic/{key}` | Tombstone + log event (gated). Optional JSON body for `kirocrew memory forget`: `expect_value_json` (compare-and-delete, 409 `value_changed`) and `superseded_by` (must be live and differ from the key: 409 `superseded_by_absent` / 400 `superseded_by_self`); other fields 400 `invalid_forget_body`. The dashboard sends no body |
 | GET | `/api/memory/events` | Recent audit trail |
 | GET | `/api/memory/graph` | All memory as nodes and edges for the graph view |
 | GET/PUT | `/api/memory/settings` | Consolidation settings; see the memory settings card above |
