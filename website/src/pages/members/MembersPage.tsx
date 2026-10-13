@@ -52,7 +52,7 @@
  * embedded Meet CrewMates flow) or the full form (Advanced), one at a time,
  * with the chat and side panel hidden but still MOUNTED. See `openGuided`.
  */
-import { Fragment, lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { Fragment, lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ButtonHTMLAttributes } from 'react'
 import { useLocation, useNavigate, useNavigationType, useSearchParams } from 'react-router-dom'
 import { ArrowLeft, Check, ChevronRight, Circle, Goal, LayoutDashboard, Loader2, MessageCircleQuestionMark, Plus, RotateCw, Square, Star, X, Zap } from 'lucide-react'
 import { usePreviewFlag } from '../../hooks/usePreviewFlag'
@@ -991,6 +991,21 @@ export function createDraftFromHref(href: string | null, base: string): MeetCrew
   return { name: url.searchParams.get('name') ?? '', goal: url.searchParams.get('goal') ?? '' }
 }
 
+/**
+ * A thread-header control: a Glass chip over the pane, where it sits on
+ * scrolled text, and a bare icon button in the phone shell's top bar, like the
+ * Sessions bar's controls and the bell beside it.
+ */
+function HeaderControl({ inBar, chipClassName, barClassName, ...rest }: {
+  inBar: boolean
+  chipClassName: string
+  barClassName: string
+} & ButtonHTMLAttributes<HTMLButtonElement> & { [data: `data-${string}`]: string | undefined }) {
+  return inBar
+    ? <button type="button" className={barClassName} {...rest} />
+    : <Glass as="button" variant="chip" radius={999} className={chipClassName} {...rest} />
+}
+
 export default function MembersPage() {
   const { t } = useTranslation()
   const navigate = useNavigate()
@@ -1621,9 +1636,14 @@ export default function MembersPage() {
   // error boundary does not keep the navigation hidden.
   const reportRosterBar = useMobileRosterBar()
   const teamPending = !!urlTeam && !activeTeam && teamsQ.data === undefined && !teamsQ.isError
-  const rosterBar: MobileRosterBarState = activeName || activeTeam
+  // `open` only while the thread is on screen: the create flow over an open
+  // crewmate keeps `activeName`, and a header left in the bar there would act
+  // on a thread the user cannot see. That flow reports `pending` instead, so
+  // the shell keeps the single bar with its own nav toggle.
+  const createOver = guided.open || createOpen
+  const rosterBar: MobileRosterBarState = (activeName || activeTeam) && !createOver
     ? 'open'
-    : landingPending || teamPending ? 'pending' : 'roster'
+    : landingPending || teamPending || ((activeName || activeTeam) && createOver) ? 'pending' : 'roster'
   useLayoutEffect(() => {
     if (!reportRosterBar || !isMobile) return
     reportRosterBar(rosterBar)
@@ -4758,17 +4778,20 @@ export default function MembersPage() {
                   openRequest={switcherOpenRequest}
                 />
                 </div>
-                <Glass
-                  as="button"
-                  variant="chip"
-                  radius={999}
-                  // Back to the roster. On a phone the roster is the drawer over
-                  // this chat, so the control slides it in and nothing unmounts.
-                  // Otherwise, when this entry was pushed from the roster on
-                  // this page, pop it — the browser's own Back then lands on
-                  // whatever preceded the roster, with no duplicate roster
-                  // entry. A deep link (no such state) has no roster entry
-                  // behind it, so drop the param in place instead.
+                {/* Back to the roster. On a phone the roster is the drawer over
+                    this chat, so the control slides it in and nothing unmounts.
+                    Otherwise, when this entry was pushed from the roster on
+                    this page, pop it — the browser's own Back then lands on
+                    whatever preceded the roster, with no duplicate roster
+                    entry. A deep link (no such state) has no roster entry
+                    behind it, so drop the param in place instead.
+                    In the shell bar it is the Sessions bar's own drawer toggle,
+                    bare and the same size, so the two phone bars match; over
+                    the pane it stays a Glass chip, which reads on scrolled text. */}
+                <HeaderControl
+                  inBar={headerInBar}
+                  chipClassName="md:hidden glass-hover inline-flex items-center justify-center w-8 h-8 rounded-full text-text cursor-pointer"
+                  barClassName="md:hidden mc-touch-hit p-2 rounded-md text-text hover:text-text-strong hover:bg-bg-hover cursor-pointer bg-transparent border-none shrink-0"
                   onClick={() => {
                     if (rosterDrawerAvailable) { openRosterDrawer(); return }
                     const go = () => {
@@ -4784,7 +4807,6 @@ export default function MembersPage() {
                     if (!schedAtStakeRef.current()) { go(); return }
                     void schedGuardRef.current().then((ok) => { if (ok) go() })
                   }}
-                  className="md:hidden glass-hover inline-flex items-center justify-center w-8 h-8 rounded-full text-text cursor-pointer"
                   aria-label={t('pages.membersPage.toggle_roster')}
                   data-testid="member-back"
                   aria-expanded={rosterDrawerAvailable ? rosterDrawerOpen : undefined}
@@ -4793,9 +4815,9 @@ export default function MembersPage() {
                   {/* On a phone this opens the roster drawer, so it wears the
                       Sessions page's own drawer toggle, not a back arrow. */}
                   {rosterDrawerAvailable
-                    ? (rosterDrawerOpen ? <PanelLeftLight size={16} /> : <PanelLeftSolid size={16} />)
+                    ? (rosterDrawerOpen ? <PanelLeftLight size={headerInBar ? 18 : 16} /> : <PanelLeftSolid size={headerInBar ? 18 : 16} />)
                     : <ArrowLeft size={16} className="lucide-inline" />}
-                </Glass>
+                </HeaderControl>
               </div>
               {/* The identity pill is one centred Glass chip holding the face,
                   name and activity line. It opens Profile, not the editor; the
@@ -4905,15 +4927,15 @@ export default function MembersPage() {
                     would otherwise be announced on every change. It is in the
                     reading order for a reader who asks. */}
                 <span className="sr-only" data-testid="member-pill-activity-sr">{pillActivity.label}{isLoopOn(active) ? ` · ${t('pages.membersPage.loop_on')}` : ''}</span>
-                {/* Glass, like the switcher opposite (#18325): on the floating
-                    header a bare icon sat on scrolled text. */}
+                {/* A Glass chip over the pane, like the switcher opposite
+                    (#18325): there a bare icon sat on scrolled text. Bare in the
+                    shell bar, like the bell beside it and the Sessions bar. */}
                 {showOpener && (
-                  <Glass
-                    as="button"
-                    variant="chip"
-                    radius={999}
+                  <HeaderControl
+                    inBar={headerInBar}
+                    chipClassName="glass-hover flex items-center justify-center w-8 h-8 rounded-full shrink-0 text-text cursor-pointer"
+                    barClassName="mc-touch-hit p-2 rounded-md shrink-0 text-text hover:text-text-strong hover:bg-bg-hover cursor-pointer bg-transparent border-none"
                     onClick={togglePanel}
-                    className="glass-hover flex items-center justify-center w-8 h-8 rounded-full shrink-0 text-text cursor-pointer"
                     aria-pressed={panelVisible}
                     aria-controls="member-side-panel"
                     aria-label={t('pages.membersPage.panel_toggle')}
@@ -4921,8 +4943,8 @@ export default function MembersPage() {
                     data-testid="member-panel-toggle"
                     {...uiLocation('members.details')}
                   >
-                    <PanelRightSolid size={15} />
-                  </Glass>
+                    <PanelRightSolid size={headerInBar ? 18 : 15} />
+                  </HeaderControl>
                 )}
               </div>
               {/* The unread column (issue #19045), hanging under the switcher
