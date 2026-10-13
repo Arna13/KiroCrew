@@ -26,6 +26,7 @@ from kiro_crew.execution_context import canonical_memory_mode, stricter_memory_m
 from kiro_crew.history import HUMAN_TURN_META_KEY, is_incognito_transcript
 from kiro_crew.imessage.plaintext import _grapheme_end
 from kiro_crew.label_guard import (
+    ends_like_sentence,
     is_verdict_reply,
     looks_like_prose,
     unspaced_script_chars,
@@ -779,9 +780,12 @@ def _validate_title_reply(
     title = _clean_title(text)
     if not title or _is_verdict_reply(title, control_words):
         return ""
+    # ``_clean_title`` strips a final period, so the end-of-sentence shape is
+    # read from the reply's first line before that strip.
+    ends_as_sentence = ends_like_sentence(text.strip().split("\n", 1)[0])
     title, _ = redact_exfiltration_urls(title)
     title, _ = redact_credentials(title)
-    if _looks_like_prose(title):
+    if ends_as_sentence or _looks_like_prose(title):
         # The model answered/refused instead of naming (a pasted URL is the
         # common trigger). Treat it as SKIP so the caller uses the fallback
         # title rather than persisting a sentence as the session name.

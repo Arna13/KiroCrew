@@ -3572,8 +3572,7 @@ Two consequences fall out of naming in a non-latin script:
   rule's trailing-whitespace requirement (those scripts do not space after
   punctuation). Both ceilings are parameters, because the prompts differ: the
   title defaults (12 words / 24 characters) sit above its 3-6 word contract,
-  and the 18-word session summary passes its own. A short refusal with no
-  terminator remains a documented false negative for those unspaced scripts.
+  and the 18-word session summary passes its own.
   Korean is spaced, so the word ceiling bounds its long sentences, but a SHORT
   Korean refusal clears every other check -- and Korean puts the refusal verb
   last, so English-style prefix openers cannot catch it. `looks_like_prose`
@@ -3590,6 +3589,20 @@ Two consequences fall out of naming in a non-latin script:
   with `sentence_shape=False` and without the conversation-referring openers,
   since "the conversation covers ..." is its legitimate shape and a false
   positive there is re-spent on a model turn at every later list.
+  Every other shipped language is covered by one language-neutral rule,
+  `label_guard.ends_like_sentence`: a reply that ENDS in a sentence terminator
+  of any script (`.` `!` `?`, the danda `।`, the Arabic `؟`, `。` and kin) and
+  holds a comma of any script or `SENTENCE_MIN_WORDS` (4) words is a sentence,
+  not a name -- the prompts ask for no punctuation, and a name never closes a
+  clause. A name of three words or fewer with a stray final period stays a
+  name. The danda and the other spaced terminators also count mid-reply, like
+  the ASCII ones, so a two-sentence Hindi or Bengali refusal is caught. Paths
+  that strip a final period before checking (`chat_title._validate_title_reply`,
+  `messaging/auto_title.clean_title`) read this shape from the reply line
+  before the strip; the session summary runs with `sentence_shape=False` and
+  skips it. A short refusal with NO terminator in a language other than
+  English or Korean is the remaining documented false negative: without the
+  terminator it has a name's shape.
 - **The reveal animation needs characters.** The sidebar types a new title in one
   word at a time; a single-token title skipped the animation entirely, so
   `_title_reveal_prefixes` steps unspaced scripts two characters at a time
