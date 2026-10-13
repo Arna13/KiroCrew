@@ -2918,3 +2918,314 @@ class TestTheWriterAndTheSweepShareOneGate:
         backup.set_retention_keep(ACCOUNT, None)
         assert len(calls) == 1
         assert backup.retention_keep(ACCOUNT) is None
+
+
+def _last(kind: str = backup.KIND_SNAPSHOT) -> dict[str, Any]:
+    """The status read's record of how ``kind``'s last sweep ended."""
+    return backup.retention_last_sweep(ACCOUNT)[kind]
+
+
+class TestEveryTerminalSweepStateReachesTheStatusRead:
+    """How the last sweep ended is served, and a refusal is served like any other end.
+
+    The SEL event and a log line are not where an operator reads whether retention is
+    working; the status read is. Without this record it serves the configured count
+    and nothing about whether a sweep acted on it, so a sweep refused every night reads
+    exactly like a working one: retention on, the bill not falling, and nothing in the
+    app saying why. Unlike the unclaimed pair, this record is written on the refusing
+    paths too, because the refusal is the fact.
+    """
+
+    def test_nothing_is_served_before_any_sweep_has_ended(self, state):
+        # An absent kind means "no sweep has ended", never "nothing happened".
+        state(3)
+        assert backup.retention_last_sweep(ACCOUNT) == {}
+
+    def test_a_sweep_that_retired_archives_says_how_many_and_when(self, drive, state):
+        state(1)
+        drive.rows = _archives(backup.KIND_SNAPSHOT, ["01", "02", "03"])
+        out = _prune(drive)
+        last = _last()
+        assert (last["result"], last["skipped"]) == ("successful", "")
+        # The same two counts the audit event carries, so the two can be read together.
+        assert (last["retired"], last["versions"]) == (out["retired"], out["versions"]) == (2, 2)
+        # Parsed rather than merely truthy: the stamp is what tells a reader whether
+        # this is last night's sweep or one from a month ago.
+        assert dt.datetime.fromisoformat(last["at"]).tzinfo is not None
+
+    def test_a_sweep_with_nothing_to_retire_is_published_as_a_measured_zero(self, drive, state):
+        state(3)
+        drive.rows = _archives(backup.KIND_SNAPSHOT, ["01", "02"])
+        _prune(drive)
+        last = _last()
+        assert (last["result"], last["skipped"], last["retired"]) == ("successful", "", 0)
+
+    def test_retention_not_enabled_is_published_as_a_successful_sweep(self, drive, state):
+        # The ordinary state of an unconfigured install: nothing to do, done.
+        drive.rows = _archives(backup.KIND_SNAPSHOT, ["01", "02", "03"])
+        _prune(drive)
+        assert drive.deleted == []
+        last = _last()
+        assert (last["result"], last["skipped"]) == ("successful", "retention is not enabled")
+
+    def test_a_count_somebody_wrote_and_the_sweep_cannot_use_is_published_as_failed(
+        self, drive, state
+    ):
+        # The anomaly half of "off": an operator configured something that is not in
+        # force, which is exactly what the status read must stop hiding.
+        state("3")
+        drive.rows = _archives(backup.KIND_SNAPSHOT, ["01", "02", "03"])
+        _prune(drive)
+        assert drive.deleted == []
+        last = _last()
+        assert last["result"] == "failed"
+        assert last["skipped"] == "the retention setting could not be read"
+
+    @pytest.mark.parametrize(
+        ("error", "result"),
+        [
+            (RuntimeError("S3 consent was withdrawn"), "refused"),
+            # A credential to renew is not a consent somebody withdrew: the audit event
+            # files it `failed`, and the status read must say the same thing.
+            (AWSError("expired token for profile p"), "failed"),
+        ],
+        ids=["gate-refusal", "credential-failure"],
+    )
+    def test_an_authorization_gate_ending_matches_its_audit_result(
+        self, drive, state, audit, monkeypatch, error, result
+    ):
+        state(1)
+        drive.rows = _archives(backup.KIND_SNAPSHOT, ["01", "02"])
+        monkeypatch.setattr(
+            backup, "_authorize_upload", lambda *a, **k: (_ for _ in ()).throw(error)
+        )
+        _prune(drive)
+        assert drive.listed == []
+        last = _last()
+        assert (last["result"], last["skipped"]) == (result, "authorization refused")
+        # A bare RuntimeError stands in for `_refuse_upload`, which files its own
+        # `denied` event before raising, so only the credential failure is filed here.
+        assert [entry["outcome"] for entry in audit] == ([] if result == "refused" else [result])
+        # The error's own text stays in the audit event, where it is redacted for that
+        # record, and out of a payload every poller reads.
+        assert str(error) not in json.dumps(last)
+
+    @pytest.mark.parametrize(
+        ("error", "result"),
+        [
+            (RuntimeError("consent withdrawn"), "refused"),
+            (AWSError("expired token for profile p"), "failed"),
+        ],
+        ids=["gate-refusal", "credential-failure"],
+    )
+    def test_authorization_lost_before_the_delete_matches_its_audit_result(
+        self, drive, state, monkeypatch, error, result
+    ):
+        state(1)
+        drive.rows = _archives(backup.KIND_SNAPSHOT, ["01", "02", "03"])
+        seen = {"n": 0}
+
+        def gate(*a: Any, **k: Any) -> None:
+            seen["n"] += 1
+            if seen["n"] > 1:
+                raise error
+
+        monkeypatch.setattr(backup, "_authorize_upload", gate)
+        _prune(drive)
+        assert drive.deleted == []
+        last = _last()
+        assert last["result"] == result
+        assert last["skipped"] == "authorization withdrawn before deletion"
+        assert last["retired"] == 0
+
+    def test_the_standing_record_is_never_older_than_the_one_it_replaced(
+        self, drive, state, monkeypatch
+    ):
+        # Two same-kind sweeps in separate processes reach the sidecar lock in either
+        # order. Here the first recorder is held at the lock while a second one commits,
+        # then resumes. Whichever commits last is the record a reader sees, so it must
+        # carry the later stamp -- a stamp taken before the wait would let it claim to be
+        # older than the record it just overwrote.
+        state(1)
+        real = backup._locked_state_update
+        overtaken: dict[str, str] = {}
+
+        def overtaking(mutate: Any, *args: Any, **kwargs: Any) -> Any:
+            if not overtaken:
+                overtaken["at"] = ""
+                backup._record_last_sweep(
+                    ACCOUNT,
+                    backup.KIND_SNAPSHOT,
+                    {"skipped": "", "retired": 2, "versions": 2},
+                    "successful",
+                )
+                overtaken["at"] = _last()["at"]
+            return real(mutate, *args, **kwargs)
+
+        monkeypatch.setattr(backup, "_locked_state_update", overtaking)
+        backup._record_last_sweep(
+            ACCOUNT,
+            backup.KIND_SNAPSHOT,
+            {"skipped": "authorization refused", "retired": 0, "versions": 0},
+            "refused",
+        )
+        standing = _last()
+        assert standing["result"] == "refused"
+        assert dt.datetime.fromisoformat(standing["at"]) > dt.datetime.fromisoformat(
+            overtaken["at"]
+        )
+
+    def test_a_listing_the_sweep_would_not_act_on_is_published_as_failed(self, drive, state):
+        # The unclaimed pair is deliberately NOT written here, because the listing
+        # cannot be trusted about what it omitted. The refusal itself is trustworthy.
+        state(1)
+        drive.rows = _archives(backup.KIND_SNAPSHOT, ["01", "02"])
+        _prune(drive, newest=f"snapshots/{INSTALL}/absent.tar.gz")
+        assert drive.deleted == []
+        assert backup.retention_unclaimed(ACCOUNT) == {}
+        last = _last()
+        assert last["result"] == "failed"
+        assert "does not show the archive" in last["skipped"]
+
+    @pytest.mark.parametrize(
+        ("new_count", "reason"),
+        [
+            (None, "retention is not enabled"),
+            (3, "the retention count changed before deletion"),
+        ],
+        ids=["switched-off", "raised"],
+    )
+    def test_a_count_withdrawn_mid_sweep_is_published_with_its_reason(
+        self, drive, state, monkeypatch, new_count, reason
+    ):
+        # An owner changing their mind is not a failure, matching the audit result.
+        state(1)
+        drive.rows = _archives(backup.KIND_SNAPSHOT, ["01", "02", "03"])
+        original = backup.storage.list_object_versions
+
+        def flipping(*args: Any, **kwargs: Any) -> list[dict[str, Any]]:
+            rows = original(*args, **kwargs)
+            backup.set_retention_keep(ACCOUNT, new_count)
+            return rows
+
+        monkeypatch.setattr(backup.storage, "list_object_versions", flipping)
+        _prune(drive)
+        assert drive.deleted == []
+        last = _last()
+        assert (last["result"], last["skipped"], last["retired"]) == ("successful", reason, 0)
+
+    def test_a_count_garbled_mid_sweep_is_published_as_failed(self, drive, state, monkeypatch):
+        # The anomaly half of the re-read, matching its `failed` audit: a value somebody
+        # wrote and the sweep cannot use is not an owner changing their mind.
+        state(1)
+        drive.rows = _archives(backup.KIND_SNAPSHOT, ["01", "02", "03"])
+        original = backup.storage.list_object_versions
+
+        def garbling(*args: Any, **kwargs: Any) -> list[dict[str, Any]]:
+            rows = original(*args, **kwargs)
+            _write_account({backup.RETENTION_KEEP_STATE_KEY: "3"})
+            return rows
+
+        monkeypatch.setattr(backup.storage, "list_object_versions", garbling)
+        _prune(drive)
+        assert drive.deleted == []
+        last = _last()
+        assert last["result"] == "failed"
+        assert last["skipped"] == "the retention setting could not be read"
+
+    def test_a_failed_listing_is_published_as_cleanup_failed(self, drive, state):
+        state(1)
+        drive.rows = _archives(backup.KIND_SNAPSHOT, ["01", "02"])
+        drive.list_error = AWSError("access denied for arn:aws:iam::111122223333:role/r")
+        _prune(drive)
+        last = _last()
+        assert (last["result"], last["skipped"], last["versions"]) == (
+            "failed",
+            "cleanup failed",
+            0,
+        )
+        assert "arn:aws" not in json.dumps(last)
+
+    def test_a_purge_that_failed_halfway_says_what_it_erased(self, drive, state, monkeypatch):
+        # Those versions are gone for good, so "failed, nothing erased" would be the one
+        # shape a reader must not be handed.
+        state(1)
+        drive.rows = _archives(backup.KIND_SNAPSHOT, ["01", "02", "03"])
+        monkeypatch.setattr(
+            backup.storage,
+            "delete_object_versions",
+            lambda *a, **k: (_ for _ in ()).throw(
+                storage.PartialVersionDelete(1, AWSError("throttled"))
+            ),
+        )
+        _prune(drive)
+        last = _last()
+        assert (last["result"], last["skipped"]) == ("failed", "cleanup failed")
+        assert (last["retired"], last["versions"]) == (0, 1)
+
+    def test_a_refusal_replaces_an_earlier_success(self, drive, state, monkeypatch):
+        # The reported defect in one test: a sweep that worked once and has refused
+        # since must not keep reading as working.
+        state(1)
+        drive.rows = _archives(backup.KIND_SNAPSHOT, ["01", "02", "03"])
+        _prune(drive)
+        assert _last()["result"] == "successful"
+        monkeypatch.setattr(
+            backup,
+            "_authorize_upload",
+            lambda *a, **k: (_ for _ in ()).throw(RuntimeError("S3 consent was withdrawn")),
+        )
+        _prune(drive)
+        last = _last()
+        assert (last["result"], last["skipped"], last["retired"]) == (
+            "refused",
+            "authorization refused",
+            0,
+        )
+
+    def test_each_kind_keeps_its_own_result(self, drive, state, monkeypatch):
+        # Per kind because the sweep is: a refusal of the sessions sweep must not
+        # overwrite what the snapshot sweep did, or the reverse.
+        state(1)
+        drive.rows = _archives(backup.KIND_SNAPSHOT, ["01", "02", "03"])
+        _prune(drive)
+        monkeypatch.setattr(
+            backup,
+            "_authorize_upload",
+            lambda *a, **k: (_ for _ in ()).throw(RuntimeError("S3 consent was withdrawn")),
+        )
+        drive.rows = _archives(backup.KIND_SESSIONS, ["01", "02"])
+        _prune(drive, backup.KIND_SESSIONS)
+        assert _last(backup.KIND_SNAPSHOT)["result"] == "successful"
+        assert _last(backup.KIND_SESSIONS)["result"] == "refused"
+
+    def test_a_state_write_failure_does_not_fail_the_sweep(self, drive, state, monkeypatch):
+        # Best-effort like the recorders beside it: the archive is already off-host, so
+        # nothing this write can fail at may turn a successful backup into a failed one.
+        state(1)
+        drive.rows = _archives(backup.KIND_SNAPSHOT, ["01", "02", "03"])
+
+        def _boom(*a: Any, **k: Any) -> None:
+            raise OSError("no space left on device")
+
+        monkeypatch.setattr(backup, "write_state", _boom)
+        out = _prune(drive)
+        assert out["retired"] == 2
+        assert len(drive.deleted) == 2
+        assert backup.retention_last_sweep(ACCOUNT) == {}
+
+    def test_a_corrupted_record_reads_as_nothing_and_the_next_sweep_repairs_it(self, drive, state):
+        # A polled endpoint must not raise on a hand-edited document.
+        state(1)
+        _write_account({backup.RETENTION_LAST_SWEEP_STATE_KEY: "not a map"})
+        assert backup.retention_last_sweep(ACCOUNT) == {}
+        _write_account({backup.RETENTION_LAST_SWEEP_STATE_KEY: {backup.KIND_SNAPSHOT: "nope"}})
+        assert backup.retention_last_sweep(ACCOUNT) == {}
+        _write_account({backup.RETENTION_LAST_SWEEP_STATE_KEY: "not a map"})
+        drive.rows = _archives(backup.KIND_SNAPSHOT, ["01", "02"])
+        _prune(drive)
+        assert _last()["result"] == "successful"
+
+    def test_the_reader_does_not_claim_a_console_renderer(self):
+        doc = backup.retention_last_sweep.__doc__ or ""
+        assert "NO console renderer" in doc

@@ -214,6 +214,7 @@ from kiro_crew.apps.builtins.aws_control.backend.backup_parts.nightly import (
 from kiro_crew.apps.builtins.aws_control.backend.backup_parts.retention import (
     _audit_retention,
     _prune_remote_archives,
+    _record_last_sweep,
 )
 from kiro_crew.apps.builtins.aws_control.backend.backup_parts.state import (
     _PUSH_TIMEOUT_SECS,
@@ -1757,27 +1758,34 @@ def run_sessions_backup(
                     account,
                     decline,
                 )
+                reason = f"retention declined: {decline}"
+                declined: dict[str, Any] = {
+                    "kind": KIND_SESSIONS,
+                    # "off" is reserved for "no count configured". The count may well be
+                    # set here; this run simply did not act on it, which `result` and
+                    # `error` say. Naming a number would claim a sweep that never ran.
+                    "keep": "declined",
+                    "live": 0,
+                    "retired": 0,
+                    "versions": 0,
+                    "unclaimed": 0,
+                    "unclaimedBytes": 0,
+                    "unrecorded": 0,
+                    "unrecordedBytes": 0,
+                    "skipped": reason,
+                }
                 _audit_retention(
                     account,
-                    {
-                        "kind": KIND_SESSIONS,
-                        # "off" is reserved for "no count configured". The count may well be
-                        # set here; this run simply did not act on it, which `result` and
-                        # `error` say. Naming a number would claim a sweep that never ran.
-                        "keep": "declined",
-                        "live": 0,
-                        "retired": 0,
-                        "versions": 0,
-                        "unclaimed": 0,
-                        "unclaimedBytes": 0,
-                        "unrecorded": 0,
-                        "unrecordedBytes": 0,
-                        "skipped": "",
-                    },
+                    declined,
                     caller=caller,
                     result="failed",
-                    error=f"retention declined: {decline}",
+                    error=reason,
                 )
+                # Published as well as audited, for the reason every ending inside the
+                # sweep is: without it the sessions row keeps serving whatever the last
+                # sweep that RAN said, so a decline repeated every night would read as
+                # the success before it.
+                _record_last_sweep(account, KIND_SESSIONS, declined, "failed")
             else:
                 _prune_remote_archives(
                     account,
@@ -2627,9 +2635,11 @@ if _typing.TYPE_CHECKING:
         _RETENTION_GATE,
         RETENTION_KEEP_MIN,
         RETENTION_KEEP_STATE_KEY,
+        RETENTION_LAST_SWEEP_STATE_KEY,
         RETENTION_UNCLAIMED_STATE_KEY,
         RETENTION_UNRECORDED_STATE_KEY,
         _audit_unfiled_authorization,
+        _authorization_ending,
         _clamp_retention_keep,
         _current_version_is_ours,
         _delete_under_the_retention_gate,
@@ -2641,6 +2651,7 @@ if _typing.TYPE_CHECKING:
         _RetentionAuthorizationWithdrawn,
         _RetentionCountWithdrawn,
         retention_keep,
+        retention_last_sweep,
         retention_unclaimed,
         retention_unrecorded,
         set_retention_keep,
