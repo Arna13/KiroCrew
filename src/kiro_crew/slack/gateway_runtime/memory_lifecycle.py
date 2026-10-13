@@ -61,6 +61,31 @@ def _initialize_memory_worker(self: GatewayOrchestrator) -> bool:
                     get_shared_embedder().prefetch()
                 except Exception:  # noqa: BLE001 -- a hint; recall makes the same attempt
                     logger.debug("Embedding model prefetch skipped", exc_info=True)
+            # Preparation walks every memory row through SQLite's B-tree, one
+            # page at a time out of file order; on a cold page cache that is
+            # a random read per page. Read the files front to back first, and
+            # then the knowledge library, whose first search reads every
+            # item's vector the same way (14.2 s on a 435 MB library, against
+            # 1.3 s in order). Started here, after readiness, so the read never
+            # competes with the boot path.
+            try:
+                from kiro_crew.page_cache import prefetch as _prefetch_pages
+
+                _knowledge = getattr(self.dashboard_state, "_knowledge_store", None)
+                _prefetch_pages(
+                    (
+                        getattr(self.vector_memory, "_db_path", None),
+                        (
+                            getattr(self.ctx_builder.memory, "_index_db", None)
+                            if self.ctx_builder is not None
+                            else None
+                        ),
+                        getattr(_knowledge, "_db_path", None),
+                    ),
+                    name="kc-memory-prefetch",
+                )
+            except Exception:  # noqa: BLE001 -- a hint only
+                logger.debug("Memory page prefetch skipped", exc_info=True)
             try:
                 assert self.ctx_builder is not None
                 memory = self.ctx_builder.memory
