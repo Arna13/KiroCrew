@@ -266,8 +266,13 @@ def rebuild_record(rec: dict[str, Any]) -> dict[str, Any] | None:
     if not _same(params, rec.get("params")):
         return None
     fields = derived_fields(kind, preview, context)
+    # ``risk`` is re-derived rather than compared: a build that reclassifies a
+    # setting would otherwise drop every authentic card on it, with its history
+    # and Undo, and the record then carries the risk this build derives.
     if any(
-        not _same(fields[k], rec.get(k)) for k in _DERIVED_KEYS if k != "widen" or "widen" in rec
+        not _same(fields[k], rec.get(k))
+        for k in _DERIVED_KEYS
+        if k != "risk" and (k != "widen" or "widen" in rec)
     ):
         return None
     if not _same(list(catalog.KINDS[kind].editable), rec.get("editable")):

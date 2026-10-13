@@ -49,6 +49,7 @@ from kiro_crew.config.sections import (
     DEFAULT_MODEL,
     MEMBER_APPROVAL_MODE_UNSET_EFFECTIVE,
     MEMBER_APPROVAL_MODES,
+    effective_pin_scope,
     normalize_agent_model,
 )
 
@@ -190,7 +191,6 @@ _CANNOT_WIDEN_SETTINGS: frozenset[str] = frozenset(
         "monitoring.prefer_structured_arming",
         "session.autocompact_pct",
         "session.compact_wait_secs",
-        "session.pool_agent",
         "session.pool_size",
         "session.pool_ttl_secs",
         "session.timeout_secs",
@@ -213,10 +213,14 @@ _CANNOT_WIDEN_SETTINGS: frozenset[str] = frozenset(
 #: ``agent.acp_backend`` picks the harness program every new session runs, and
 #: harnesses differ in how they are made to ask before a tool runs
 #: (``agent_sdk.backends.ACP_BACKEND_ROUTING``), so no fixed order fits it either.
+#: ``session.pool_agent`` names the agent spec warm-pool processes start with, and
+#: a session that names no agent claims one (``session_pool._claim_from_pool``),
+#: so it picks which tool grants that session runs under.
 _CODE_EXEC_SETTINGS: frozenset[str] = frozenset(
     {
         "agent.acp_backend",
         "dashboard.terminal.shell",
+        "session.pool_agent",
     }
 )
 
@@ -886,6 +890,10 @@ def _setting_risk(path: str, before: Any, after: Any) -> str:
     if path in _CODE_EXEC_SETTINGS:
         return RISK_CODE_EXEC
     order = _SETTING_ORDER.get(path)
+    if path == "dashboard.tailscale.pin_scope":
+        # The route takes any short string and the loader applies its
+        # normalised form, so rank the values the gateway will apply.
+        before, after = effective_pin_scope(before), effective_pin_scope(after)
     if order is not None and before in order and after in order:
         return _order_risk(order, before, after)
     segments = set(guide_catalog._SEGMENT_SPLIT.split(path.lower()))

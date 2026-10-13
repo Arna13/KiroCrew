@@ -938,11 +938,16 @@ so a capabilities card that both launches code and expands auto-approval reads `
 and still requires the acknowledgement; an old signed record missing the flag derives it
 from its capability impact. A setting whose value is a command this machine runs
 (`dashboard.terminal.shell`), or that picks the harness program every session runs
-(`agent.acp_backend`), is `code_exec` whatever its before/after. Every card-editable config
+(`agent.acp_backend`), or the agent spec a warm-pool session starts with
+(`session.pool_agent`), is `code_exec` whatever its before/after. Every card-editable config
 path (`_EDITABLE_CONFIG`) is in exactly one of `change_card_catalog._SETTING_ORDER` (values
 ordered tightest to widest, so a move toward the end is `widen`), `_CODE_EXEC_SETTINGS` or
 `_CANNOT_WIDEN_SETTINGS`, and `test/test_change_card_setting_classes.py` fails on a new path
-until it is placed in one. A reminder that runs once is a `schedule.create` card with `at` (a local
+until it is placed in one. `dashboard.tailscale.pin_scope`, which the route takes as any short string, is ranked on
+the value the loader applies (`config.sections.effective_pin_scope`: case, spaces,
+fallback to `node`). A stored card whose `risk` differs from the one its kind and params
+now derive, because a setting was reclassified, keeps loading with the newly derived
+`risk` rather than being dropped; every other derived field must still match. A reminder that runs once is a `schedule.create` card with `at` (a local
 ISO-8601 date-time, no offset) instead of `cron_expr`. `search_docs` searches and pages
 through `kiro_crew/docs/*.md` only, by the directory's own listing, and `find_ui` searches
 the packaged dashboard location index

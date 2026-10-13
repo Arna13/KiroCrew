@@ -6,9 +6,13 @@ so a setting that widens what an agent may do would ask for no acknowledgement.
 
 from __future__ import annotations
 
+import asyncio
+import json
+
 import pytest
 
 from kiro_crew import change_card_catalog as catalog
+from kiro_crew.dashboard.change_cards import CardStore
 from kiro_crew.dashboard.handlers.core import _EDITABLE_CONFIG
 
 _CLASSES = {
@@ -58,9 +62,55 @@ def test_ordered_values_are_values_the_route_accepts():
         ("knowledge.auto_add_documents", False, True, "widen"),
         ("knowledge.auto_add_documents", True, False, "tighten"),
         ("agent.acp_backend", "", "claude", "code_exec"),
+        ("session.pool_agent", "", "builder", "code_exec"),
         ("telemetry.enabled", False, True, "normal"),
     ],
 )
 def test_newly_classified_paths_read_their_class_on_the_card(path, before, after, risk):
     p = {"path": path, "value": after}
     assert catalog.build_preview("setting.change", p, {"value": before}, {})["risk"] == risk
+
+
+@pytest.mark.parametrize(
+    "before,after,risk",
+    [
+        ("node", "LOGIN", "widen"),
+        ("node", " login ", "widen"),
+        ("Login", "node", "tighten"),
+        ("", "login", "widen"),
+        ("bogus", "login", "widen"),
+        ("login", "bogus", "tighten"),
+        ("node", "NODE", "normal"),
+    ],
+)
+def test_pin_scope_ranks_the_value_the_loader_applies(before, after, risk):
+    p = {"path": "dashboard.tailscale.pin_scope", "value": after}
+    assert catalog.build_preview("setting.change", p, {"value": before}, {})["risk"] == risk
+
+
+def test_a_card_saved_under_an_older_risk_still_loads_with_the_new_one(tmp_path):
+    path = tmp_path / "change_cards.json"
+    store = CardStore(path)
+    params = {"path": "dashboard.tailscale.pin_scope", "value": "login"}
+    before = {"value": "node"}
+    rec = store.propose(
+        slot_key="chat-1",
+        session_key="sk-1",
+        kind="setting.change",
+        params=params,
+        reason="roam between devices",
+        preview=catalog.build_preview("setting.change", params, before, {}),
+        before=before,
+        context={},
+    )
+    asyncio.run(store.flush())
+    data = json.loads(path.read_text(encoding="utf-8"))
+    # What a build that had not classified pin_scope wrote, signed by this store.
+    old = {k: v for k, v in data["cards"][0].items() if k != "mac"}
+    old["risk"] = "normal"
+    data["cards"][0] = {**old, "mac": CardStore._mac(store._store_key(), old)}
+    path.write_text(json.dumps(data), encoding="utf-8")
+
+    again = CardStore(path)
+    asyncio.run(again.warm())
+    assert again.get(rec["id"])["risk"] == "widen"

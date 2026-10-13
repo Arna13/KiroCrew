@@ -2621,6 +2621,17 @@ class TailscaleConfig:
     )
 
 
+def effective_pin_scope(raw: object) -> str:
+    """The pin scope the loader applies for a stored *raw* value.
+
+    Case and surrounding space are ignored, an empty value is the default
+    ``node``, and anything else unrecognised falls back to ``node`` (the
+    narrower scope).
+    """
+    value = str(raw or "node").strip().lower()
+    return value if value in ("node", "login") else "node"
+
+
 def _tailscale_config_from(
     raw: object,
     degraded: set[str] | None = None,
@@ -2763,14 +2774,14 @@ def _tailscale_config_from(
         if isinstance(raw_logins, list)
         else section.default("allowed_logins")
     )
-    pin_scope = str(data.get("pin_scope") or section.default("pin_scope")).strip().lower()
-    if pin_scope not in ("node", "login"):
+    raw_pin_scope = str(data.get("pin_scope") or section.default("pin_scope")).strip().lower()
+    pin_scope = effective_pin_scope(raw_pin_scope)
+    if pin_scope != raw_pin_scope:
         logger.warning(
             "dashboard.tailscale.pin_scope %r is not recognised; falling back to "
             "'node' (the narrower scope)",
-            pin_scope,
+            raw_pin_scope,
         )
-        pin_scope = "node"
     if trust_identity and not allowed_logins:
         logger.error(
             "dashboard.tailscale.trust_identity is on but allowed_logins is "
