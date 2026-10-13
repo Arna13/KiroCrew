@@ -42,6 +42,7 @@ from kiro_crew.dashboard.token_auth import (
     _b64url_decode,
     required_peer_key_unverified,
 )
+from kiro_crew.frontmatter import SKILL_LOADER, parse_frontmatter
 from kiro_crew.history import TRANSCRIPT_HEADER_MAX_BYTES, memory_mode_from_header_line
 from kiro_crew.hooks import FileTooLargeError, safe_read_file_bytes_nolink
 from kiro_crew.loop_lock import LoopBoundLock
@@ -1944,21 +1945,11 @@ def _parse_skill_description(skill_md: Path) -> tuple[str, bool]:
             head = f.read(_KIRO_SKILL_FRONTMATTER_BYTES).decode("utf-8", errors="replace")
     except OSError:
         return "", False
-    if not head.startswith("---"):
-        return "", False
-    end = head.find("\n---", 3)
-    if end < 0:
-        return "", False
-    desc = ""
-    always = False
-    for line in head[3:end].splitlines():
-        line = line.strip()
-        if line.startswith("description:"):
-            desc = line.split(":", 1)[1].strip().strip('"').strip("'")
-        elif line.startswith("always:"):
-            val = line.split(":", 1)[1].strip().lower()
-            always = val == "true"
-    return desc, always
+    # The loader's own grammar: only a column-0 key is a field, so an indented
+    # ``description:`` inside a nested block (``inputs[].description``) never
+    # replaces the skill's own, and both readers agree on what a row says.
+    meta = parse_frontmatter(head, SKILL_LOADER)
+    return meta.get("description", ""), meta.get("always", "").strip().lower() == "true"
 
 
 def list_kiro_skills(project_dir: Path | None = None) -> list[dict[str, Any]]:
@@ -2219,7 +2210,110 @@ def collect_skills_blocking(
         workspace_rows.extend(project_rows)
     result.extend(workspace_rows)
     annotate_skills_with_agents(result)
-    return result
+    return _one_row_per_skill_file(result)
+
+
+def _skill_file_identity(row: dict[str, Any]) -> tuple[int, int] | None:
+    """The ``(st_dev, st_ino)`` of the SKILL.md a row lists, or ``None``.
+
+    An inode, not a path: ``/home/u`` and ``/local/home/u`` can be one bind
+    mount, so two spellings of the same file only compare equal this way.
+    Workspace rows return ``None``: they come from the confined no-follow
+    catalog and are gated on project consent, so they are never merged with
+    an operator-owned row. A row whose path is a directory (an edition row may
+    carry the skill dir) is compared by its ``SKILL.md``.
+    """
+    if row.get("source") == "kiro-workspace":
+        return None
+    raw = row.get("path") or ""
+    if not raw:
+        return None
+    try:
+        if os.path.isdir(raw):
+            raw = os.path.join(raw, "SKILL.md")
+        st = os.stat(raw)
+    except (OSError, ValueError):
+        return None
+    if not st.st_ino:
+        # Some filesystems (FAT/exFAT, certain network shares) report inode 0
+        # for every file; that identity cannot tell two files apart.
+        return None
+    return (st.st_dev, st.st_ino)
+
+
+def _row_is_editable(row: dict[str, Any]) -> bool:
+    """Whether the dashboard's Edit/Delete can write this row's file.
+
+    Only a Kiro Crew row under the skills dir the loader writes to: the write
+    handlers join the key onto that dir, so a row reached through
+    ``skills.extra_paths`` (``owned: False``) or any other source is read-only.
+    """
+    return row.get("source") == "kirocrew" and row.get("owned") is not False
+
+
+def _row_rank(row: dict[str, Any]) -> int:
+    """Which of two rows for one file to keep: lower wins, ties keep the first.
+
+    The editable row first. Then a row from the source that owns the file's
+    folder (``package``, ``kiro-user``): its key is the one the agent-skill
+    catalog keys that folder by, so a mapping saved from it resolves. A
+    ``kirocrew`` row reached through ``skills.extra_paths`` or an edition root
+    (``owned: False``) is last: nothing can edit it and that catalog does not
+    key it.
+    """
+    if _row_is_editable(row):
+        return 0
+    if row.get("source") == "kirocrew":
+        return 2
+    return 1
+
+
+def _one_row_per_skill_file(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Collapse rows that list the same SKILL.md into one row.
+
+    Two sources can reach one file -- ``skills.extra_paths`` naming
+    ``~/.kiro/skills`` lists it as a Kiro Crew row AND ``list_kiro_skills``
+    lists it as ``kiro-user`` -- and the browser showed both. :func:`_row_rank`
+    picks the row kept. ``loaded_by_agents`` is the union, so an agent-scoped listing
+    still finds the skill through whichever spelling its glob matched, and the
+    dropped keys ride along as ``aliases`` for readers that look a row up by key.
+    """
+    out: list[dict[str, Any]] = []
+    seen: dict[tuple[int, int], int] = {}
+    for row in rows:
+        ident = _skill_file_identity(row)
+        if ident is None:
+            out.append(row)
+            continue
+        idx = seen.get(ident)
+        if idx is None:
+            seen[ident] = len(out)
+            out.append(row)
+            continue
+        kept = out[idx]
+        if _row_rank(row) < _row_rank(kept):
+            kept, row = row, kept
+            out[idx] = kept
+        agents = list(kept.get("loaded_by_agents") or [])
+        for name in row.get("loaded_by_agents") or []:
+            if name not in agents:
+                agents.append(name)
+        kept["loaded_by_agents"] = agents
+        # The dropped row's key stays resolvable: an agent's skill:// mapping
+        # inverts to whichever key the catalog walk meets first (``kiro-user/``
+        # leads), which can be the key of the row dropped here.
+        aliases = list(kept.get("aliases") or [])
+        for key in [row.get("key"), *(row.get("aliases") or [])]:
+            if key and key != kept.get("key") and key not in aliases:
+                aliases.append(key)
+        kept["aliases"] = aliases
+        # Usage, size and the injection mode come only from the loader's read,
+        # so a kept row from another source would otherwise show the skill as
+        # never used, sizeless and "on demand" even when it is pointer-only.
+        for field in ("deliveries", "last_used_at", "size_bytes", "inject_on_trigger"):
+            if kept.get(field) is None and row.get(field) is not None:
+                kept[field] = row[field]
+    return out
 
 
 def _warn_skills_outside_roots(package_skills: list[dict[str, Any]]) -> None:
