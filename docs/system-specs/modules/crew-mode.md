@@ -624,6 +624,37 @@ itself (`parent_missing`, `foreign_private_copy`, `private_template_shadowed`,
 `source_unreadable`) can arrive with no draft at all, so it keeps the load
 notice.
 
+The GET, preview and PUT views carry `backend_warning`: `null`, or
+`{code, backend, setting}` when a member chat on the backend that setting
+resolves to would refuse the saved (or previewed) spec. Two settings are read,
+as `members.select_provider_backend` resolves them: `agent.member_acp_backend`
+(member DMs) first, then `agent.acp_backend` (the member's Slack threads, cron
+jobs and spawned sessions, which reach the same gate through
+`resolve_crew_identity`). A spawn with an explicit backend override is chosen
+per call and is not covered.
+`harness_unsupported` means the backend is outside
+`ACP_BACKENDS_MEMBER_CAPABILITIES`; `tool_limits_unsupported` means the spec
+turns off single MCP tools (`servers` lists them) and the backend is outside
+`ACP_BACKENDS_MEMBER_TOOL_LIMITS`; `servers` is present whenever the spec has
+such servers, a harness refusal included. `member_backend_gap` is the rule, read from
+the same sets as the chat-start refusals, and `tool_limited_servers` is the one
+definition `prepare_member_capabilities` also uses. It is a warning only: the
+save still lands, because the settings can change afterwards, and the copy says
+so first. An unenrolled member gets none, since chat start gates only a saved
+spec. The pane shows it on the Review section and on the saved state, in three
+forms. `harness_unsupported` on `agent.member_acp_backend` shows the
+`config set agent.member_acp_backend kas` command on its own line with a copy
+button, since no dashboard page edits that setting and kas (the member default)
+loads saved capabilities, plus a second step to clear `servers` when present,
+since kas would refuse those next. It never suggests the Kiro backend, which
+takes member dispatch away. `harness_unsupported` on `agent.acp_backend` names
+the affected entry points (Slack threads, scheduled jobs, spawned tasks), says
+member chats are unaffected, and offers no one-line switch, because that setting
+moves every session. `tool_limits_unsupported` names the same entry points when
+its setting is `agent.acp_backend`, and in both forms carries a button that opens
+the MCP Servers tab of the same pane. Every form opens "Saving works", which is
+true on the Review section and on the saved state alike.
+
 Enrollment is explicit. Shared members follow their selected Parent; a legacy
 private snapshot starts with every existing row local and every absent Parent
 row removed. Restoring one row leaves all other overrides intact. MCP transport
