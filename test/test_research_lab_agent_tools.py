@@ -65,23 +65,23 @@ SESSION = f"dashboard:{SLOT}"
 
 
 @pytest.fixture(autouse=True)
-def _isolated_lab(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+def _isolated_lab(tmp_path: Path, _floor_monkeypatch: pytest.MonkeyPatch) -> Path:
     """The campaign DB and research dir live in this test's tmp tree."""
-    monkeypatch.setattr(storage, "DB_PATH", tmp_path / "campaigns.db")
-    monkeypatch.setattr(storage, "RESEARCH_DIR", tmp_path / "research")
+    _floor_monkeypatch.setattr(storage, "DB_PATH", tmp_path / "campaigns.db")
+    _floor_monkeypatch.setattr(storage, "RESEARCH_DIR", tmp_path / "research")
     return tmp_path
 
 
 @pytest.fixture(autouse=True)
-def _nothing_launches(monkeypatch: pytest.MonkeyPatch) -> None:
+def _nothing_launches(_floor_monkeypatch: pytest.MonkeyPatch) -> None:
     """Any launch of a research worker or workflow fails the test that caused it."""
 
     async def _forbidden(*_a: Any, **_k: Any) -> None:
         raise AssertionError("a Research Lab campaign was started")
 
-    monkeypatch.setattr(agent_mode, "_launch_loop", _forbidden)
-    monkeypatch.setattr(agent_mode, "_prepare_loop_launch", _forbidden)
-    monkeypatch.setattr(workflow_mode, "_launch_workflow", _forbidden)
+    _floor_monkeypatch.setattr(agent_mode, "_launch_loop", _forbidden)
+    _floor_monkeypatch.setattr(agent_mode, "_prepare_loop_launch", _forbidden)
+    _floor_monkeypatch.setattr(workflow_mode, "_launch_workflow", _forbidden)
 
 
 def _pin_setting(monkeypatch: pytest.MonkeyPatch, *, on: bool) -> None:

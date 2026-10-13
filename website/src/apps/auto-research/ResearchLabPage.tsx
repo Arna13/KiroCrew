@@ -1,6 +1,7 @@
 import { useState, useEffect, useReducer, useRef } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { FlaskConical, Play, Pause, Square, MessageCircle, ChevronDown, ChevronRight, Sparkles, ThumbsUp, ArrowRight, HelpCircle, XCircle, CheckCircle, AlertTriangle, Info, Lock, X, Trash2, GitFork, Flame, BookOpen, FileText, RefreshCw, ExternalLink, Loader2 } from 'lucide-react'
+import { FlaskConical, Play, Pause, Square, MessageCircle, ChevronDown, ChevronRight, Sparkles, ThumbsUp, ArrowRight, HelpCircle, XCircle, CheckCircle, AlertTriangle, Info, Lock, X, Trash2, GitFork, Flame, BookOpen, FileText, RefreshCw, ExternalLink, Loader2, Bot } from 'lucide-react'
+import { useSearchParams } from 'react-router-dom'
 import { api } from '../../api/client'
 import Clickable from '../../components/Clickable'
 import Modal from '../../components/Modal'
@@ -21,8 +22,18 @@ import { copyToClipboard } from '../../utils/clipboard'
  *  swallowed. */
 const errMsg = (e: unknown): string => (e instanceof Error && e.message ? e.message : String(e))
 const ACTIVE_STATUSES = ['running', 'paused', 'stagnant', 'needs_input']
+/** Campaign ids are 8 lowercase hex characters; a `?campaign=` value that is not
+ *  one is ignored rather than fetched. */
+const CAMPAIGN_ID_RE = /^[a-f0-9]{8}$/
 
-interface Campaign { id: string; name: string; question: string; sub_questions: string; sources: string; max_cycles: number; idle_secs: number; status: string; total_cycles: number; findings?: Finding[]; error_message?: string; pending_question?: string; parent_id?: string; parallel_workers?: number; model?: string; model_withheld?: boolean | null; served_model?: string }
+/** Marks a campaign a chat agent filed (`created_by: 'agent'`). It was created
+ *  not started, so the person reviewing it here is the one who starts it. */
+function AgentFiledBadge({ c }: { c: Pick<Campaign, 'created_by'> }) {
+  if (c.created_by !== 'agent') return null
+  return <span className="text-[10px] font-medium text-info bg-bg-elevated rounded px-1 py-0.5 mr-1 inline-flex items-center gap-0.5 align-middle"><Bot size={10} aria-hidden="true" /> {i18nT('apps.autoResearch.researchLabPage.created_by_agent')}</span>
+}
+
+interface Campaign { id: string; name: string; question: string; sub_questions: string; sources: string; max_cycles: number; idle_secs: number; status: string; total_cycles: number; findings?: Finding[]; error_message?: string; pending_question?: string; parent_id?: string; parallel_workers?: number; model?: string; model_withheld?: boolean | null; served_model?: string; created_by?: string | null }
 interface Finding { cycle: number; summary: string; sources_checked: string[]; sources_empty: string[]; new_findings_count: number; evidence_strength: string; key_insight: string; verification?: { passed: boolean; detail?: string } }
 interface Validation { can_start: boolean; errors: string[]; warnings: string[]; estimated_cycles: number; estimated_duration_min: number }
 
@@ -684,6 +695,7 @@ function CampaignDetail({ id, onBack, onFork, onOpen }: { id: string; onBack: ()
     <div className="flex items-center gap-3 mb-4">
       <button className="text-sm text-accent" onClick={onBack}>{i18nT('apps.autoResearch.researchLabPage.back')}</button>
       <h2 className="text-lg font-semibold">{campaign.name}</h2>
+      <AgentFiledBadge c={campaign} />
       <span className="text-xs px-2 py-0.5 rounded bg-bg-elevated">{campaign.status}</span>
       <button className="text-xs px-2 py-1 rounded bg-bg-elevated text-danger ml-auto" onClick={() => { deleteMut.reset(); setConfirmDelete(true) }}><Trash2 size={12} className="inline" /> {i18nT('apps.autoResearch.researchLabPage.delete')}</button>
     </div>
@@ -723,6 +735,10 @@ function CampaignDetail({ id, onBack, onFork, onOpen }: { id: string; onBack: ()
     </div>
     {/* Pause / resume / stop act on the persisted campaign — nothing on screen is
         a draft, so a refused action offers the hand-off. */}
+    {campaign.status === 'ready' && <div className="p-3 rounded-md mb-4 border border-border bg-card flex flex-wrap items-center gap-2">
+      <div className="text-sm flex-1 min-w-0">{i18nT('apps.autoResearch.researchLabPage.ready_not_started_hint')}</div>
+      <button className="text-xs px-2 py-1 rounded bg-accent text-accent-fg disabled:opacity-50" disabled={actionMut.isPending} onClick={() => actionMut.mutate('start')}><Play size={12} className="inline" aria-hidden="true" /> {actionMut.isPending ? i18nT('apps.autoResearch.researchLabPage.starting') : i18nT('apps.autoResearch.researchLabPage.start_campaign')}</button>
+    </div>}
     <ModelWithheldNotice c={campaign} className="mb-4" />
     {actionMut.isError && <ErrorNotice message={errMsg(actionMut.error)} askAgent className="mb-4" />}
     {campaign.status === 'stagnant' && <div className="p-3 rounded-md mb-4 border border-warn bg-warn/10">
@@ -787,14 +803,22 @@ function CampaignDetail({ id, onBack, onFork, onOpen }: { id: string; onBack: ()
         {reportData?.report ? <ReportSections report={reportData.report} /> : <div className="text-sm text-muted">{i18nT('apps.autoResearch.researchLabPage.no_report_yet')}</div>}
       </div>}
       {sorted.filter(f => f.new_findings_count > 0 || f.cycle === 1).map(f => <FindingCard key={f.cycle} f={f} />)}
-      {findings.length === 0 && <div className="text-sm text-muted">{i18nT('apps.autoResearch.researchLabPage.first_cycle_in_progress')}</div>}
+      {findings.length === 0 && campaign.status !== 'ready' && <div className="text-sm text-muted">{i18nT('apps.autoResearch.researchLabPage.first_cycle_in_progress')}</div>}
     </div>
   </div>
 }
 
 export default function ResearchLabPage() {
-  const [view, setView] = useState<'list' | 'wizard' | 'detail' | 'fork'>('list')
-  const [selectedId, setSelectedId] = useState<string | null>(null)
+  // `?campaign=<id>` opens that campaign: the link a chat agent hands the user
+  // after filing one, so the user lands on the campaign they are asked to review.
+  const [searchParams] = useSearchParams()
+  const linkedParam = searchParams.get('campaign')
+  const linkedId = linkedParam && CAMPAIGN_ID_RE.test(linkedParam) ? linkedParam : null
+  const [view, setView] = useState<'list' | 'wizard' | 'detail' | 'fork'>(linkedId ? 'detail' : 'list')
+  const [selectedId, setSelectedId] = useState<string | null>(linkedId)
+  useEffect(() => {
+    if (linkedId) { setSelectedId(linkedId); setView('detail') }
+  }, [linkedId])
   const [forkParentId, setForkParentId] = useState<string | null>(null)
   const qc = useQueryClient()
   const { data: campaigns = [], isLoading } = useQuery<Campaign[]>({
@@ -829,7 +853,7 @@ export default function ResearchLabPage() {
         <Clickable className="border border-border rounded-md p-3 bg-card" onClick={() => { setSelectedId(active.id); setView('detail') }}>
           <div className="flex items-start gap-2">
             <StateBadge status={active.status} />
-            <div className="font-medium text-sm line-clamp-2 flex-1" title={active.question}>{active.parent_id && <span className="text-[10px] font-medium text-accent bg-accent-subtle rounded px-1 py-0.5 mr-1 inline-flex items-center gap-0.5 align-middle"><GitFork size={10} /> {i18nT('apps.autoResearch.researchLabPage.forked')}</span>}{active.question}</div>
+            <div className="font-medium text-sm line-clamp-2 flex-1" title={active.question}><AgentFiledBadge c={active} />{active.parent_id && <span className="text-[10px] font-medium text-accent bg-accent-subtle rounded px-1 py-0.5 mr-1 inline-flex items-center gap-0.5 align-middle"><GitFork size={10} /> {i18nT('apps.autoResearch.researchLabPage.forked')}</span>}{active.question}</div>
           </div>
           <div className="text-xs text-muted mt-1 flex flex-wrap gap-x-3"><span>{i18nT('apps.autoResearch.researchLabPage.cycle')} {active.total_cycles}/{active.max_cycles}</span><ModelLine c={active} /></div>
           <ModelWithheldNotice c={active} className="mt-2" />
@@ -840,7 +864,7 @@ export default function ResearchLabPage() {
           <Clickable key={c.id} className="border border-border rounded-md p-3 bg-card mb-2" onClick={() => { setSelectedId(c.id); setView('detail') }}>
             <div className="flex items-start gap-2">
               <StateBadge status={c.status} />
-              <div className="text-sm line-clamp-2 flex-1" title={c.question}>{c.parent_id && <span className="text-[10px] font-medium text-accent bg-accent-subtle rounded px-1 py-0.5 mr-1 inline-flex items-center gap-0.5 align-middle"><GitFork size={10} /> {i18nT('apps.autoResearch.researchLabPage.forked')}</span>}{c.question}</div>
+              <div className="text-sm line-clamp-2 flex-1" title={c.question}><AgentFiledBadge c={c} />{c.parent_id && <span className="text-[10px] font-medium text-accent bg-accent-subtle rounded px-1 py-0.5 mr-1 inline-flex items-center gap-0.5 align-middle"><GitFork size={10} /> {i18nT('apps.autoResearch.researchLabPage.forked')}</span>}{c.question}</div>
             </div>
             <div className="text-xs text-muted mt-1 flex flex-wrap gap-x-3"><span>{c.total_cycles} {i18nT('apps.autoResearch.researchLabPage.cycles_2')}</span><ModelLine c={c} /></div>
           </Clickable>

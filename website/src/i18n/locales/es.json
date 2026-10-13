@@ -539,6 +539,8 @@
         "model_fork_hint": "El mismo modelo que la campaña original. Elige otro para cambiarlo.",
         "model_withheld_notice": "{{requested}} no está disponible ahora mismo — esta campaña se está ejecutando con {{actual}}. Tu elección de modelo se conserva y se volverá a usar cuando esté disponible.",
         "model_withheld_notice_default": "{{requested}} no está disponible ahora mismo — esta campaña se está ejecutando con el modelo predeterminado. Tu elección de modelo se conserva y se volverá a usar cuando esté disponible.",
+        "created_by_agent": "Creada por un agente",
+        "ready_not_started_hint": "Todavía no se ha iniciado. Revisa la pregunta y luego inicia la campaña cuando estés listo.",
         "moderate": "Moderado",
         "new_campaign": "Nueva campaña",
         "new_campaign_2": "+ Nueva campaña",

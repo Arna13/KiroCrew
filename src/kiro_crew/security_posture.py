@@ -2436,6 +2436,10 @@ NON_EGRESS_REDACTION_MODULES: frozenset[str] = frozenset(
         "apps/builtins/auto_research/campaign/storage.py",
         "apps/builtins/auto_research/campaign/untrusted.py",
         "apps/builtins/auto_research/campaign/workflow_mode.py",
+        # The agent routes behind the Research Lab MCP tools redact the campaign
+        # name and status they hand back; the same app-owned surface as handlers.py,
+        # answering a local MCP server rather than a new audience.
+        "apps/builtins/auto_research/agent_api.py",
         "apps/builtins/code_review_sage/sage_lib/learning.py",
         "apps/builtins/code_review_sage/sage_lib/pipeline.py",
         "apps/builtins/code_review_sage/sage_lib/report.py",

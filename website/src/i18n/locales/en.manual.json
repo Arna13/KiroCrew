@@ -371,6 +371,8 @@
         "model_fork_hint": "Same model as the original campaign. Pick another to change it.",
         "model_withheld_notice": "{{requested}} isn't offered right now — this campaign is running on {{actual}} instead. Your model choice is kept and is used again once it's offered.",
         "model_withheld_notice_default": "{{requested}} isn't offered right now — this campaign is running on the default model instead. Your model choice is kept and is used again once it's offered.",
+        "created_by_agent": "Created by an agent",
+        "ready_not_started_hint": "Not started yet. Review the question, then start the campaign when you're ready.",
         "one_campaign_at_a_time": "One campaign at a time",
         "regenerate": "Regenerate",
         "regenerating": "Regenerating…",

@@ -2252,9 +2252,11 @@ answers `tools/list` from):
   `workflow_cancel`, `workflow_rerun_subtree`, `register_hook`
 - **App bridges:** `issue_radar_record_investigation`,
   `ops_mission_control_api`, `design_tweak_update_thread`, `pod_up`, `pod_down`,
-  `pod_status`, `pod_ls`, `issue_radar_crew_read`, `issue_radar_crew_record`.
+  `pod_status`, `pod_ls`, `issue_radar_crew_read`, `issue_radar_crew_record`,
+  `research_lab_create_campaign`, `research_lab_campaign_status`.
   Listed only while the app each one reaches is enabled — see § An app's tools
-  follow the app's enablement below.
+  follow the app's enablement below. The two Research Lab tools also need
+  `research_lab.agent_create_campaigns`, off by default.
 - **Browser:** `browser`
 - **Diagnostics:** `resource_status`, `kiro_cli_logs` — a redacted tail of kiro-cli's own mcp/lsp protocol logs, so
   the agent can self-diagnose a rejected turn. Reads log files only: never the
@@ -2291,6 +2293,17 @@ answers `tools/list` from):
   applies it. `status` is restricted to `done` (forward progress only — no
   clear/dismiss), and the gateway admits only that one path for internal-secret
   callers, never the app's state-mutating routes
+  `research_lab_create_campaign` / `research_lab_campaign_status` — the Research
+  Lab pair. The agent offers a campaign and, once the user agrees, files it NOT
+  started (`ready`, marked `created_by = 'agent'`); the user reviews it in the
+  Research Lab and presses Start. Each tool reaches one dedicated gateway route
+  (`POST /api/apps/auto-research/agent/create-campaign`,
+  `GET /api/apps/auto-research/agent/campaign-status`), and those two leaf paths
+  are the only Research Lab routes in the strict internal-path table: start,
+  pause, stop, nudge, add-question and delete stay dashboard-only. The routes act
+  for the calling session's own attested `X-Session-Key`, file a campaign only
+  from a turn the person sent in a dashboard tab, and answer 404 while
+  `research_lab.agent_create_campaigns` is off
 
 ### A `kirocrew-core` tool has two halves
 
@@ -2322,11 +2335,13 @@ is switched off.
 
 ### An app's tools follow the app's enablement
 
-The nine `apps`-domain tools each reach one built-in app — Issue Radar
+The eleven `apps`-domain tools each reach one built-in app — Issue Radar
 (`issue_radar_record_investigation`, `issue_radar_crew_read`,
 `issue_radar_crew_record`), Dev Fleet (`pod_up`, `pod_down`, `pod_status`,
-`pod_ls`), Ops Mission Control (`ops_mission_control_api`) and Design Tweak
-(`design_tweak_update_thread`) — through gateway routes that refuse the call with
+`pod_ls`), Ops Mission Control (`ops_mission_control_api`), Design Tweak
+(`design_tweak_update_thread`) and the Research Lab
+(`research_lab_create_campaign`, `research_lab_campaign_status`) — through
+gateway routes that refuse the call with
 HTTP 403 while the app is disabled, on `kiro_crew.apps.manager`'s read of the
 app's `installed.json`. The refusal body differs per app — Dev Fleet's routes and
 the app reverse proxy Design Tweak sits behind (`handle_app_api_proxy`) name it
@@ -2355,7 +2370,7 @@ process reads the data home directly here as it already does for the computer-us
 keystone, the skills tree and the knowledge store; the sandbox masks specific app
 data leaves, not `apps/<name>/installed.json`.
 
-Four details of the shape:
+Four details of the shape, plus one that applies to the Research Lab alone:
 
 - **Hiding is a product decision, not an enforcement point.** The route stays
   the gate, as it does for the computer-use tools (`mcp_computer._list_tools`
@@ -2390,6 +2405,15 @@ Four details of the shape:
   name in the discovery inventory (rendered under the "Declared" badge). The
   stdio server that answers a model's `tools/list` takes the full build, so the
   gate applies where the listing is observed.
+- **The Research Lab tools need a second switch.** Enabling the Research Lab
+  gives the dashboard user the Lab, not chat agents a way into it, so
+  `advertised()` also hides `research_lab_create_campaign` and
+  `research_lab_campaign_status` unless `research_lab.agent_create_campaigns` is
+  on (off by default). This read fails CLOSED, the opposite of the app read
+  above: the app gate hides a tool whose call would only be refused, while this
+  key is the opt-in itself, so an unreadable config keeps the listing what it is
+  without the opt-in. The gateway routes read the same key and answer 404 while
+  it is off.
 
 Handlers reach the server's shared plumbing — `_post`/`_get`, the identity
 resolvers, the governance vets — as **attributes of `mcp_core`**, not as direct

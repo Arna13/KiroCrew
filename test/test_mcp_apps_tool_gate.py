@@ -54,13 +54,13 @@ ALL_APP_TOOLS = (
 
 
 @pytest.fixture(autouse=True)
-def _research_lab_agent_tools_opted_in(monkeypatch: pytest.MonkeyPatch) -> None:
+def _research_lab_agent_tools_opted_in(_floor_monkeypatch: pytest.MonkeyPatch) -> None:
     """The Research Lab's own switch ON, so every test here measures the app gate."""
     from kiro_crew.config.loader import KiroCrewConfig
     from kiro_crew.config.sections import ResearchLabConfig
 
     pinned = KiroCrewConfig(research_lab=ResearchLabConfig(agent_create_campaigns=True))
-    monkeypatch.setattr(KiroCrewConfig, "load", classmethod(lambda cls: pinned))
+    _floor_monkeypatch.setattr(KiroCrewConfig, "load", classmethod(lambda cls: pinned))
 
 
 def _write_installed(name: str, *, enabled: bool) -> Path:
