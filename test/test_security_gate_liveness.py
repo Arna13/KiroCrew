@@ -262,7 +262,14 @@ def _url_payload_command(n: int) -> str:
 #: MCP server) parses a large hosts file in the call instead of refusing as
 #: pending with no retry coming. One branch, reusing ``atomic_write.on_event_loop``,
 #: and the docstring and comment naming it; the on-loop path is unchanged.
-_PACKAGE_LINE_BUDGET = 28_872
+#:
+#: Raised again, from 28,872, for ``redaction``'s optional native pre-filter: the
+#: loader that accepts ``kc_native`` only when its fingerprint matches the Python
+#: gate, the fingerprint itself, a debug line when a build's fingerprint does not
+#: match, and the dispatcher that falls back to the Python
+#: gate (kept verbatim as ``_might_contain_credential_py``) on a missing, stale,
+#: disabled or failing module. No pattern moved and no pass changed.
+_PACKAGE_LINE_BUDGET = 28_938
 
 #: Ceiling on any ONE file in the package. This is what the bound is really for --
 #: a package total says nothing about a single file growing back into a second
