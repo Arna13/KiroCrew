@@ -98,6 +98,7 @@ from kiro_crew.dashboard.messaging_api import wecom_settings as _owner_wecom_set
 from kiro_crew.dashboard.messaging_api.channel_delivery import (  # noqa: F401
     _channel_delivery_key,
     _ChannelSendFailed,
+    _cron_job_for,
     _deliver_channel_dm,
     _deliver_to_channel,
     _owner_dm_target,
@@ -135,9 +136,11 @@ from kiro_crew.dashboard.messaging_api.notifications import (  # noqa: F401
 )
 from kiro_crew.dashboard.messaging_api.proactive_send import (  # noqa: F401
     _SLACK_ERRORS_WITH_UNKNOWN_OUTCOME,
+    _SOURCE_NAME_MAX,
     _audit_send_message,
     _deliver_send_message_fallback,
     _post_send_message_to_slack,
+    _proactive_source_line,
     _read_send_message,
     _redact_all,
     _resolve_session_link_url,
@@ -149,6 +152,7 @@ from kiro_crew.dashboard.messaging_api.proactive_send import (  # noqa: F401
     _session_link_blocks,
     _slack_rate_limited,
     _slack_rejected_outright,
+    _with_source_line,
     api_delete_message,
     api_update_message,
 )

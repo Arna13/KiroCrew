@@ -1105,6 +1105,19 @@ destination from the transport's own `configured_targets()` through
 `_deliver_channel_dm` — which is what makes it the route for a proactive notice
 raised somewhere other than the channel itself.
 
+**A proactive channel send names its sender.** Every session and cron can reach
+the same owner DM, so `_deliver_send_message_fallback` ends the text with one line,
+`Sent by cron: <job name>` or `Sent by chat: <chat title>`
+(`proactive_send._proactive_source_line`). The sender comes from the identities the
+legs already trust: a cron's validated `caller_session` names its job (the job id
+when the job is gone), and any other caller is the attested `X-Session-Key`, named
+by its dashboard title (the slot key while untitled). The name is one line, redacted
+and capped at `_SOURCE_NAME_MAX` characters. The `session="<channel>"` leg always
+carries the line; the `channel_type` leg carries it only for a cron, because a chat
+sending into its own conversation is that conversation talking, like a reply. A
+channel-born or unknown caller gets no line, and Slack sends, configured-target
+sends and mirrored replies are unchanged.
+
 **One roster, three views.** The channels a proactive send may name are derived
 ONCE, as `constants.CHANNEL_SEND_NAMESPACES` — `CHANNEL_SESSION_NAMESPACES` minus
 `slack` (its own client, spelled `session="slack"`) and `unified` (a session-key
