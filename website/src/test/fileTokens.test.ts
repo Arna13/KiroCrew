@@ -826,6 +826,89 @@ describe('restoreQueuedContent: inline mention markers (#14617)', () => {
     expect(prepareSendPayload(r.text, r.files).txt).toBe(txt)
   })
 
+  it('widens the suffix past a same-named file the destination composer already stages', () => {
+    // The restore merges into a composer that may already hold `x/a.txt`
+    // (an earlier cancel, a pick). `@a.txt` would then bind to whichever
+    // file the next send meets first, so the mention takes `y/a.txt`.
+    const { txt, filePaths } = prepareSendPayload('against @y/a.txt', ['/repo/y/a.txt'])
+    const r = restoreQueuedContent(txt, filePaths, ['/repo/x/a.txt'])
+    expect(r.text).toBe('against @y/a.txt')
+    expect(r.files).toEqual(['/repo/y/a.txt'])
+    const merged = prepareSendPayload(`compare @a.txt\n\n${r.text}`, ['/repo/x/a.txt', ...r.files]).txt
+    expect(merged).toBe('compare [attached_file 1] /repo/x/a.txt\n\nagainst [attached_file 2] /repo/y/a.txt')
+  })
+
+  it('leaves the marker verbatim when every suffix of its path is staged elsewhere', () => {
+    // `/srv/repo/a.txt` already ends in every suffix `/repo/a.txt` has, so
+    // no mention could be told apart from it; the marker stays as sent.
+    const { txt, filePaths } = prepareSendPayload('read @a.txt now', ['/repo/a.txt'])
+    const r = restoreQueuedContent(txt, filePaths, ['/srv/repo/a.txt'])
+    expect(r.text).toBe(txt)
+    expect(r.files).toEqual([])
+    expect(r.aliases).toBeUndefined()
+  })
+
+  it('refuses a suffix a staged sibling extends with consumable punctuation, either way round', () => {
+    // With `report,` staged, a restored `@report, please` reads as THAT
+    // file's mention on send and the reconciliation unstages `report`.
+    const shorter = prepareSendPayload('check @report, please', ['/repo/report'])
+    const r1 = restoreQueuedContent(shorter.txt, shorter.filePaths, ['/repo/report,'])
+    expect(r1.text).toBe(shorter.txt)
+    expect(r1.files).toEqual([])
+    const longer = prepareSendPayload('check @report, please', ['/repo/report,'])
+    const r2 = restoreQueuedContent(longer.txt, longer.filePaths, ['/repo/report'])
+    expect(r2.text).toBe(longer.txt)
+    expect(r2.files).toEqual([])
+  })
+
+  it('a sibling that extends the name with ordinary filename characters does not block the short spelling', () => {
+    // `main.tsx` cannot be read as `@main.ts` plus punctuation.
+    const { txt, filePaths } = prepareSendPayload('fix @main.ts, then test', ['/repo/main.ts'])
+    const r = restoreQueuedContent(txt, filePaths, ['/repo/main.tsx'])
+    expect(r.text).toBe('fix @main.ts, then test')
+    expect(r.files).toEqual(['/repo/main.ts'])
+  })
+
+  it('a file the destination already stages under the same path keeps the short spelling', () => {
+    const { txt, filePaths } = prepareSendPayload('read @a.txt now', ['/repo/a.txt'])
+    const r = restoreQueuedContent(txt, filePaths, ['/repo/a.txt'])
+    expect(r.text).toBe('read @a.txt now')
+    expect(r.files).toEqual(['/repo/a.txt'])
+  })
+
+  it('spells a file under the project relative to it, the spelling the composer revives a chip for', () => {
+    // The composer brings a deleted chip back on undo only when the mention
+    // reads as the path relative to the project, so `@a.ts` for a file at
+    // src/a.ts there would lose the file on the next send after an undo.
+    const p = '/repo/main/src/a.ts'
+    const { txt, filePaths } = prepareSendPayload('check @src/a.ts, please', [p])
+    for (const project of ['/repo/main', '/repo/main/']) {
+      const r = restoreQueuedContent(txt, filePaths, undefined, project)
+      expect(r.text).toBe('check @src/a.ts, please')
+      expect(r.files).toEqual([p])
+      expect(r.aliases).toEqual({ [p]: ['@src/a.ts'] })
+    }
+  })
+
+  it('a project-relative spelling another staged file shares falls back to the shortest that does not', () => {
+    const p = '/repo/main/src/a.ts'
+    const { txt, filePaths } = prepareSendPayload('check @src/a.ts now', [p])
+    const r = restoreQueuedContent(txt, filePaths, ['/repo/other/src/a.ts'], '/repo/main')
+    expect(r.text).toBe('check @main/src/a.ts now')
+    expect(r.files).toEqual([p])
+  })
+
+  it('a file outside the project, or no project, keeps the shortest spelling', () => {
+    const p = '/tmp/notes/a.ts'
+    const { txt, filePaths } = prepareSendPayload('check @a.ts now', [p])
+    expect(restoreQueuedContent(txt, filePaths, undefined, '/repo/main').text).toBe('check @a.ts now')
+    // A sibling directory whose name only starts with the project's is not under it.
+    const q = '/repo/main2/src/a.ts'
+    const sib = prepareSendPayload('check @a.ts now', [q])
+    expect(restoreQueuedContent(sib.txt, sib.filePaths, undefined, '/repo/main').text).toBe('check @a.ts now')
+    expect(restoreQueuedContent(sib.txt, sib.filePaths).text).toBe('check @a.ts now')
+  })
+
   it('restores an inline mention beside a bare upload and a pasted image', () => {
     const staged = ['/tmp/shot.png', '/repo/a.txt', '/repo/b.log']
     const { txt, r } = cancelAfterReload('look at @a.txt, then the log', staged)

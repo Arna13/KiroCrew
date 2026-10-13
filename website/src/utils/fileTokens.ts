@@ -258,6 +258,19 @@ function pathSuffixes(p: string): string[] {
   return segs.slice(1).map((_, i) => segs.slice(i + 1).join('/'))
 }
 
+/** `p` relative to the project root `project`, or undefined when `p` is not
+ *  under it. The same strip `makeRelative` (FilePickerMenu) applies to the
+ *  normalized project root, which is the spelling the picker inserts and the
+ *  only one the composer revives a chip for after its mention is deleted and
+ *  brought back (undo). Kept here rather than imported so this module stays
+ *  free of component imports. */
+function projectRelative(p: string, project?: string): string | undefined {
+  if (!project) return undefined
+  const root = normalizeWindowsPath(project)
+  const r = /[/\\]$/.test(root) ? root : root + (root.includes('\\') && !root.includes('/') ? '\\' : '/')
+  return p.startsWith(r) ? p.slice(r.length) : undefined
+}
+
 /** Walk path segments to find the shortest @suffix present in text.
  *  Matching uses `mentionTokenRegex` -- the SAME boundary contract the
  *  reconciliation uses -- so a mention the reconciliation counts by its
@@ -774,17 +787,28 @@ function markerOccurrences(text: string, marker: string): Array<{ at: number; en
  *    never prove);
  *  - a marker with other text on its line is an @-mention: every occurrence
  *    of it, with the MARKER_TRAILER_SEP the send put on either side, becomes
- *    `@<suffix>` — the shortest trailing suffix of the path that no other
- *    staged path shares, from the same suffix set `buildRelMap` resolves —
- *    and the path re-stages. The user may have typed a longer spelling
- *    (`@src/a.ts` for `a.ts`); the wire does not record it, and any suffix
+ *    `@<suffix>` and the path re-stages. The suffix is one of the path's
+ *    trailing suffixes, the set `buildRelMap` resolves, that no other staged
+ *    path shares: the path relative to `project` (the composer's own
+ *    spelling, `@src/a.ts` for `src/a.ts` in the project, and the only one
+ *    whose chip comes back when the mention is deleted and undone) when it
+ *    qualifies, else the shortest that does. "Other staged paths" includes
+ *    `alsoStaged`, the files already staged in the composer this restore
+ *    merges into, so two cancelled cards naming `x/a.txt` and `y/a.txt`
+ *    cannot both come back as `@a.txt` and bind to one file. A suffix another
+ *    staged suffix extends with boundary-consumable characters (`report`
+ *    beside `report,`, either way round) is refused as well, since
+ *    `@report, please` would read as the longer file's mention. A path with
+ *    no usable suffix is not claimed; its marker stays verbatim. Any suffix
  *    that resolves back to the same file sends the same bytes, which the
  *    arbiter checks.
  * `[attached_dir N]` markers stay verbatim either way. An entry without a
  * list (a legacy entry, an older gateway) takes the shape rules above
  * unchanged. The round-trip arbiter gates both paths.
  */
-export function restoreQueuedContent(content: string, files?: readonly string[]): RestoredComposerState {
+export function restoreQueuedContent(
+  content: string, files?: readonly string[], alsoStaged?: readonly string[], project?: string,
+): RestoredComposerState {
   const staged: string[] = []
   let text = content
 
@@ -809,18 +833,32 @@ export function restoreQueuedContent(content: string, files?: readonly string[])
     // The list names each marker's exact path, so the claim is the exact
     // token `[attached_file N] files[N-1]` — whitespace in the path
     // included. A marker the list does not account for is not claimed.
-    // Mention spelling: the shortest suffix no OTHER staged path (list or
-    // image block) shares, else this path's longest suffix; `buildRelMap`
-    // walks the same set, so the arbiter below proves it binds back here.
-    const all = [...staged, ...files]
+    // Mention spelling: a suffix no OTHER staged path shares -- this entry's
+    // own (list or image block) and `alsoStaged`, the files the composer this
+    // restore merges into already holds. `buildRelMap` binds a mention by
+    // exact suffix, so a suffix no other staged path has can only bind back
+    // here on the next send. A suffix that another staged suffix extends
+    // with boundary-consumable characters, in either direction (`report`
+    // beside `report,`), is refused too: that is the prefix-sibling hazard
+    // `extendsConsumably` names, where `@report, please` reads as the longer
+    // file's mention. Of the usable suffixes, the project-relative one comes
+    // first: the composer revives a chip only for that spelling, so any other
+    // left a deleted-then-undone mention without its file on the next send.
+    // Otherwise the shortest. A path with no usable suffix is not claimed and
+    // its marker stays verbatim.
+    const all = [...staged, ...files, ...(alsoStaged ?? [])]
     files.forEach((path, i) => {
       const line = `[attached_file ${i + 1}] ${path}`
-      const occurrences = markerOccurrences(text, line)
-      const suffixes = pathSuffixes(path)
-      if (occurrences.some((o) => o.inline) && suffixes.length) {
-        const shared = new Set(all.filter((q) => q !== path).flatMap(pathSuffixes))
-        const rel = [...suffixes].reverse().find((s) => !shared.has(s)) ?? suffixes[0]
-        claims.push({ path, matched: line, mention: `@${rel}` })
+      if (markerOccurrences(text, line).some((o) => o.inline)) {
+        const others = all.filter((q) => q !== path).flatMap(pathSuffixes)
+        const shared = new Set(others)
+        const clashes = (s: string) =>
+          shared.has(s) || others.some((o) => extendsConsumably(s, o) || extendsConsumably(o, s))
+        const suffixes = pathSuffixes(path)
+        const projectRel = projectRelative(path, project)
+        const preferred = projectRel !== undefined && suffixes.includes(projectRel) ? [projectRel] : []
+        const rel = [...preferred, ...suffixes.reverse()].find((s) => !clashes(s))
+        if (rel) claims.push({ path, matched: line, mention: `@${rel}` })
         return
       }
       const esc = line.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')

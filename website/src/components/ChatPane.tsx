@@ -1667,6 +1667,12 @@ export default function ChatPane({
     // paste-block list -- so the adapter pins the two-argument call and the
     // alias map is dropped here by construction rather than misread as pastes.
     restoreDraft: (text, files, _aliases, quote) => restoreIntoComposer(recoverQuoteInto(text, quote ?? null), files),
+    // restoreIntoComposer merges, so a mention written back must not share a
+    // spelling with a file this pane's composer already stages.
+    stagedFiles: () => pendingFilesRef.current,
+    // Spell a mention for a file in this pane's project the way the pane's
+    // picker inserts it, relative to that project.
+    project: () => paneSlot?.project,
   })
   // Split-view panes draw the SAME transcript rows as the single-chat surface,
   // through the SDK's row registry: the live ToolCallLine (purpose / input /

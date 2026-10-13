@@ -787,6 +787,48 @@ describe('ChatPage — queued message actions', () => {
     await waitFor(() => expect(inputProps!.pendingFiles).toEqual([]))
   })
 
+  it('two cancelled cards naming same-named files each send their own file afterwards (#14617)', async () => {
+    // Both restores merge into one composer. The second mention must not
+    // come back as `@a.txt` too, or the next send binds both to the first
+    // file and the second reference silently points at the wrong one.
+    const x = '/repo/x/a.txt'
+    const y = '/repo/y/a.txt'
+    await renderWithQueue([
+      { id: 'q1', content: prepareSendPayload('compare @x/a.txt', [x]).txt, meta: { files: [x] } },
+      { id: 'q2', content: prepareSendPayload('against @y/a.txt', [y]).txt, meta: { files: [y] } },
+    ])
+    act(() => { queueProps!.onCancel('q1') })
+    await waitFor(() => expect(inputProps!.pendingFiles).toEqual([x]))
+    act(() => { queueProps!.onCancel('q2') })
+    await waitFor(() => expect(inputProps!.pendingFiles).toEqual([x, y]))
+    expect(inputProps!.value).toContain('compare @a.txt')
+    expect(inputProps!.value).toContain('against @y/a.txt')
+    // What the next send serializes from this composer state.
+    const next = prepareSendPayload(inputProps!.value, inputProps!.pendingFiles!).txt
+    expect(next).toContain(`compare [attached_file 1] ${x}`)
+    expect(next).toContain(`against [attached_file 2] ${y}`)
+  })
+
+  it('a restored mention of a project file survives delete and undo with its chip (#14617)', async () => {
+    // The composer revives a chip only for the project-relative spelling it
+    // writes itself, so a file at src/a.ts in the project must come back as
+    // `@src/a.ts`. Restored as the shortest suffix `@a.ts`, an undo after
+    // deleting the mention left the chip gone and the next send without it.
+    const p = '/repo/main/src/a.ts'
+    await renderWithQueue([
+      { id: 'q1', content: prepareSendPayload('check @src/a.ts, please', [p]).txt, meta: { files: [p] } },
+      { id: 'q2', content: 'then deploy' },
+    ])
+    act(() => { queueProps!.onCancel('q1') })
+    await waitFor(() => expect(inputProps!.value).toBe('check @src/a.ts, please'))
+    await waitFor(() => expect(inputProps!.pendingFiles).toEqual([p]))
+    act(() => { inputProps!.onChange('check please') })
+    await waitFor(() => expect(inputProps!.pendingFiles).toEqual([]))
+    act(() => { inputProps!.onChange('check @src/a.ts, please') })
+    await waitFor(() => expect(inputProps!.pendingFiles).toEqual([p]))
+    expect(prepareSendPayload(inputProps!.value, inputProps!.pendingFiles!).txt).toContain(`check [attached_file 1] ${p}`)
+  })
+
   it('cancelling two cards in a row keeps both drafts instead of overwriting the first', async () => {
     // The restore MERGES. Assigning was the older spelling on this surface and it
     // destroyed text: the second cancel overwrote the first card's restored draft,
