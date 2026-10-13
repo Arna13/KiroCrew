@@ -1772,7 +1772,7 @@ def run_sessions_backup(
                     "unclaimedBytes": 0,
                     "unrecorded": 0,
                     "unrecordedBytes": 0,
-                    "skipped": reason,
+                    "skipped": "",
                 }
                 _audit_retention(
                     account,
@@ -1784,8 +1784,11 @@ def run_sessions_backup(
                 # Published as well as audited, for the reason every ending inside the
                 # sweep is: without it the sessions row keeps serving whatever the last
                 # sweep that RAN said, so a decline repeated every night would read as
-                # the success before it.
-                _record_last_sweep(account, KIND_SESSIONS, declined, "failed")
+                # the success before it. The reason rides in `skipped` here only; the
+                # audit event carries it as `error`, as it always has.
+                _record_last_sweep(
+                    account, KIND_SESSIONS, {**declined, "skipped": reason}, "failed"
+                )
             else:
                 _prune_remote_archives(
                     account,

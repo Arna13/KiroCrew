@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import datetime as dt
 import inspect
+import itertools
 import json
 import logging
 import threading
@@ -3046,7 +3047,17 @@ class TestEveryTerminalSweepStateReachesTheStatusRead:
         # then resumes. Whichever commits last is the record a reader sees, so it must
         # carry the later stamp -- a stamp taken before the wait would let it claim to be
         # older than the record it just overwrote.
+        #
+        # The clock is pinned to strictly increasing instants, one per read, so the
+        # order asserted below is the order of the reads and not a property of the
+        # host's clock resolution: two live reads can land in one tick.
         state(1)
+        reads = itertools.count()
+        clock = mock.Mock(wraps=dt.datetime)
+        clock.now.side_effect = lambda *a, **k: dt.datetime(
+            2026, 1, 1, tzinfo=dt.timezone.utc
+        ) + dt.timedelta(seconds=next(reads))
+        monkeypatch.setattr(backup, "dt", mock.Mock(datetime=clock, timezone=dt.timezone))
         real = backup._locked_state_update
         overtaken: dict[str, str] = {}
 

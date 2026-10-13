@@ -543,7 +543,7 @@ def _audit_unfiled_authorization(
     is not an access decision, and filing it as a denial would devalue the real
     ones.
     """
-    if isinstance(exc, RuntimeError):
+    if _authorization_ending(exc) == "refused":
         return
     _audit_retention(
         account,
@@ -558,10 +558,11 @@ def _authorization_ending(exc: BaseException) -> str:
     """The last-sweep ``result`` for a sweep an authorization gate stopped.
 
     ``refused`` only for a decision :func:`_refuse_upload` made, and ``failed`` for
-    anything else the gate raised -- an expired credential, a dead STS call. The
-    discriminator is :func:`_audit_unfiled_authorization`'s, so the status read and the
-    audit event agree about the same ending: a credential to renew is not a consent
-    somebody withdrew, and reporting it as one points the operator at the wrong fix.
+    anything else the gate raised -- an expired credential, a dead STS call. This is
+    the one place the discriminator is written: :func:`_audit_unfiled_authorization`
+    reads it too, so the status read and the audit event cannot disagree about the
+    same ending. A credential to renew is not a consent somebody withdrew, and
+    reporting it as one points the operator at the wrong fix.
     """
     return "refused" if isinstance(exc, RuntimeError) else "failed"
 
