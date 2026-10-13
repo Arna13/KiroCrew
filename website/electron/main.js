@@ -234,6 +234,11 @@ function readInternalSecret() {
 let isQuitting = false;
 let desktopMetricsRecorder = null;
 let windows = null;
+// Whether a dashboard document has finished loading in this run, owned by the
+// GPU-crash fallback (the single-instance winner arms it below). The dead-
+// renderer dialog reads it to tell a renderer that never started from one
+// that crashed later.
+let dashboardLoaded = () => false;
 
 // The native-logging result, kept because its `tightenLiveLog` can only run once
 // Chromium has opened `--log-file` — which is after `app.whenReady`, in a
@@ -369,14 +374,14 @@ if (!app.requestSingleInstanceLock()) {
   // `child-process-gone` listener that makes that decision, so a GPU process
   // that dies before the dashboard loads relaunches the app once in software
   // mode instead of letting Chromium abort it with no window and no log.
-  initGpuCrashFallback({
+  ({ dashboardLoaded } = initGpuCrashFallback({
     app,
     store,
     backendUrl: BACKEND_URL,
     isQuitting: () => isQuitting,
     requestQuit,
     log: glog,
-  });
+  }));
 
   app.on("second-instance", () => {
     // Relaunch is explicit intent to see the existing window. The window owner
@@ -432,6 +437,8 @@ windows = createWindowLifecycle({
   backendUrl: BACKEND_URL,
   port: PORT,
   glog,
+  logPath: gatewayLogPath,
+  dashboardLoaded: () => dashboardLoaded(),
   readInternalSecret,
   mintLocalToken: (...args) => gateway.mintLocalToken(...args),
   fetchRemoteToken: (...args) => gateway.fetchRemoteToken(...args),
