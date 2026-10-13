@@ -145,6 +145,35 @@ def _run_install(  # type: ignore[return]
         return install_agent(**kwargs)
 
 
+def _sidecar_unreadable_once(monkeypatch, attr: str = "get_model_managed") -> list[bool]:
+    """Make the FIRST call of ``agent_state.<attr>`` see an unreadable sidecar.
+
+    Returns the list the call records its ``strict`` flag into (``True`` for a
+    reader that is strict by construction), so a test can assert the read it
+    hit was the strict one. The lenient answer to an I/O error is ``None`` --
+    indistinguishable from "nothing recorded" -- and the strict answer is the
+    error itself; later calls reach the real sidecar.
+
+    One-shot by design: the mutators around both call sites already read
+    strict, so a sidecar that STAYS unreadable is caught by one of them and a
+    test against it would pass for the wrong reason.
+    """
+    real = getattr(agent_state, attr)
+    seen: list[bool] = []
+
+    def _once(name: str, **kwargs):
+        if not seen:
+            strict = kwargs.get("strict", False) if attr == "get_model_managed" else True
+            seen.append(strict)
+            if strict:
+                raise OSError("sidecar unreadable")
+            return None
+        return real(name, **kwargs)
+
+    monkeypatch.setattr(agent_state, attr, _once)
+    return seen
+
+
 class TestInstallAgent:
     def test_fresh_install_generates_from_defaults(self, tmp_path: Path):
         """No existing kirocrew.json → config built from defaults."""
@@ -808,6 +837,79 @@ class TestInstallAgent:
         assert config["model"] == "claude-user-pinned"
         assert "model_managed" not in config
         assert agent_state.get_model_managed("kirocrew") is False
+
+    @pytest.mark.parametrize(
+        ("recorded", "expected_after"),
+        [
+            pytest.param(False, False, id="owner-pick-preserved"),
+            pytest.param(None, True, id="empty-sidecar-seeds-on-the-next-pass"),
+        ],
+    )
+    def test_fresh_install_with_an_unreadable_sidecar_seeds_nothing_and_retries(
+        self, tmp_path: Path, monkeypatch, recorded, expected_after
+    ):
+        """A fresh install whose sidecar read fails once writes nothing and tries again.
+
+        The seed is one strict, locked claim. When it cannot read the sidecar it
+        raises BEFORE the spec is written, so nothing is decided on a ``None``
+        that may hide a recorded pick, and the next rebuild is still a fresh
+        install. That pass seeds exactly what a readable sidecar warrants: an
+        owner's ``False`` stays ``False``; nothing recorded becomes ``True``.
+        """
+        cfg_dir = _bundled_defaults(tmp_path)
+        if recorded is not None:
+            agent_state.set_model_managed("kirocrew", recorded)
+        seen = _sidecar_unreadable_once(monkeypatch, "claim_model_managed_if_unset")
+
+        with pytest.raises(OSError):
+            _run_install(tmp_path, cfg_dir)
+
+        assert seen == [True], "the seed must reach the sidecar through the strict claim"
+        assert agent_state.get_model_managed("kirocrew") is recorded
+        assert not (tmp_path / "kiro_agents" / "kirocrew.json").exists()
+
+        path = _run_install(tmp_path, cfg_dir)
+        assert json.loads(path.read_text(encoding="utf-8"))["model"] == "claude-default"
+        assert agent_state.get_model_managed("kirocrew") is expected_after
+
+    def test_managed_resync_holds_on_an_unreadable_sidecar_then_applies_next_pass(
+        self, tmp_path: Path, monkeypatch, caplog
+    ):
+        """A managed spec keeps its model for the pass whose sidecar read fails.
+
+        Same one-shot error at the re-sync read. The model is left as the spec
+        has it -- by decision, with a warning, not because a lenient ``None``
+        happened to be falsy -- and the refresh neither raises nor rebuilds the
+        spec from defaults. The next readable pass applies the shipped model.
+        """
+        cfg_dir = _bundled_defaults(tmp_path)
+        kiro_dir = tmp_path / "kiro_agents"
+        kiro_dir.mkdir(exist_ok=True)
+        existing = {
+            "model": "claude-old-default",
+            "tools": ["ReadFile"],
+            "allowedTools": [],
+            "mcpServers": {},
+        }
+        (kiro_dir / "kirocrew.json").write_text(json.dumps(existing))
+        agent_state.set_model_managed("kirocrew", True)
+        seen = _sidecar_unreadable_once(monkeypatch)
+
+        with caplog.at_level(logging.WARNING, logger="kiro_crew.agent"):
+            path = _run_install(tmp_path, cfg_dir)
+        held = json.loads(path.read_text(encoding="utf-8"))
+
+        assert seen == [True], "the re-sync read must reach the sidecar strict"
+        assert held["model"] == "claude-old-default"
+        assert "ReadFile" in held["tools"], "held, not rebuilt from defaults"
+        assert agent_state.get_model_managed("kirocrew") is True
+        assert any(
+            "leaving the kirocrew spec's model as it is" in record.getMessage()
+            for record in caplog.records
+        )
+
+        path = _run_install(tmp_path, cfg_dir)
+        assert json.loads(path.read_text(encoding="utf-8"))["model"] == "claude-default"
 
     def test_existing_config_refreshes_security_fields(self, tmp_path: Path):
         """hooks are always overwritten from bundled.

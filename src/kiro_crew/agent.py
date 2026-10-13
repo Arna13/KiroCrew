@@ -2623,7 +2623,24 @@ def _refresh_dynamic_fields(
     # is equivalent to the resolver (normalize_agent_model collapses "auto" and
     # an absent key to the same "inherit") and keeps the spec shaped like the
     # shipped template.
-    if agent_state.get_model_managed(name):
+    #
+    # The read is strict because this answer feeds the write just below. The
+    # lenient default folds an unreadable sidecar into ``None``, the same value
+    # as "no opinion recorded", so a transient read error would decide the
+    # model by accident. An unreadable sidecar HOLDS instead: the model stays
+    # as the spec has it, which a managed spec converges from on the next
+    # readable pass, so the hold costs one pass and nothing is left unstartable.
+    try:
+        managed = agent_state.get_model_managed(name, strict=True)
+    except (OSError, ValueError):
+        logger.warning(
+            "Agent state sidecar unreadable; leaving the %s spec's model as it is "
+            "rather than re-syncing it from the shipped default on unknown ownership",
+            name,
+            exc_info=True,
+        )
+        managed = None
+    if managed:
         shipped_model = (_load_json(_shipped_defaults()) or {}).get("model")
         config["model"] = shipped_model or DEFAULT_MODEL
 
@@ -4249,9 +4266,21 @@ def rebuild_agent_config(
     # Seed default-model tracking for a fresh/clean build. A clean regen always
     # resumes tracking the shipped default; a first-time install seeds tracking
     # only when the sidecar has no prior (possibly frozen) choice to preserve.
+    #
+    # That prior choice is why the first-time seed is one strict, locked
+    # read-and-write (``claim_model_managed_if_unset``) rather than a lenient
+    # read followed by a write: a lenient read answers ``None`` for an
+    # unreadable sidecar too, and seeding on it would write "track the shipped
+    # default" over a pin the owner recorded, a value kept nowhere else. An
+    # unreadable sidecar raises here, before the spec is written, so the next
+    # rebuild is still a fresh install and seeds then; a sidecar that stays
+    # unreadable fails this rebuild the same way every sidecar write does.
     main_name = config.get("name") or _MAIN_AGENT_NAME
-    if fresh_install and (clean or agent_state.get_model_managed(main_name) is None):
-        agent_state.set_model_managed(main_name, True)
+    if fresh_install:
+        if clean:
+            agent_state.set_model_managed(main_name, True)
+        else:
+            agent_state.claim_model_managed_if_unset(main_name)
 
     # Merge shared MCP servers from ~/.kiro/settings/mcp.json (Kiro user-level
     # config) FIRST.  KiroCrew is kiro-first (ACP/kiro-cli only), so Kiro
