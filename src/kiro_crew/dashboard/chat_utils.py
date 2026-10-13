@@ -248,23 +248,22 @@ async def run_config_write(fn, /, *args, **kwargs):
         return result
 
 
-async def run_to_completion(aw):
-    """Await *aw* so that a cancellation cannot abandon it part-way.
+async def run_to_completion_held(aw):
+    """Await *aw* to completion and hand back ``(result, held_cancellation)``.
 
     The awaitable runs as its own task behind ``asyncio.shield``; a
     ``CancelledError`` delivered to the CALLER is remembered and the caller
-    keeps waiting until the task finishes, then the cancellation is re-raised.
-    The loop, not a single re-await, is what makes that hold under repeated
-    cancellation (a graceful shutdown escalating after its timeout): each
-    re-shield absorbs one more cancel, and only a finished task ends it.
+    keeps waiting until the task finishes. The loop, not a single re-await, is
+    what makes that hold under repeated cancellation (a graceful shutdown
+    escalating after its timeout): each re-shield absorbs one more cancel, and
+    only a finished task ends it.
 
-    For a multi-phase write -- a channel saver's config.json commit followed by
-    its ``.env`` credential write, the MCP gateway toggle's persist followed by
-    its live apply -- a cancellation between the phases would leave the stored
-    state and the effective state disagreeing; wrapping the whole transaction
-    here is what keeps the pair consistent. Cancellation is deferred, never
-    swallowed: the caller still unwinds with ``CancelledError`` afterwards, and
-    an exception from the task propagates as usual.
+    The remembered cancellation is RETURNED, not raised, so a caller that must
+    still apply the task's result on the event loop -- attaching a finished
+    off-loop read to a transcript row before the turn unwinds -- can do that
+    and then re-raise it. :func:`run_to_completion` is the common case of
+    nothing to apply. The second element is ``None`` when no cancellation
+    arrived; an exception from the task propagates as usual.
     """
     task = asyncio.ensure_future(aw)
     cancelled: asyncio.CancelledError | None = None
@@ -278,6 +277,24 @@ async def run_to_completion(aw):
             # OUR await was cancelled, not the task: remember it, keep waiting
             # for the still-running work.
             cancelled = exc
+    return result, cancelled
+
+
+async def run_to_completion(aw):
+    """Await *aw* so that a cancellation cannot abandon it part-way.
+
+    :func:`run_to_completion_held` does the waiting; this re-raises the
+    cancellation it held once the task has finished.
+
+    For a multi-phase write -- a channel saver's config.json commit followed by
+    its ``.env`` credential write, the MCP gateway toggle's persist followed by
+    its live apply -- a cancellation between the phases would leave the stored
+    state and the effective state disagreeing; wrapping the whole transaction
+    here is what keeps the pair consistent. Cancellation is deferred, never
+    swallowed: the caller still unwinds with ``CancelledError`` afterwards, and
+    an exception from the task propagates as usual.
+    """
+    result, cancelled = await run_to_completion_held(aw)
     if cancelled is not None:
         raise cancelled
     return result
