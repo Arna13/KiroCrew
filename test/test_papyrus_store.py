@@ -154,6 +154,68 @@ class TestSafeProjectDir:
             store.safe_project_dir(store.normalize_project_name("../escape"), data_root)
 
 
+class TestProjectNameStaysAsciiAndSaysWhy:
+    """#10470: the name is a directory and a ``git``/``pdflatex`` argument, so the
+    rule stays a lowercase ASCII slug -- and the refusal names the character, so
+    the dashboard can explain it in the user's language instead of "invalid
+    project name"."""
+
+    @pytest.mark.parametrize(
+        ("typed", "char"),
+        [
+            ("\u8bba\u6587", "\u8bba"),  # Han
+            ("\ubd84\uae30\ubcf4\uace0", "\ubd84"),  # Hangul
+            ("\u041e\u0442\u0447\u0435\u0442", "\u043e"),  # Cyrillic, lowercased first
+            ("\u062a\u0642\u0631\u064a\u0631", "\u062a"),  # Arabic
+            ("\u8ad6\u6587\u30c9\u30e9\u30d5\u30c8", "\u8ad6"),  # Japanese
+            ("M\u00fcnchen", "\u00fc"),
+            ("Mu\u0308nchen", "\u00fc"),  # NFD: reported as the letter, not the mark
+        ],
+    )
+    def test_a_name_in_another_script_is_refused_naming_the_character(
+        self, data_root: Path, typed: str, char: str
+    ) -> None:
+        name = store.normalize_project_name(typed)
+        with pytest.raises(store.InvalidProjectName) as caught:
+            store.safe_project_dir(name, data_root)
+        assert caught.value.char == char
+        # Still a PathRejected, so every existing handler keeps refusing it.
+        assert isinstance(caught.value, store.PathRejected)
+        assert str(caught.value) == "invalid project name"
+        assert not any(store.projects_dir(data_root).iterdir())
+
+    @pytest.mark.parametrize(
+        ("name", "char"),
+        [
+            ("../escape", "/"),
+            ("a\\b", "\\"),
+            ("a\u202eb", "U+202E"),  # a bidi override is named by code point, never echoed
+            ("-rf", ""),  # refused on position, not on a character
+            (".hidden", ""),
+            ("x" * 65, ""),  # refused on length
+        ],
+    )
+    def test_path_and_option_refusals_hold_and_report_safely(
+        self, data_root: Path, name: str, char: str
+    ) -> None:
+        with pytest.raises(store.InvalidProjectName) as caught:
+            store.safe_project_dir(name, data_root)
+        assert caught.value.char == char
+
+    def test_the_rule_itself_is_unchanged_ascii(self) -> None:
+        """The reporting alphabet is exactly the regex's class, and the regex admits
+        no character outside ASCII -- this change explains the rule, it does not
+        widen it."""
+        for code in range(0x110000):
+            if 0xD800 <= code <= 0xDFFF:
+                continue
+            char = chr(code)
+            accepted = bool(store.PROJECT_NAME_RE.match("a" + char))
+            assert accepted == (char in store.PROJECT_NAME_CHARS), repr(char)
+        assert store.PROJECT_NAME_RE.match("x" * 64)
+        assert not store.PROJECT_NAME_RE.match("x" * 65)
+
+
 class TestMainFile:
     def test_defaults_when_no_config(self, project: Path) -> None:
         assert store.get_main_file(project) == "main.tex"

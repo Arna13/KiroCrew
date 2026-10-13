@@ -80,6 +80,7 @@ from off the loop. Pinned by ``test_papyrus_routes.py``
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from functools import wraps
 from pathlib import Path
@@ -235,6 +236,26 @@ def _str_field(source: dict[str, Any], key: str) -> str:
     return value.strip() if isinstance(value, str) else ""
 
 
+def _invalid_name(exc: store.InvalidProjectName) -> web.HTTPBadRequest:
+    """A 400 whose JSON body names the rule and the refused character.
+
+    ``code`` is what the dashboard switches on to explain the rule in the user's
+    own language, and ``char`` lets that copy say which character it was (a name
+    typed in another script is refused at its first letter). The English
+    ``error`` is for logs and clients without a catalog. Raised, not returned,
+    because the name gate runs inside a worker-thread closure -- see the module
+    docstring.
+    """
+    error = (
+        "invalid project name: use lowercase a-z, 0-9, '.', '_' or '-', "
+        "starting with a letter or digit, at most 64 characters"
+    )
+    if exc.char:
+        error += f"; {exc.char!r} is not allowed"
+    payload = {"error": error, "code": "invalid_project_name", "char": exc.char}
+    return web.HTTPBadRequest(text=json.dumps(payload), content_type="application/json")
+
+
 def _project(name: str) -> Path:
     """Resolve *name* to an existing project directory, or raise an HTTP error.
 
@@ -250,6 +271,8 @@ def _project(name: str) -> Path:
         raise web.HTTPBadRequest(reason="missing 'name'")
     try:
         project = store.safe_project_dir(name)
+    except store.InvalidProjectName as exc:
+        raise _invalid_name(exc) from exc
     except store.PathRejected as exc:
         raise web.HTTPBadRequest(reason=str(exc)) from exc
     if not project.is_dir():
@@ -266,6 +289,8 @@ def _project_for_create(name: str) -> Path:
         raise web.HTTPBadRequest(reason="missing 'name'")
     try:
         project = store.safe_project_dir(name)
+    except store.InvalidProjectName as exc:
+        raise _invalid_name(exc) from exc
     except store.PathRejected as exc:
         raise web.HTTPBadRequest(reason=str(exc)) from exc
     if project.exists():

@@ -360,6 +360,52 @@ class TestProjects:
                 _request("POST", "/api/apps/papyrus/projects", {"name": 42})
             )
 
+    @pytest.mark.parametrize(
+        ("typed", "char"),
+        [
+            ("\u8bba\u6587", "\u8bba"),
+            ("\u041e\u0442\u0447\u0435\u0442", "\u043e"),
+            ("M\u00fcnchen", "\u00fc"),
+        ],
+    )
+    async def test_create_explains_a_name_in_another_script(
+        self, enabled: None, data_root: Path, typed: str, char: str
+    ) -> None:
+        """#10470: a coded JSON 400 naming the refused character, which the dashboard
+        renders in the user's language -- and nothing is created."""
+        with pytest.raises(web.HTTPBadRequest) as caught:
+            await routes._handle_create_project(
+                _request("POST", "/api/apps/papyrus/projects", {"name": typed})
+            )
+        assert caught.value.content_type == "application/json"
+        body = json.loads(caught.value.text or "")
+        assert body["code"] == "invalid_project_name"
+        assert body["char"] == char
+        assert "lowercase a-z" in body["error"]
+        assert not any(store.projects_dir().iterdir())
+
+    async def test_create_explains_a_traversal_without_echoing_a_control(
+        self, enabled: None, data_root: Path
+    ) -> None:
+        """The path refusal is unchanged; its body names a bidi override by code point."""
+        for typed, char in (("../escape", "/"), ("a\u202eb", "U+202E")):
+            with pytest.raises(web.HTTPBadRequest) as caught:
+                await routes._handle_create_project(
+                    _request("POST", "/api/apps/papyrus/projects", {"name": typed})
+                )
+            body = json.loads(caught.value.text or "")
+            assert (body["code"], body["char"]) == ("invalid_project_name", char)
+            assert "\u202e" not in (caught.value.text or "")
+        assert not (data_root / "escape").exists()
+
+    async def test_opening_a_refused_name_answers_the_same_code(
+        self, enabled: None, data_root: Path
+    ) -> None:
+        request = make_mocked_request("GET", "/api/apps/papyrus/project?name=%E8%AE%BA%E6%96%87")
+        with pytest.raises(web.HTTPBadRequest) as caught:
+            await routes._handle_get_project(request)
+        assert json.loads(caught.value.text or "")["code"] == "invalid_project_name"
+
     async def test_get_returns_the_metadata_the_frontend_needs(
         self, enabled: None, project: Path
     ) -> None:

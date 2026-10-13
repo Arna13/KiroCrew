@@ -44,6 +44,7 @@ if _APP_ROOT not in sys.path:  # allow `python3 sage_lib/learning.py` (run as sc
 from sage_lib import store  # noqa: E402
 
 from kiro_crew import platform_compat  # noqa: E402
+from kiro_crew.slugs import refused_slug_char  # noqa: E402
 
 # Learning is mined ONLY from human-validated, ground-truth signals.
 ADMISSIBLE_SOURCES = {"fix_introduce", "human_comment", "design_outcome", "import"}
@@ -53,7 +54,15 @@ DEFAULT_NAMESPACE = "default"
 # A valid user namespace token: lowercase alphanumeric start/end, with hyphens,
 # dots and underscores in between, 2-64 chars. Deliberately excludes path
 # separators and ".." so a namespace name can NEVER escape the namespaces/ dir.
+# ASCII on purpose: the name IS the directory, so it must mean one thing on every
+# platform and filesystem. A refusal names the offending character
+# (`create_namespace`'s `char`) so the dashboard can explain the rule in the
+# user's own language.
 _NS_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,62}[a-z0-9]$")
+
+# Every character `_NS_NAME_RE` admits anywhere in a name. Reporting only: the
+# regex (and `_is_valid_ns_name`) alone decide.
+_NS_NAME_CHARS = "abcdefghijklmnopqrstuvwxyz0123456789._-"
 
 
 def _is_valid_ns_name(name: str) -> bool:
@@ -174,7 +183,17 @@ def create_namespace(name: str, root: Path | None = None) -> dict:
     """Create a new namespace with an empty learnings file."""
     name = name.strip().lower().replace(" ", "-")
     if not _is_valid_ns_name(name):
-        return {"ok": False, "error": f"invalid namespace name: {name!r} (use lowercase alphanumeric, hyphens, dots, 2-64 chars)"}
+        # `code` + `char` are what the dashboard renders, in the user's language;
+        # the English `error` is for logs and catalog-less callers.
+        return {
+            "ok": False,
+            "code": "invalid_namespace_name",
+            "char": refused_slug_char(name, _NS_NAME_CHARS),
+            "error": (
+                f"invalid namespace name: {name!r} (use lowercase a-z, 0-9, '.', '_' "
+                "or '-', starting and ending with a letter or digit, 2-64 chars)"
+            ),
+        }
     if name == DEFAULT_NAMESPACE:
         return {"ok": False, "error": "'default' namespace already exists (it maps to common/)"}
     ns_path = _namespace_dir(name, root)

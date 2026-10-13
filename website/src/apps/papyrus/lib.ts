@@ -2,7 +2,8 @@
 // No React, no component imports — safe to pull into any module or test.
 
 import { compareText } from '../../i18n/format'
-import type { Diagnostic, GitStatus } from './api'
+import { i18nT } from '../../i18n/t'
+import { PapyrusApiError, type Diagnostic, type GitStatus } from './api'
 
 /** localStorage key holding the project the user last had open. */
 export const LAST_PROJECT_KEY = 'kc:papyrus:project'
@@ -275,6 +276,24 @@ export function countWords(source: string): number {
 export function gitBranchLabel(status: GitStatus | undefined): string {
   if (!status?.is_git) return ''
   return `${status.branch || ''}${status.dirty ? '*' : ''}`
+}
+
+/**
+ * The text to show for a failed create or clone.
+ *
+ * A refused paper name answers `invalid_project_name`, with the character that
+ * stopped it when there was one (a name typed in another script stops at its
+ * first letter). That is explained in the app's language: the paper name is its
+ * folder name, so it stays a lowercase Latin slug on purpose, and the server's
+ * English sentence is only for logs. Any other failure keeps the server's text.
+ */
+export function projectErrorText(err: Error): string {
+  if (err instanceof PapyrusApiError && err.code === 'invalid_project_name') {
+    return err.char
+      ? i18nT('apps.papyrus.page.invalid_project_name_char', { char: err.char })
+      : i18nT('apps.papyrus.page.invalid_project_name')
+  }
+  return err.message
 }
 
 /** Read the last-open project name from localStorage (never throws). */

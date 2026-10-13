@@ -922,7 +922,9 @@
           "pattern_one": "{{count}} motif",
           "pattern_other": "{{count}} motifs",
           "pending": "en attente",
-          "read_namespace": "Lire le namespace {{name}}"
+          "read_namespace": "Lire le namespace {{name}}",
+          "invalid_namespace_name": "Les noms de namespace servent de noms de dossier. Ils ne peuvent donc contenir que des lettres latines minuscules (a–z), des chiffres (0–9), des points, des traits d’union et des tirets bas, doivent commencer et finir par une lettre ou un chiffre et comporter de 2 à 64 caractères.",
+          "invalid_namespace_name_char": "« {{char}} » ne peut pas être utilisé dans un nom de namespace. Les noms de namespace servent de noms de dossier. Ils ne peuvent donc contenir que des lettres latines minuscules (a–z), des chiffres (0–9), des points, des traits d’union et des tirets bas, doivent commencer et finir par une lettre ou un chiffre et comporter de 2 à 64 caractères."
         },
         "leftRail": {
           "code_review_sage": "Code Review Sage",
@@ -4645,7 +4647,9 @@
         "start_a_paper": "Commencer un article",
         "start_a_paper_tip": "Créez un article vide depuis le modèle article standard, ou clonez-en un depuis un dépôt distant git : tout dépôt contenant un fichier .tex convient.",
         "verifying_compiler": "Vérification…",
-        "your_papers": "Vos articles"
+        "your_papers": "Vos articles",
+        "invalid_project_name": "Les noms d’article servent de noms de dossier. Ils ne peuvent donc contenir que des lettres latines minuscules (a–z), des chiffres (0–9), des points, des traits d’union et des tirets bas, doivent commencer par une lettre ou un chiffre et comporter au plus 64 caractères.",
+        "invalid_project_name_char": "« {{char}} » ne peut pas être utilisé dans un nom d’article. Les noms d’article servent de noms de dossier. Ils ne peuvent donc contenir que des lettres latines minuscules (a–z), des chiffres (0–9), des points, des traits d’union et des tirets bas, doivent commencer par une lettre ou un chiffre et comporter au plus 64 caractères."
       },
       "preview": {
         "compile_to_see_the_pdf": "Compilez pour voir le PDF.",

@@ -894,7 +894,9 @@
           "new_namespace_name": "新 namespace 的名称",
           "pattern_other": "{{count}} 条模式",
           "pending": "待处理",
-          "read_namespace": "查看 namespace {{name}}"
+          "read_namespace": "查看 namespace {{name}}",
+          "invalid_namespace_name": "namespace 名称会用作文件夹名称，因此只能包含小写拉丁字母（a–z）、数字（0–9）、点、短横线或下划线，必须以字母或数字开头和结尾，长度为 2 到 64 个字符。",
+          "invalid_namespace_name_char": "namespace 名称中不能使用“{{char}}”。namespace 名称会用作文件夹名称，因此只能包含小写拉丁字母（a–z）、数字（0–9）、点、短横线或下划线，必须以字母或数字开头和结尾，长度为 2 到 64 个字符。"
         },
         "leftRail": {
           "code_review_sage": "Code Review Sage",
@@ -4407,7 +4409,9 @@
         "start_a_paper": "开始一篇论文",
         "start_a_paper_tip": "用标准 article 模板新建一篇空白论文，或从 git 远端克隆一篇——只要含有 .tex 文件即可。",
         "verifying_compiler": "正在校验……",
-        "your_papers": "你的论文"
+        "your_papers": "你的论文",
+        "invalid_project_name": "论文名称会用作文件夹名称，因此只能包含小写拉丁字母（a–z）、数字（0–9）、点、短横线或下划线，必须以字母或数字开头，且最多 64 个字符。",
+        "invalid_project_name_char": "论文名称中不能使用“{{char}}”。论文名称会用作文件夹名称，因此只能包含小写拉丁字母（a–z）、数字（0–9）、点、短横线或下划线，必须以字母或数字开头，且最多 64 个字符。"
       },
       "preview": {
         "compile_to_see_the_pdf": "编译后即可查看 PDF。",
