@@ -366,7 +366,7 @@ def test_core_counts_per_harness_are_pinned() -> None:
         "goose": 5,
         "kas": 7,
         "kiro": 6,
-        "opencode": 4,
+        "opencode": 5,
         "pi": 2,
     }
     assert counts["kas"] == len(cards_mod.USER_FACING_LINES)
