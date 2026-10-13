@@ -116,7 +116,7 @@ BASE_SURFACE: dict[str, str] = {
     # ``test_the_member_grants_extend_the_conductor_grants``, which spells the whole set
     # out; this digest is the byte-level half and moves with it.
     "_MEMBER_PANEL_GRANTS": "value tuple bf985b450bc18937",
-    "_NATIVE_PROMPT_STUB": "value str ceed0be70c1f6da8",
+    "_NATIVE_PROMPT_STUB": "value str cf6d81ff1d0b3797",
     "_PIPELINE_CONDUCTOR_AGENT_FILENAME": "value str 3b5e111de6d1d305",
     "_PIPELINE_CONDUCTOR_CORE_GRANTS": "value tuple 1ad9ce711e266082",
     "_PIPELINE_CONDUCTOR_DASHBOARD_GRANTS": "value tuple 3f7fb6d17a7f0ebc",
