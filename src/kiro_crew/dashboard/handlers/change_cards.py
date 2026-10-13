@@ -62,6 +62,13 @@ HEADER_CARD_STEP = "X-Card-Step"
 #: owner-authed card step; a direct DELETE never carries it.
 REQ_CARD_UNDO_CRON_EXPECT = "card_undo_cron_expect"
 
+#: Request attribute a card-hooked write route sets to the records it replaced,
+#: read under the same lock as its write. A ``crewmate.key_results`` card's Apply
+#: keeps them in the card's private ``before`` so its Undo restores what was
+#: there at the write, not at the preview: a reading recorded in between is kept.
+#: Never in a response; a direct write sets it and nothing reads it.
+REQ_CARD_PRE_WRITE = "card_pre_write"
+
 _SLOT_QUERY_MAX = 256
 _BODY_MAX = 1024 * 1024
 _QUERY_MAX = 200
@@ -699,11 +706,21 @@ def match_step(
     :func:`kiro_crew.dashboard.change_cards.canonical`. A ``fill`` field is the
     only allowed difference: a ``user`` fill must be a non-empty string (and is
     never read further), a ``step`` fill must equal what that earlier step's
-    real response returned.
+    real response returned. A ``step`` fill into the path replaces its
+    placeholder segment, and only with a plain identifier.
     """
     if plan_step["method"] != method:
         return "method"
     plan_path, _, plan_query = plan_step["path"].partition("?")
+    fills = plan_step.get("fill") or []
+    for fill in fills:
+        if not catalog.is_path_fill(fill):
+            continue
+        idx = int(fill["step"])
+        value = (evidence[idx] if idx < len(evidence) else {}).get(fill["key"])
+        if not isinstance(value, str) or not catalog.PATH_FILL_VALUE.match(value):
+            return f"fill:{fill['field']}"
+        plan_path = plan_path.replace(catalog.placeholder(fill), value)
     if urllib.parse.unquote(plan_path) != path:
         return "path"
     if dict(urllib.parse.parse_qsl(plan_query)) != query:
@@ -715,7 +732,9 @@ def match_step(
         return "body"
     got = dict(body)
     want = dict(expected)
-    for fill in plan_step.get("fill") or []:
+    for fill in fills:
+        if catalog.is_path_fill(fill):
+            continue
         field = fill["field"]
         value = got.pop(field, None)
         want.pop(field, None)
@@ -990,7 +1009,9 @@ async def _run_card_step(
                 current = await cards.read_state(
                     rec["kind"], rec["params"], [], state=state, app=request.app
                 )
-                if cards.canonical(current) != cards.canonical(rec["before"]):
+                if cards.canonical(cards.comparable_state(rec["kind"], current)) != cards.canonical(
+                    cards.comparable_state(rec["kind"], rec["before"])
+                ):
                     store.abort_step(rec)
                     unsaved = await _published_or_refusal(request, rec, revert)
                     if unsaved is not None:
@@ -1079,6 +1100,16 @@ async def _run_card_step(
     evidence = catalog.extract_evidence(
         rec["kind"], op, index, data if isinstance(data, dict) else None
     )
+    pre_write = request.get(REQ_CARD_PRE_WRITE)
+    if (
+        op == catalog.OP_APPLY
+        and rec["kind"] == catalog.KIND_CREWMATE_KEY_RESULTS
+        and isinstance(pre_write, list)
+        and isinstance(rec.get("before"), dict)
+    ):
+        # The records the write itself replaced (read under its lock), so the
+        # Undo derived from ``before`` puts back what was there at Apply.
+        rec["before"] = {**rec["before"], cards.KR_RECORDS_KEY: pre_write}
     outcome = store.record_success(rec, op=op, index=index, evidence=evidence)
     survivors: list[str] = []
     if outcome == "done" and op == catalog.OP_UNDO:
