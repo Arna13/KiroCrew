@@ -19,7 +19,7 @@ ceilings — see the security model below.)
 
 `memory` (`push | list | restore`) is the odd one out: it touches **no AWS**. It
 backs this machine's memory and lessons up to a destination the operator names as
-a URL (`--target scheme://path`, or the `memory_sync.target` config key). Kiro Crew
+a URL (`--target scheme://path`, or the `cloud_sync.target` config key). Kiro Crew
 is a public repo and names no storage service: `file://` is built in (a plain
 directory or mount), and any other scheme is handed to an external helper,
 `kirocrew-sync-<scheme>`, found on `PATH` -- the same pattern as git's

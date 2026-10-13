@@ -577,7 +577,7 @@ def _cloud_memory(args: argparse.Namespace) -> int:
 
     A thin dispatcher into :mod:`kiro_crew.cloud.memory_sync`, which holds the
     testable engine. Unlike the EC2 verbs above this touches no AWS: the
-    destination is a URL (``--target``, or the ``memory_sync.target`` config
+    destination is a URL (``--target``, or the ``cloud_sync.target`` config
     key), ``file://`` built in and any other scheme delegated to an external
     ``kirocrew-sync-<scheme>`` helper on PATH. Kiro Crew stores no credential of
     its own for any target.
@@ -610,7 +610,7 @@ def _cloud_memory(args: argparse.Namespace) -> int:
     print()
     ui.detail(
         "Needs --target scheme://path, or set it once: "
-        "`kirocrew config set memory_sync.target <url>`."
+        "`kirocrew config set cloud_sync.target <url>`."
     )
     return 0
 

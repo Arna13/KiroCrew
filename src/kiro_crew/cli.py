@@ -2802,7 +2802,7 @@ Examples:
             default="",
             help=(
                 "Sync target as scheme://path (file:// built in; any other scheme runs "
-                "kirocrew-sync-<scheme> from PATH). Default: the memory_sync.target "
+                "kirocrew-sync-<scheme> from PATH). Default: the cloud_sync.target "
                 "config key."
             ),
         )

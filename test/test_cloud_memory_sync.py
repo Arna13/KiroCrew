@@ -480,3 +480,42 @@ def test_restore_downloads_and_calls_snapshot_restore(file_target, monkeypatch):
     assert rc == 0
     assert "--components" in captured["argv"] and "memory" in captured["argv"]
     assert "--mode" in captured["argv"] and "merge" in captured["argv"]
+
+
+def test_restore_download_stays_inside_temp_dir(file_target, monkeypatch, tmp_path):
+    """A helper-listed entry name must not steer the local write outside *tmp*.
+
+    ``_ls`` returns helper ``ls`` stdout verbatim, so a chosen entry can be an
+    absolute or ``..`` path. The local download destination must be a fixed
+    basename inside the temporary directory, never the untrusted entry name.
+    """
+    monkeypatch.setattr(memory_sync, "resolve_target", lambda t="": file_target)
+    memory_sync._require_reachable(file_target)
+    outside = tmp_path / "victim.tar"
+    outside.write_bytes(b"precious")
+    evil = str(outside)  # an absolute, path-shaped entry name
+
+    monkeypatch.setattr(memory_sync, "_restore_stamps", lambda tgt, rel: [evil])
+
+    seen: dict[str, Path] = {}
+
+    def fake_get(tgt, remote_rel, local_file):  # noqa: ANN001
+        seen["local"] = local_file
+        seen["remote_rel"] = remote_rel
+        local_file.write_bytes(b"fake-bundle")
+
+    monkeypatch.setattr(memory_sync, "_get", fake_get)
+    monkeypatch.setattr(memory_sync.snapshot, "restore_main", lambda argv: 0)
+
+    rc = memory_sync.restore(host="box-1", stamp=evil, mode="merge")
+    assert rc == 0
+    # The local write landed on a fixed basename inside a kc-cloud-mem- temp dir,
+    # not on the attacker-named absolute path.
+    local = seen["local"]
+    assert local.name == "restore-bundle.tar"
+    assert "kc-cloud-mem-" in str(local.parent)
+    assert local != outside
+    # The untrusted name is still used only as the REMOTE key.
+    assert evil in seen["remote_rel"]
+    # The pre-existing file outside the temp dir is untouched.
+    assert outside.read_bytes() == b"precious"

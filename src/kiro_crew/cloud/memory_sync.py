@@ -115,7 +115,7 @@ class Target:
     """A sync destination: a URL scheme plus the scheme-specific remainder.
 
     ``raw`` is the exact string the operator gave (``--target`` or the
-    ``memory_sync.target`` config key), passed whole as the first argument to
+    ``cloud_sync.target`` config key), passed whole as the first argument to
     every helper call. ``path`` is everything after ``scheme://``, used only by
     the built-in ``file://`` handling as a filesystem root -- a helper-backed
     target never sees it; the helper resolves a ``<remote-rel>`` against its own
@@ -163,7 +163,7 @@ def parse_target(raw: str) -> Target:
 
 
 def resolve_target(explicit: str = "") -> Target:
-    """The configured target: ``--target`` wins, else the ``memory_sync.target`` config key.
+    """The configured target: ``--target`` wins, else the ``cloud_sync.target`` config key.
 
     Raises :class:`TargetUnavailable` with how to fix it when neither is set, so a
     first run tells the operator what to type rather than defaulting silently to
@@ -176,7 +176,7 @@ def resolve_target(explicit: str = "") -> Target:
         raise TargetUnavailable(
             "No sync target configured. Pass --target scheme://path (e.g. "
             "--target file:///home/me/kirocrew-backups), or set it once with "
-            "`kirocrew config set memory_sync.target <url>`."
+            "`kirocrew config set cloud_sync.target <url>`."
         )
     return parse_target(raw)
 
@@ -657,7 +657,11 @@ def restore(
         return 1
 
     with tempfile.TemporaryDirectory(prefix="kc-cloud-mem-", dir=_scratch_root()) as tmp:
-        local = Path(tmp) / chosen
+        # Download into a fixed basename inside the temp dir. ``chosen`` is a
+        # remote entry name a helper's ``ls`` emitted, so it may be absolute or
+        # contain ``..``; ``Path(tmp) / chosen`` would then resolve outside
+        # *tmp* and clobber an existing file before the bundle is validated.
+        local = Path(tmp) / "restore-bundle.tar"
         try:
             _get(tgt, f"{remote_restore}/{chosen}", local)
         except (TargetUnavailable, MemorySyncFailed) as exc:
