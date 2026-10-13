@@ -615,6 +615,19 @@ server, and cron child processes it spawns, those descendants no longer inherit
 a shell-exported `PYTHONPATH` or `PYTHONHOME` either; a child that relied on one
 to resolve its imports under the desktop app must set it for itself.
 
+The bundled launchers themselves drop the same two variables, so the scrub also
+covers every caller the shell is not: `kirocrew token` or `kirocrew stop` typed
+into a development shell, the `~/.local/bin/kirocrew` symlink the gateway
+plants, and the AppImage token page's bundled CLI path. The POSIX
+`bin/kirocrew` script runs `unset PYTHONPATH PYTHONHOME` before it execs the
+bundled `python3.12`; the Windows `bin\kirocrew.cmd` shim runs `set
+"PYTHONPATH="` and `set "PYTHONHOME="` under `setlocal`, so an interactive
+`cmd` window keeps its own variables after the command returns. Neither uses
+`-E`, which would also discard `PYTHONUTF8` and the bytecode settings above.
+The shell's own scrub stays as a second guard for the gateway it spawns, and on
+Windows it is the only one on that path, because the shell unwraps the `.cmd`
+and spawns `python.exe` directly.
+
 Host-runtime discovery stays behind the same main-process ownership boundaries.
 The `wsl:detect` handler in
 [`ipc-registrar.js`](../../website/electron/ipc-registrar.js) fails closed unless
