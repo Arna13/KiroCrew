@@ -487,6 +487,18 @@ _SSH_TRANSPORT_DROP_SIGNALS = (
     "connection refused",
 )
 _SSH_BIND_SIGNALS = ("address already in use", "cannot listen to port")
+# Appended to a transport drop ONLY when the child died before the forward ever
+# came up. A drop on the first connect is most often not a drop at all: the
+# instance's ``ssh_host`` names a host that does not exist under that name
+# (rebuilt, renamed, decommissioned), and the proxy closes the socket before
+# the ssh handshake. ssh's own text then says only "connection closed by
+# <unknown>", which points nowhere, while the one field the operator can fix
+# is never mentioned. A steady-state drop (idle timeout, reset after hours up)
+# does NOT get this line: that host was reachable, so the name is right.
+_FIRST_CONNECT_DROP_HINT = (
+    "the connection dropped before the forward came up; if this host was "
+    "rebuilt or renamed, check this instance's ssh_host"
+)
 _SSM_CREDENTIAL_SIGNALS = (
     "expired",
     "unable to locate credentials",
@@ -1147,7 +1159,7 @@ class _SshTunnel:
         await self._finish_stdout_drain()
         await self._capture_stderr()
         self.status.state = TunnelState.ERROR
-        self.status.error = self._exit_error(proc.returncode)
+        self.status.error = self._exit_error(proc.returncode, first_connect=True)
         return True
 
     async def _port_reachable(self) -> bool:
@@ -1234,7 +1246,7 @@ class _SshTunnel:
             with contextlib.suppress(Exception):
                 self._on_exit(self._id)
 
-    def _exit_error(self, returncode: int | None) -> str:
+    def _exit_error(self, returncode: int | None, *, first_connect: bool = False) -> str:
         """Compose a human error from exit code + captured stderr.
 
         Classifies on real ssh signals, not on prose the WSSH proxy passes
@@ -1252,6 +1264,12 @@ class _SshTunnel:
         is classified separately by :meth:`_ssm_exit_error` — running SSM stderr
         through the ssh matchers above would mislabel e.g. an ``AccessDenied``
         as an "ssh auth failure".
+
+        *first_connect* is True when the child exited before the forward ever
+        came up (:meth:`_failed_on_child_exit`). A transport drop there carries
+        :data:`_FIRST_CONNECT_DROP_HINT`, which names ``ssh_host`` as the field
+        to check; a drop from :meth:`_monitor`, on a tunnel that was up, does
+        not, because that host was reachable under its name.
         """
         if self._probe_failed:
             return "health probe failed — tunnel alive but not forwarding"
@@ -1281,7 +1299,10 @@ class _SshTunnel:
         # where no self-heal is armed yet (so it must not promise reconnection).
         hit = _first_hit(low, _SSH_TRANSPORT_DROP_SIGNALS)
         if hit is not None:
-            return f"ssh tunnel transport drop: {_sanitize_banner(tail, anchor=hit)}"
+            detail = _sanitize_banner(tail, anchor=hit)
+            if first_connect:
+                return f"ssh tunnel transport drop ({_FIRST_CONNECT_DROP_HINT}): {detail}"
+            return f"ssh tunnel transport drop: {detail}"
         hit = _first_hit(low, _SSH_BIND_SIGNALS)
         if hit is not None:
             detail = _sanitize_banner(tail, anchor=hit)

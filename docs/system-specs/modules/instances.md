@@ -1214,6 +1214,9 @@ whose current variable parts are all charset-bound literals.
 | Settings → Remote Crew shows the opt-in card | `instances.enabled` is false. Set it and restart. |
 | Enabled but the panel says "not active" | The flag was set after the gateway started; the SSH manager is created at startup only. Restart. |
 | Iframe is blank or black | On a loopback dashboard origin, the pane's embedded SPA never announced readiness within 15s, so the error panel with **Retry** appears (Retry force-reloads even an identical src). An iframe reports no load error to its parent, so this watchdog is the only signal. On a non-loopback origin the CSP `frame-src` refuses the frame outright, so no iframe is mounted and no watchdog runs: the pane shows the "needs a local dashboard" card (see §4 step 1), and Retry would not help — open the dashboard on a loopback origin instead. |
+| Connect fails with `ssh tunnel transport drop (… check this instance's ssh_host)` | The ssh child died before the forward ever came up, which is how a proxy answers for a host that no longer exists under that name (rebuilt, renamed, decommissioned). Fix `ssh_host` in the instance's settings. A drop on a tunnel that was up does not carry this hint — that host was reachable. |
+| Token mint fails with `exited 127` / `kirocrew binary not found` | The remote's `kirocrew` is in none of the candidate paths (§12.1). The stderr names the override: set the instance's `remote_bin` to its path in `~/` form. |
+| Token mint fails with `Could not reach gateway on port N` | Nothing is listening on the remote: an installer put the binary there but never started a gateway. The stderr names the remedy: `kirocrew gateway` for this login, or `kirocrew service install` for one that survives logout. |
 | Connect fails with an SSH auth error | Refresh your SSH credentials (re-add the key to `ssh-agent`); `BatchMode` never prompts, so a missing credential is an immediate failure. Tunnels self-heal once auth is restored. |
 | Connect fails for another reason | Use **Diagnose**. The ladder reports the first broken link: `ssh_unreachable` (check SSH access or the host alias), `remote_down` (remote gateway not listening), `not_connected` (SSH and remote are fine, this instance has no tunnel yet: click Connect), or `tunnel_down` (reconnect). |
 | "local port N was taken while connecting" | The allocator picked a port that something grabbed in the moment before `ssh` bound it. Retry. If it persists, stop whatever keeps taking ports in that range or move `instances.tunnel_base_port` to a quieter one. |
@@ -1285,7 +1288,12 @@ unrelated consumers, and separating them is the point of the module.
 ### Consumer 1: remote token mint targets the running gateway's install
 
 Token mint SSHes to the remote and resolves `kirocrew` from a fixed PATH
-candidate list whose first entry is `$HOME/.local/bin/kirocrew`. When that
+candidate list (`REMOTE_BIN_CANDIDATES`) whose first entry is
+`$HOME/.local/bin/kirocrew`; the one-liner installer's venv and the managed
+launcher directory `~/.toolbox/bin` (the same one `env._EXTRA_PATH_DIRS` searches
+locally) follow it. When no candidate is executable the snippet exits 127 after
+a per-candidate diagnosis and a last line naming the `remote_bin` instance field
+as the override, in `~/` form (the validator refuses `$`). When that first
 launcher symlinks into an *uninstalled* checkout (no `.venv`), every mint fails
 even though the gateway itself is healthy, because the gateway runs from a
 different venv. Rebuilding and restarting the gateway does not fix mint, since

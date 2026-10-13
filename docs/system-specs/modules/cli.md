@@ -504,7 +504,12 @@ A gateway that takes the request but does not answer within the 20 s budget
 (`_TOKEN_REQUEST_TIMEOUT`) is reported as busy (`Gateway on port N is up but did
 not answer within 20 s (busy)`), also never as `Could not reach gateway`. A read
 timeout and a `URLError` wrapping a timeout both count as busy; a refused
-connection stays `Could not reach gateway`. A loop thread starved of the GIL
+connection stays `Could not reach gateway`, followed by a second line naming the
+remedy (`kirocrew gateway` for this login, `kirocrew service install` for a
+gateway that survives logout) — nothing is listening, and on a host an installer
+provisioned without starting a gateway this line, carried back by a remote mint,
+is the first thing the operator sees. Only the refused class carries it: a
+gateway that answered 403 or is busy is running. A loop thread starved of the GIL
 answers in 12-14 s while healthy, and calling that unreachable sends the
 operator to restart a gateway that works.
 

@@ -38,10 +38,25 @@ logger = logging.getLogger(__name__)
 DEFAULT_REMOTE_BIN = "$HOME/.local/bin/kirocrew"
 
 # Non-interactive SSH shells don't source ~/.zshrc, so PATH may be minimal. Each
-# candidate is a full path the remote shell can exec directly.
+# candidate is a full path the remote shell can exec directly. The third entry
+# is the managed-launcher directory :data:`kiro_crew.env._EXTRA_PATH_DIRS`
+# already searches locally: a remote provisioned by such an installer has its
+# ``kirocrew`` there and in neither of the first two; without this entry every
+# mint on such a remote exits 127 and only ``remote_bin`` gets it past that.
 REMOTE_BIN_CANDIDATES: tuple[str, ...] = (
     "$HOME/.local/bin/kirocrew",  # install.sh / source install
     "$HOME/.kirocrew-app/.venv/bin/kirocrew",  # one-liner installer venv
+    "$HOME/.toolbox/bin/kirocrew",  # managed launcher dir (see env._EXTRA_PATH_DIRS)
+)
+
+# Printed on the exit-127 path after the per-candidate diagnosis. The ladder
+# can never be complete, and the escape hatch exists -- the instance's
+# ``remote_bin`` field -- but an error that only lists what was tried leaves
+# the operator to find that field on their own. The example is in ``~/`` form
+# because that is the spelling the validator accepts (``$`` is refused).
+REMOTE_BIN_HINT = (
+    "if kirocrew is installed elsewhere on this host, set the instance's "
+    "remote_bin setting to its path, e.g. ~/.local/bin/kirocrew"
 )
 
 # ttl accepted by `kirocrew token --ttl`: a positive integer with an h/m suffix
@@ -245,6 +260,7 @@ def build_candidate_command(
             "      ;;",
             "  esac;",
             "done;",
+            f'echo "{REMOTE_BIN_HINT}" >&2;',
             "exit 127",
         ]
     )
