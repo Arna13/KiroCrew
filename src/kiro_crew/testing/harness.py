@@ -478,6 +478,12 @@ def _wait_for_ready_line(
         return None, buffer
 
     buf = b""
+    # Bounded tail for diagnostics: mirrors the pump's post-READY tail so
+    # a long-running silent subprocess cannot grow this without limit.
+    # Chunks beyond the cap are counted (not retained) so the timeout
+    # message can report truncation.
+    stdout_received: deque[bytes] = deque(maxlen=_StdoutPump.TAIL_CHUNKS)
+    _stdout_dropped = 0  # chunks evicted by the deque cap
     while True:
         if proc.poll() is not None:
             # Scan whatever the reader captures up to EOF before declaring the
@@ -486,17 +492,45 @@ def _wait_for_ready_line(
             payload, buf = _scan(buf + pump.drain_until_eof(EXIT_DRAIN_SECONDS))
             if payload is not None:
                 return payload
+            _trunc_exit = (
+                f" [{_stdout_dropped} earlier chunk(s) dropped]" if _stdout_dropped else ""
+            )
+            stdout_at_exit = (
+                b"".join(stdout_received).decode("utf-8", errors="replace")[-2000:] + _trunc_exit
+            )
             raise GatewaySpawnError(
                 f"gateway subprocess exited with code {proc.returncode} "
                 f"before emitting {READY_PREFIX} line.\n"
-                f"--- stderr (last) ---\n{_stderr_tail()}"
+                f"--- stderr (last) ---\n{_stderr_tail()}\n"
+                f"--- stdout (so far) ---\n{stdout_at_exit}"
             )
         remaining = deadline - time.monotonic()
         if remaining <= 0:
+            alive = proc.poll() is None
+            has_any_output = bool(stdout_received) or bool(stderr_buffer)
+            # Build a diagnostic that names whether the process is alive, what
+            # it wrote to stdout, and what state it is in.  The original
+            # stderr-only message left cold-import failures undiagnosable
+            # because stderr is empty for the whole Python import phase.
+            _trunc = f" [{_stdout_dropped} earlier chunk(s) dropped]" if _stdout_dropped else ""
+            stdout_so_far = (
+                b"".join(stdout_received).decode("utf-8", errors="replace")[-2000:] + _trunc
+            )
+            stderr_so_far = _stderr_tail()
+            process_state = f"alive (pid {proc.pid})" if alive else f"exited {proc.returncode}"
+            cold_hint = (
+                "\n(no output from subprocess — likely still in cold import "
+                "phase; raise KIROCREW_HARNESS_READY_TIMEOUT if the runner is slow)"
+                if not has_any_output
+                else ""
+            )
             raise GatewaySpawnError(
                 f"gateway did not emit {READY_PREFIX} line within "
-                f"{timeout:.1f}s. Override with KIROCREW_HARNESS_READY_TIMEOUT.\n"
-                f"--- stderr (last) ---\n{_stderr_tail()}"
+                f"{timeout:.1f}s [{process_state}]. "
+                f"Override with KIROCREW_HARNESS_READY_TIMEOUT.\n"
+                f"--- stderr (last) ---\n{stderr_so_far}\n"
+                f"--- stdout (so far) ---\n{stdout_so_far}"
+                f"{cold_hint}"
             )
         # Cap each wait at 0.5s so the deadline + poll() checks above run
         # frequently even if the subprocess goes silent.
@@ -508,8 +542,13 @@ def _wait_for_ready_line(
             # EOF on stdout without READY. The child may still be alive (it can
             # close stdout and keep running), so keep honouring the deadline and
             # the exit check rather than failing here; the queue is empty from
-            # now on, so each iteration sleeps its 0.5s instead of spinning.
+            # now on, so each iteration sleeps its 0.5 s instead of spinning.
+            # Deliberate: a child that closes stdout but keeps running must not
+            # be failed immediately; the deadline and the exit check own the verdict.
             continue
+        if len(stdout_received) == _StdoutPump.TAIL_CHUNKS:
+            _stdout_dropped += 1
+        stdout_received.append(chunk)
         payload, buf = _scan(buf + chunk)
         if payload is not None:
             return payload
