@@ -12099,6 +12099,7 @@
       "previous_chats": "Chats anteriores",
       "regenerate_title_with_llm": "Gerar o título novamente com o LLM — o nome atual pode ser restaurado com Desfazer",
       "rename_session_title": "{{title}} (renomear sessão)",
+      "rename_title_hint": "Enter guarda · Esc cancela",
       "session_renamed_to": "Sessão renomeada para {{title}}",
       "auto_title": "Gerar o título novamente",
       "regenerating_title": "Gerando o título",

@@ -11761,6 +11761,7 @@
       "previous_chats": "以前のチャット",
       "regenerate_title_with_llm": "LLM でタイトルを再生成 — 現在の名前は「取り消し」で元に戻せます",
       "rename_session_title": "{{title}}（セッション名を変更）",
+      "rename_title_hint": "Enter で保存 · Esc でキャンセル",
       "session_renamed_to": "セッション名を {{title}} に変更しました",
       "auto_title": "タイトルを再生成",
       "regenerating_title": "タイトルを生成中",

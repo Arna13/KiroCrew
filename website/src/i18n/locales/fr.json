@@ -12099,6 +12099,7 @@
       "previous_chats": "Chats précédents",
       "regenerate_title_with_llm": "Régénérer le titre avec le LLM — le nom actuel peut être rétabli avec Annuler",
       "rename_session_title": "{{title}} (renommer la session)",
+      "rename_title_hint": "Entrée enregistre · Échap annule",
       "session_renamed_to": "Session renommée en {{title}}",
       "auto_title": "Régénérer le titre",
       "regenerating_title": "Génération du titre",
