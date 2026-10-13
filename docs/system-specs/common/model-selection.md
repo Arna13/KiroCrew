@@ -472,6 +472,25 @@ its own once the cache refreshes with a list that carries it.
   cost cap is that profile's `worker_model` / `worker_reasoning_effort`, where
   `"auto"` is a real pin on the backend default. Until then a dispatched session
   starts on the default like any other.
+- **Phase roles** are the other three `agent.role_models` keys: `plan`,
+  `implement` and `review` (`SPAWN_ROLE_KEYS`). They are read only for a
+  `spawn_run` call tagged with that `role`, and only when the call names no
+  `model` of its own: `POST /api/spawn` resolves the tag through
+  `subagent.select_spawn_role_model` and puts the role's pin in the spawn's
+  `model` slot, so a selected pin takes every check an explicit model takes
+  (the backend's qualified-id check on the request, the provider factory's
+  selection at start) and, like the `subagent` pin, wins over a named agent's
+  or crew member's own model pin. An unpinned phase role selects nothing: the run then
+  reads the `subagent` pin and the session default exactly as an untagged run,
+  and an unpinned start stays eligible for `decisions.model_route_derive`'s
+  derived tiers, while a selected pin, like any chosen model, is never routed.
+  Every phase role defaults to inherit, so with nothing configured a tagged spawn
+  runs on the model an untagged one does. The tag is a closed enum and cannot
+  carry a model id; each pin passed `_validate_role_model` when it was saved.
+  The response names the selection (`role`, `role_model`, `role_model_source`),
+  and `spawn_run` renders it as one receipt line per role. Phases are declared
+  by the agent through the tag, never inferred; the packaged `orchestrator`
+  skill is the opt-in caller, and nothing loads it on its own.
 - **A served context window** is declared only through `agent.model_context_tokens`, one
   entry per EXACT model id as `agent.model` carries it (`model_registry.model_window`
   matches it as written, so two servers of the same weights stay distinct). It is an

@@ -72,11 +72,6 @@ _SA_ERROR_MAX_CHARS = 800
 #: ``_post`` default timeout per unsubmitted task.
 _LOST_REPORT_TIMEOUT_SECS = 5.0
 
-#: The phase roles ``spawn_run`` advertises. The schema's closed enum and the
-#: server's ``SPAWN_ROLE_VALUES`` read the same tuple, so the tool cannot offer
-#: a role the endpoint refuses.
-_SPAWN_ROLE_ENUM: tuple[str, ...] = SPAWN_ROLE_KEYS
-
 # Roster carried in the spawn_run parameter descriptions. Kept small on purpose:
 # a tool description is always-on context in every session, so this buys
 # self-correction for a few dozen characters, not a full agent listing.
@@ -344,7 +339,6 @@ def schemas(*, names_only: bool = False) -> list[dict[str, Any]]:
                                 "model": {"type": "string"},
                                 "reasoning_effort": {"type": "string"},
                                 "backend": {"type": "string"},
-                                "role": {"type": "string", "enum": list(_SPAWN_ROLE_ENUM)},
                             },
                             "required": ["task"],
                             "additionalProperties": False,
@@ -352,9 +346,9 @@ def schemas(*, names_only: bool = False) -> list[dict[str, Any]]:
                         "description": (
                             "Multiple tasks to run in parallel as one wave. Each entry is a "
                             "prompt string, or an object {task, model?, "
-                            "reasoning_effort?, backend?, role?} whose fields override the "
-                            "call's batch-wide value for that task only, e.g. the same review "
-                            "prompt on two models or two backends, delivered together."
+                            "reasoning_effort?, backend?} whose fields override the call's "
+                            "batch-wide value for that task only, e.g. the same review prompt "
+                            "on two models or two backends, delivered together."
                         ),
                     },
                     "agent": {
@@ -439,14 +433,14 @@ def schemas(*, names_only: bool = False) -> list[dict[str, Any]]:
                     },
                     "role": {
                         "type": "string",
-                        "enum": list(_SPAWN_ROLE_ENUM),
+                        "enum": list(SPAWN_ROLE_KEYS),
                         "description": (
                             "Optional phase role: 'plan', 'implement' or 'review'. A "
                             "subagent with no 'model' of its own runs on the model the "
                             "owner saved for that role (agent.role_models), else the "
                             "subagent role model, else the session default; the result "
-                            "names the model each role was given. Batch-wide; a tasks[] "
-                            "object can override it per task."
+                            "names the model each role was given. Batch-wide: one role "
+                            "for every task in the call."
                         ),
                     },
                     "reasoning_effort": {
@@ -1007,7 +1001,6 @@ def spawn_run(name: str, args: dict[str, Any]) -> str | DeferredTool:
         t_model = over.get("model") or model
         t_effort = over.get("reasoning_effort") or reasoning_effort
         t_backend = over.get("backend") or backend
-        t_role = over.get("role") or role
         if a in refused_agents:
             # Short line on purpose: the full roster is already on the first
             # refusal above, and repeating it once per remaining member would
@@ -1035,8 +1028,8 @@ def spawn_run(name: str, args: dict[str, Any]) -> str | DeferredTool:
             body["reasoning_effort"] = t_effort
         if t_backend:
             body["backend"] = t_backend
-        if t_role:
-            body["role"] = t_role
+        if role:
+            body["role"] = role
         if keep:
             body["keep"] = True
         if not inc_memory:

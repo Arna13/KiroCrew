@@ -37,10 +37,11 @@ The `spawn_run` tool accepts:
 - `reasoning_effort` — `low` / `medium` / `high` / `xhigh` / `max`, batch-wide
 - `backend` — the agent harness the run starts on instead of the gateway default (`kiro`, `claude`, `codex`, or any other backend installed and allowed on this gateway), batch-wide. A `tasks` entry can set its own `backend` (and `model`) so one wave can send each task to a different harness. A backend that is not allowed here, not installed on this machine, or installed only after the gateway started (restart the gateway to use it), is refused at spawn time with the list of backends that can start (and, for an allowed one that is missing, the command that installs it) rather than replaced by the default. Pass `model` as an id from that backend's own list. A `spawn_continue` follow-up, and a retry, ask for the same backend as the original run
 - `keep` — make the run a continuable conversation with guaranteed resumability and longer retention
+- `role` — `plan`, `implement` or `review`, batch-wide: one role for every task in the call (a `tasks` entry cannot carry its own; use one call per phase). A run with no `model` of its own runs on the model the owner saved for that role in `agent.role_models`, else the `subagent` pin, else the session default; an explicit `model` still wins. The tag only selects one of those saved pins, never a model of its own. The receipt adds one `ℹ role '<role>' for <ids>: ...` line per distinct selection, naming the model and where it came from. The packaged `orchestrator` skill uses it to plan in-session and hand implementation and review to role-tagged subagents
 - `cwd` — absolute launch directory, which must be under a configured `subagent_cwd_allowed_roots` entry
 
-Setting `model`, `reasoning_effort` or `backend`, or `keep: true`, forces the
-dedicated-process path instead of session sharing.
+Setting `model`, `reasoning_effort` or `backend`, a `role` whose pin is set, or
+`keep: true`, forces the dedicated-process path instead of session sharing.
 
 #### When to delegate
 

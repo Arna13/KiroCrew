@@ -825,6 +825,42 @@ describe('ChatPanel — per-role models', () => {
   })
 })
 
+describe('ChatPanel — orchestrator phase models', () => {
+  it.each([
+    ['Plan Model', 'agent.role_models.plan'],
+    ['Implement Model', 'agent.role_models.implement'],
+    ['Review Model', 'agent.role_models.review'],
+  ])('%s PATCHes its own config path', async (label, path) => {
+    wrap('models')
+    await waitFor(() => expect(modelsMock).toHaveBeenCalled())
+    await openSelect(label)
+    fireEvent.click(screen.getByRole('option', { name: 'claude-opus-4.8' }))
+    await waitFor(() => expect(patchConfigMock).toHaveBeenCalledWith(path, 'claude-opus-4.8'))
+  })
+
+  it('labels an unset phase as the Subagent Model it falls back to', async () => {
+    // An unset phase role runs on whatever the Subagent Model row resolves to,
+    // so its option names that row rather than the provider-picks label.
+    wrap('models')
+    const opts = await openSelect('Implement Model')
+    expect(opts.map(o => o.textContent)).toEqual([
+      'Same as Subagent Model',
+      'claude-opus-4.8',
+      'claude-haiku-4.5',
+    ])
+  })
+
+  it('surfaces a failed phase-model write', async () => {
+    seedMc({ agent: { role_models: { review: 'claude-haiku-4.5' } } })
+    rejectOnce(patchConfigMock)
+    wrap('models')
+    await waitFor(() => expect(modelsMock).toHaveBeenCalled())
+    await openSelect('Review Model')
+    fireEvent.click(screen.getByRole('option', { name: 'claude-opus-4.8' }))
+    expect(await screen.findByText(/Failed to save role model/)).toBeInTheDocument()
+  })
+})
+
 describe('ChatPanel — per-role reasoning effort', () => {
   it.each([
     ['Background Effort', 'background', 'agent.role_efforts.background'],

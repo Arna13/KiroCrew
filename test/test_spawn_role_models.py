@@ -159,11 +159,10 @@ class TestSchema:
         with pytest.raises(ValidationError):
             validate_tool_args({"task": "x", "role": bad}, SPAWN_RUN_SCHEMA)
 
-    def test_a_tasks_entry_takes_a_role(self):
-        cleaned = validate_tool_args({"task": "x", "role": "review"}, SPAWN_RUN_TASK_ITEM_SCHEMA)
-        assert cleaned["role"] == "review"
+    def test_a_tasks_entry_cannot_carry_a_role(self):
+        """The role is batch-wide: one role for every task in the call."""
         with pytest.raises(ValidationError):
-            validate_tool_args({"task": "x", "role": "boss"}, SPAWN_RUN_TASK_ITEM_SCHEMA)
+            validate_tool_args({"task": "x", "role": "review"}, SPAWN_RUN_TASK_ITEM_SCHEMA)
 
     def test_the_tool_advertises_the_same_closed_set(self):
         from kiro_crew.mcp_tools.spawn import schemas
@@ -171,7 +170,7 @@ class TestSchema:
         spawn_run = next(s for s in schemas() if s["name"] == "spawn_run")
         props = spawn_run["inputSchema"]["properties"]
         assert props["role"]["enum"] == list(SPAWN_ROLE_KEYS)
-        assert props["tasks"]["items"]["properties"]["role"]["enum"] == list(SPAWN_ROLE_KEYS)
+        assert "role" not in props["tasks"]["items"]["properties"]
 
 
 class TestSelection:
@@ -294,16 +293,23 @@ def _run_tool(args: dict[str, Any], responses: list[dict]) -> tuple[list[dict], 
 
 
 class TestToolReceipt:
-    def test_the_role_is_batch_wide_and_a_task_entry_overrides_it(self):
+    def test_the_role_reaches_every_task_in_the_call(self):
         bodies, _ = _run_tool(
-            {"tasks": ["a", {"task": "b", "role": "review"}], "role": "implement"},
+            {"tasks": ["a", {"task": "b", "model": "m-own"}], "role": "implement"},
             [{"id": "a1"}, {"id": "a2"}],
         )
-        assert [b["role"] for b in bodies] == ["implement", "review"]
+        assert [b["role"] for b in bodies] == ["implement", "implement"]
+
+    def test_a_task_entry_role_is_refused_before_any_spawn(self):
+        bodies, result = _run_tool(
+            {"tasks": ["a", {"task": "b", "role": "review"}], "role": "implement"}, []
+        )
+        assert bodies == []
+        assert result.startswith("Error")
 
     def test_each_role_line_names_its_model_and_source(self):
         _, result = _run_tool(
-            {"tasks": ["a", "b", {"task": "c", "role": "review"}], "role": "implement"},
+            {"tasks": ["a", "b", "c"], "role": "implement"},
             [
                 {
                     "id": "a1",
@@ -317,15 +323,15 @@ class TestToolReceipt:
                     "role_model": "m-impl",
                     "role_model_source": "role",
                 },
-                {"id": "a3", "role": "review", "role_model": "", "role_model_source": "inherit"},
+                {"id": "a3", "role": "implement", "role_model": "", "role_model_source": "inherit"},
             ],
         )
         assert (
             "ℹ role 'implement' for a1, a2: model 'm-impl' (agent.role_models.implement)" in result
         )
         assert (
-            "ℹ role 'review' for a3: the session default model "
-            "(agent.role_models.review and agent.role_models.subagent are unset)"
+            "ℹ role 'implement' for a3: the session default model "
+            "(agent.role_models.implement and agent.role_models.subagent are unset)"
         ) in result
         assert "Spawned 3 subagent(s)" in result
 
@@ -354,9 +360,9 @@ class TestToolReceipt:
 
 
 class TestOrchestratorEndToEnd:
-    """The orchestrator's two delegated phases through the real tool and the
-    real endpoint, against a stub manager: implementation and review run on
-    their role models, and the planning turn itself spawns nothing."""
+    """The orchestrator's three delegated phases through the real tool and the
+    real endpoint, against a stub manager: each runs on its role model, and
+    with nothing configured each runs where untagged work runs."""
 
     def _drive(
         self, calls: list[dict], role_models: dict[str, str]
@@ -390,14 +396,16 @@ class TestOrchestratorEndToEnd:
     def test_phases_run_on_their_role_models(self):
         spawned, receipts = self._drive(
             [
+                {"task": "plan the change", "role": "plan"},
                 {"tasks": ["implement part 1", "implement part 2"], "role": "implement"},
                 {"task": "review parts 1 and 2", "role": "review"},
             ],
             {"implement": "m-impl", "review": "m-rev", "plan": "m-plan"},
         )
-        assert [s["model"] for s in spawned] == ["m-impl", "m-impl", "m-rev"]
-        assert "ℹ role 'implement' for sa1, sa2: model 'm-impl'" in receipts[0]
-        assert "ℹ role 'review' for sa3: model 'm-rev'" in receipts[1]
+        assert [s["model"] for s in spawned] == ["m-plan", "m-impl", "m-impl", "m-rev"]
+        assert "ℹ role 'plan' for sa1: model 'm-plan'" in receipts[0]
+        assert "ℹ role 'implement' for sa2, sa3: model 'm-impl'" in receipts[1]
+        assert "ℹ role 'review' for sa4: model 'm-rev'" in receipts[2]
 
     def test_unconfigured_phases_run_where_untagged_work_runs(self):
         spawned, receipts = self._drive(
@@ -433,8 +441,8 @@ class TestOrchestratorSkill:
 
     def test_it_declares_each_delegated_phase_with_a_role_tag(self):
         _, text = self._parts()
-        assert 'role: "implement"' in text
-        assert 'role: "review"' in text
+        for role in SPAWN_ROLE_KEYS:
+            assert f'role: "{role}"' in text, role
         assert "agent.role_models" in text
 
     def test_it_reports_each_phase_model(self):

@@ -180,7 +180,13 @@ type KirocrewConfigShape = {
   session_summary?: { enabled?: boolean }
   agent?: {
     model?: string
-    role_models?: { background?: string; subagent?: string }
+    role_models?: {
+      background?: string
+      subagent?: string
+      plan?: string
+      implement?: string
+      review?: string
+    }
     role_efforts?: { background?: string; subagent?: string }
     reasoning_effort?: string
     soft_stop_budget_secs?: number
@@ -1256,6 +1262,31 @@ export function ChatPanel({ basePath }: { basePath?: string } = {}) {
     optimisticConfigOpts('agent.role_models.subagent', () => i18nT('pages.settings.chatPanel.failed_to_save_role_model'))
   )
 
+  // Orchestrator phase roles (agent.role_models.plan / implement / review). A
+  // sub-agent spawn tagged with the role runs on this pin; "auto" (unset) runs
+  // on whatever the Subagent Model row resolves to, so these rows name that
+  // row instead of the provider-picks wording above.
+  const planModel = mcCfg?.agent?.role_models?.plan || 'auto'
+  const implementModel = mcCfg?.agent?.role_models?.implement || 'auto'
+  const reviewModel = mcCfg?.agent?.role_models?.review || 'auto'
+  const shownPlanModel = overlay.shown('agent.role_models.plan', planModel)
+  const shownImplementModel = overlay.shown('agent.role_models.implement', implementModel)
+  const shownReviewModel = overlay.shown('agent.role_models.review', reviewModel)
+  const phaseModelLabels = (opts: string[]): string[] =>
+    opts.map(m => (m === 'auto' ? i18nT('pages.settings.chatPanel.phase_model_inherit') : m))
+  const planModelOpts = roleModelOptions(shownPlanModel, planModel)
+  const implementModelOpts = roleModelOptions(shownImplementModel, implementModel)
+  const reviewModelOpts = roleModelOptions(shownReviewModel, reviewModel)
+  const planModelMut = useMutation(
+    optimisticConfigOpts('agent.role_models.plan', () => i18nT('pages.settings.chatPanel.failed_to_save_role_model'))
+  )
+  const implementModelMut = useMutation(
+    optimisticConfigOpts('agent.role_models.implement', () => i18nT('pages.settings.chatPanel.failed_to_save_role_model'))
+  )
+  const reviewModelMut = useMutation(
+    optimisticConfigOpts('agent.role_models.review', () => i18nT('pages.settings.chatPanel.failed_to_save_role_model'))
+  )
+
   // Per-role reasoning effort, paired with each role's model. Empty inherits the
   // the MODEL's own default: `RoleModels.resolve_effort` does not fall back to
   // `agent.reasoning_effort` either. The effort row is only meaningful on a
@@ -1577,9 +1608,43 @@ export function ChatPanel({ basePath }: { basePath?: string } = {}) {
         </div>
 
         <div className="mb-8">
+        <h4 className="text-base font-semibold text-text-strong">{i18nT('pages.settings.chatPanel.role_phases')}</h4>
+        <div className="text-[12px] text-muted mb-1">{i18nT('pages.settings.chatPanel.model_for_orchestrator_phases')}</div>
+        <SettingsCard index={3}>
+          <SettingsSelect
+            label={i18nT('pages.settings.chatPanel.plan_model')}
+            description={i18nT('pages.settings.chatPanel.plan_model_desc')}
+            value={shownPlanModel}
+            options={planModelOpts}
+            optionLabels={phaseModelLabels(planModelOpts)}
+            onChange={v => planModelMut.mutate(v)}
+            disabled={!mcQ.isSuccess}
+          />
+          <SettingsSelect
+            label={i18nT('pages.settings.chatPanel.implement_model')}
+            hint={i18nT('pages.settings.chatPanel.implement_model_hint')}
+            value={shownImplementModel}
+            options={implementModelOpts}
+            optionLabels={phaseModelLabels(implementModelOpts)}
+            onChange={v => implementModelMut.mutate(v)}
+            disabled={!mcQ.isSuccess}
+          />
+          <SettingsSelect
+            label={i18nT('pages.settings.chatPanel.review_model')}
+            hint={i18nT('pages.settings.chatPanel.review_model_hint')}
+            value={shownReviewModel}
+            options={reviewModelOpts}
+            optionLabels={phaseModelLabels(reviewModelOpts)}
+            onChange={v => reviewModelMut.mutate(v)}
+            disabled={!mcQ.isSuccess}
+          />
+        </SettingsCard>
+        </div>
+
+        <div className="mb-8">
         <h4 className="text-base font-semibold text-text-strong">{i18nT('pages.settings.chatPanel.throttle_fallback')}</h4>
         <div className="text-[12px] text-muted mb-1">{i18nT('pages.settings.chatPanel.model_tried_when_your_current_model_stays_rate_li')}</div>
-        <SettingsCard index={3}>
+        <SettingsCard index={4}>
           <SettingsSelect
             label={i18nT('pages.settings.chatPanel.fallback_model')}
             hint={i18nT('pages.settings.chatPanel.fallback_auto_hint')}
@@ -1596,7 +1661,7 @@ export function ChatPanel({ basePath }: { basePath?: string } = {}) {
         <div>
         <h4 className="text-base font-semibold text-text-strong">{i18nT('pages.settings.chatPanel.refusal_fallback')}</h4>
         <div className="text-[12px] text-muted mb-1">{i18nT('pages.settings.chatPanel.refusal_fallback_desc')}</div>
-        <SettingsCard index={4}>
+        <SettingsCard index={5}>
           <SettingsSelect
             label={i18nT('pages.settings.chatPanel.refusal_fallback_model')}
             hint={i18nT('pages.settings.chatPanel.refusal_fallback_auto_hint')}

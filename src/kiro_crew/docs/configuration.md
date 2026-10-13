@@ -260,6 +260,7 @@ Set a registered value with, for example,
 | `agent.tool_search_min_tokens` | Tool-definition token threshold; `0` with the percentage threshold also `0` always defers | `50000` |
 | `agent.fallback_model` | Model used after the active model exhausts its transient-retry budget. `"auto"` defers to availability-aware routing; `""` disables fallback | `"auto"` |
 | `agent.refusal_fallback_model` | Model one declined message is retried on when the active model's content filter refuses it (single-message; the primary returns on the next turn). `"auto"` uses the model the provider's refusal recommends; `""` disables the retry | `""` |
+| `agent.role_models` | Per-role model pins. `background` runs title generation, history compaction and heartbeat polls; `subagent` runs spawned subagents; `plan`, `implement` and `review` run a subagent whose `spawn_run` call is tagged with that `role` and names no `model` of its own. An unset or `"auto"` role inherits: `background` and `subagent` let the provider pick, and an unset phase role uses the `subagent` pin, then the session default. Each pin is checked against the models the account can run when it is saved. Editable from Settings → Chat → Models (Background, Subagents, Orchestrator Phases) | `{}` |
 | `agent.max_channels` | Max concurrent agent channels (1-5) | `1` |
 | `agent.max_channel_agents` | Max agents per channel (1-10) | `3` |
 | `agent.log_level` | Persistent log level for the `kiro_crew` logger, applied at startup. The `--verbose` CLI flag overrides it | `"WARNING"` |

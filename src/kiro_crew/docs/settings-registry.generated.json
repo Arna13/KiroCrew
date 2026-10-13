@@ -610,6 +610,13 @@
       "description": "Expand history sidebar by default"
     },
     {
+      "id": "chat.implement-model",
+      "label": "Implement Model",
+      "tab": "chat",
+      "route": "/settings/chat/models?highlight=chat.implement-model",
+      "description": "For the subagents that make the changes."
+    },
+    {
       "id": "chat.link-previews",
       "label": "Link Previews",
       "tab": "chat",
@@ -667,6 +674,13 @@
       "description": "Render diffs as plain unified-diff text instead of syntax-highlighted colour. Uses less memory on large diffs."
     },
     {
+      "id": "chat.plan-model",
+      "label": "Plan Model",
+      "tab": "chat",
+      "route": "/settings/chat/models?highlight=chat.plan-model",
+      "description": "Used only when you ask the orchestrator for a planning subagent. Otherwise the chat's own model plans."
+    },
+    {
       "id": "chat.pr-and-issue-chips-on-session-cards",
       "label": "PR and Issue Chips on Session Cards",
       "tab": "chat",
@@ -707,6 +721,13 @@
       "tab": "chat",
       "route": "/settings/chat/sessions?highlight=chat.restore-window",
       "description": "Time window for session restoration"
+    },
+    {
+      "id": "chat.review-model",
+      "label": "Review Model",
+      "tab": "chat",
+      "route": "/settings/chat/models?highlight=chat.review-model",
+      "description": "For the subagent that reviews the changes against the plan."
     },
     {
       "id": "chat.selectable-models",

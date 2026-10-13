@@ -1464,9 +1464,9 @@ def validate_jsonrpc_request(req: dict[str, Any]) -> tuple[str, Any, dict[str, A
 #: membership check into a log line or an error message.
 _BACKEND_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 
-#: The phase role a ``spawn_run`` call or ``tasks[]`` entry may name. A closed
-#: set: the tag only SELECTS an owner-saved ``agent.role_models`` pin, so it can
-#: never carry a model id of its own. ``""`` means untagged.
+#: The phase role a ``spawn_run`` call may name, batch-wide. A closed set: the
+#: tag only SELECTS an owner-saved ``agent.role_models`` pin, so it can never
+#: carry a model id of its own. ``""`` means untagged.
 SPAWN_ROLE_VALUES: frozenset[str] = frozenset({"", *SPAWN_ROLE_KEYS})
 
 SPAWN_RUN_TASK_ITEM_SCHEMA = ToolSchema(
@@ -1476,7 +1476,6 @@ SPAWN_RUN_TASK_ITEM_SCHEMA = ToolSchema(
         FieldSpec("model", str, max_len=MAX_SHORT_STRING, pattern=_MODEL_NAME_RE),
         FieldSpec("reasoning_effort", str, allowed=EFFORT_VALUES),
         FieldSpec("backend", str, max_len=MAX_SHORT_STRING, pattern=_BACKEND_NAME_RE),
-        FieldSpec("role", str, allowed=SPAWN_ROLE_VALUES),
     ],
 )
 
@@ -1531,7 +1530,7 @@ SPAWN_RUN_SCHEMA = ToolSchema(
         # Optional phase role for the subagent(s): "plan", "implement" or
         # "review". A run with no model of its own takes
         # agent.role_models[<role>], then the subagent pin, then the session
-        # default. Batch-wide; a tasks[] object can override it per task.
+        # default. Batch-wide: one role for every task in the call.
         FieldSpec("role", str, allowed=SPAWN_ROLE_VALUES),
         # keep=True makes the run a continuable conversation: its session
         # persists (hibernated on disk) after completion, and spawn_continue

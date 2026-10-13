@@ -10,16 +10,14 @@ for it:
 
 | Phase | Where it runs | Model |
 |---|---|---|
-| Plan | this session | the session's model |
+| Plan | this session, or a sub-agent with `spawn_run(role: "plan")` when the user asks for it | the session's model, or `agent.role_models.plan` |
 | Implement | sub-agents, `spawn_run(role: "implement")` | `agent.role_models.implement` |
 | Review | a sub-agent, `spawn_run(role: "review")` | `agent.role_models.review` |
 
-The owner maps roles to models in Settings → Chat → Per-role models (the
-`agent.role_models` config). An unset role falls back to the sub-agent model
-(`agent.role_models.subagent`) and then to the session default, so with nothing
-set every phase runs on the model it would run on anyway. The `plan` role is
-for an orchestrator that hands planning to a sub-agent with
-`spawn_run(role: "plan")`; this procedure plans in its own session.
+The owner maps roles to models in Settings → Chat → Models → Orchestrator
+Phases (the `agent.role_models` config). An unset role falls back to the
+sub-agent model (`agent.role_models.subagent`) and then to the session default,
+so with nothing set every phase runs on the model it would run on anyway.
 
 You declare each phase through the spawn's `role` tag. Nothing infers a phase
 for you, and the tag only picks the owner's saved model: never pass a `model`
@@ -36,10 +34,19 @@ pay that.
 
 ## Procedure
 
-1. **Plan, here.** Read what the task needs and write the plan in this session:
-   the goal, the slices of implementation work, which files each slice owns, and
-   how each slice is checked. Slices that touch the same file are one slice.
-   Show the plan to the user before you implement anything that is hard to undo.
+1. **Plan.** By default you plan here, on the session's model: read what the
+   task needs and write the plan in this session — the goal, the slices of
+   implementation work, which files each slice owns, and how each slice is
+   checked. Slices that touch the same file are one slice. When the user asks
+   for the plan to come from the Plan Model instead, hand the planning to one
+   sub-agent and work from the plan it returns:
+
+   ```
+   spawn_run(task: "<planning brief: the goal, what to read, the plan shape above>", role: "plan")
+   ```
+
+   Note the model its `ℹ role 'plan' ...` receipt line names. Either way, show
+   the plan to the user before you implement anything that is hard to undo.
 2. **Implement.** One `spawn_run` call for the wave, every entry tagged:
 
    ```
@@ -73,7 +80,7 @@ never from what you expected:
 ```
 | Phase | Model | From |
 |---|---|---|
-| Plan | <the session's model> | this session |
+| Plan | <the session's model, or the model from the ℹ role 'plan' line> | <this session, or the source it names> |
 | Implement | <model from the ℹ role 'implement' line> | <the source it names> |
 | Review | <model from the ℹ role 'review' line> | <the source it names> |
 ```

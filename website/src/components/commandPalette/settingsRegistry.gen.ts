@@ -1104,6 +1104,18 @@ export const SETTINGS_REGISTRY: SettingEntry[] =
     }
   },
   {
+    "id": "chat.implement-model",
+    "label": "Implement Model",
+    "labelKey": "pages.settings.chatPanel.implement_model",
+    "description": "For the subagents that make the changes.",
+    "tab": "chat",
+    "type": "select",
+    "occurrence": 1,
+    "params": {
+      "sub": "models"
+    }
+  },
+  {
     "id": "chat.link-previews",
     "label": "Link Previews",
     "labelKey": "pages.settings.chatPanel.link_previews",
@@ -1201,6 +1213,18 @@ export const SETTINGS_REGISTRY: SettingEntry[] =
     }
   },
   {
+    "id": "chat.plan-model",
+    "label": "Plan Model",
+    "labelKey": "pages.settings.chatPanel.plan_model",
+    "description": "Used only when you ask the orchestrator for a planning subagent. Otherwise the chat's own model plans.",
+    "tab": "chat",
+    "type": "select",
+    "occurrence": 1,
+    "params": {
+      "sub": "models"
+    }
+  },
+  {
     "id": "chat.pr-and-issue-chips-on-session-cards",
     "label": "PR and Issue Chips on Session Cards",
     "labelKey": "pages.settings.chatPanel.session_card_source_links",
@@ -1270,6 +1294,18 @@ export const SETTINGS_REGISTRY: SettingEntry[] =
     "occurrence": 1,
     "params": {
       "sub": "sessions"
+    }
+  },
+  {
+    "id": "chat.review-model",
+    "label": "Review Model",
+    "labelKey": "pages.settings.chatPanel.review_model",
+    "description": "For the subagent that reviews the changes against the plan.",
+    "tab": "chat",
+    "type": "select",
+    "occurrence": 1,
+    "params": {
+      "sub": "models"
     }
   },
   {
