@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any
 from aiohttp import web
 
 if TYPE_CHECKING:
+    from kiro_crew.dashboard import display_verdicts
     from kiro_crew.dashboard.chat_handlers import (
         _FLUSH_SNAPSHOT_RETRIES,
         _TRANSIENT_ROLES,
@@ -1189,6 +1190,7 @@ async def api_chat_slot_detail(request: web.Request) -> web.Response:
     # same snapshot discipline the flush-thread save path relies on.
     key = slot.key
     workspace = slot.workspace
+    verdict_key = slot_history_key(slot)
     running = slot.running
     stopping = slot._stopping
     display_title = slot.display_title
@@ -1215,7 +1217,12 @@ async def api_chat_slot_detail(request: web.Request) -> web.Response:
         # blocked the event loop past the loop-stall watchdog's exit budget
         # and hard-exited the gateway. json.dumps of the same payload is a
         # second loop-blocking cost, so it lives in the thread too.
-        prepared = _prepare_messages(messages, running, live_child=live_child, workspace=workspace)
+        # The session's stored display verdicts (display_verdicts) let a cold
+        # render skip the scan for every string a save already judged.
+        with display_verdicts.session(verdict_key):
+            prepared = _prepare_messages(
+                messages, running, live_child=live_child, workspace=workspace
+            )
         return json.dumps(
             {
                 "key": key,
