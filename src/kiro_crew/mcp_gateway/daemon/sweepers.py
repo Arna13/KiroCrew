@@ -295,9 +295,13 @@ async def _heartbeat_sweeper(
                             with contextlib.suppress(Exception):
                                 await evicted.shutdown(timeout=2.0)
                         logger.warning(
-                            "heartbeat recycled %s backend pool=%s",
+                            "heartbeat recycled %s backend pool=%s %s",
                             state,
                             key.human_readable(),
+                            backend.lifecycle_fields(
+                                "backend_gone",
+                                "process_exit" if state == "gone" else "deadline",
+                            ),
                         )
                     elif state == "alive":
                         pool.note_backend_healthy(key.stable_hash())
