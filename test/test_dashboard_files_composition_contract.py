@@ -122,7 +122,7 @@ _BASE_NAMES = frozenset("""
         api_screenshot api_slack_upload_file api_upload api_upload_file api_workspaces
         api_workspaces_create api_workspaces_delete api_workspaces_update
         append_and_surface asdict atomic_write binary_content_is_flagged
-        cgroup_scope_argv coerce_dict_section config_dir config_loader
+        cgroup_scope_argv chats_using_workspace coerce_dict_section config_dir config_loader
         dashboard_slot_key data_home drained_to_thread executors extract_blocks
         extract_pdf_segments extract_slides extract_text file_delivery_consent
         is_direct_local_request is_sensitive_canonical_path is_sensitive_path is_sensitive_resolved_path
@@ -137,7 +137,7 @@ _BASE_NAMES = frozenset("""
         sandbox_credential_targets sandboxed_spawn_argv sniff_raster_mime
         update_config_locked upload_destination validate_provider_executable
         validate_tool_args vet_zip_inventory_bytes web wide_content_is_flagged
-        worktree_probe_failure_is_empty_scope wrap_argv
+        workspace_in_use_response worktree_probe_failure_is_empty_scope wrap_argv
     """.split())
 
 #: The owners the facade composes. Adding or removing one changes the composition,

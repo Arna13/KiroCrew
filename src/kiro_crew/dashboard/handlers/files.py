@@ -256,6 +256,10 @@ from kiro_crew.dashboard.upload_limits import (  # noqa: F401
     knowledge_ceiling_bytes,
     upload_max_bytes,
 )
+from kiro_crew.dashboard.workspace_in_use import (  # noqa: F401
+    chats_using_workspace,
+    workspace_in_use_response,
+)
 from kiro_crew.doc_blocks import extract_blocks  # noqa: F401
 from kiro_crew.doc_parser import extract_slides, extract_text, join_slides  # noqa: F401
 from kiro_crew.git_config_hooks import (  # noqa: F401

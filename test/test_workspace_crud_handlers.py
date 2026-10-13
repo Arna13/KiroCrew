@@ -32,7 +32,9 @@ from kiro_crew.dashboard.handlers import (
 # ── Helpers ──
 
 
-def _req(body: dict | None = None, match_info: dict | None = None) -> web.Request:
+def _req(
+    body: dict | None = None, match_info: dict | None = None, state: object | None = None
+) -> web.Request:
     """Build a mocked aiohttp.web.Request carrying real body bytes.
 
     The three handlers are owner-gated, and the gate reads ``request.app["state"]``
@@ -45,7 +47,7 @@ def _req(body: dict | None = None, match_info: dict | None = None) -> web.Reques
     # itself, so the malformed case is expressed as malformed bytes.
     raw = json.dumps(body).encode() if body is not None else b"{bad json"
     app = web.Application()
-    app["state"] = NoConfiguredOwner()
+    app["state"] = state if state is not None else NoConfiguredOwner()
     request = make_mocked_request(
         "POST",
         "/api/workspaces",
@@ -569,6 +571,168 @@ class TestDeleteHandler:
         assert "staging" not in doc["workspaces"]
         assert "default" in doc["workspaces"], "the delta write dropped an unrelated entry"
         mock_sel().log_api_access.assert_called_once()
+
+
+# ── Open chats holding the workspace ──
+
+
+class _Slot:
+    def __init__(
+        self,
+        key: str,
+        title: str,
+        workspace: str,
+        *,
+        app: str = "",
+        origin: str = "user",
+        channel: bool = False,
+    ) -> None:
+        self.key = key
+        self.title = title
+        self.workspace = workspace
+        self._app = app
+        self._origin = origin
+        self.channel_origin = channel
+
+
+class _StateWithSlots(NoConfiguredOwner):
+    def __init__(self, *slots: _Slot) -> None:
+        self._slots = {s.key: s for s in slots}
+
+
+def _two_workspaces() -> KiroCrewConfig:
+    return _cfg(
+        workspaces={
+            "default": WorkspaceConfig(dir="workspace"),
+            "staging": WorkspaceConfig(dir="workspace-staging"),
+        },
+    )
+
+
+class TestOpenChatsHoldTheWorkspace:
+    """A chat keeps the directory it was given, so the entry may not move under it."""
+
+    @pytest.mark.asyncio
+    async def test_delete_refused_and_names_the_chats(self, tmp_path: Path) -> None:
+        cfg = _two_workspaces()
+        _seed_file(tmp_path, cfg)
+        state = _StateWithSlots(
+            _Slot("chat-1", "Fix the build", "staging"),
+            _Slot("chat-2", "Other work", "default"),
+        )
+        with patch(_LOAD, return_value=cfg), patch(_CFGDIR, return_value=tmp_path), patch(_SEL):
+            resp = await api_workspaces_delete(_req(match_info={"name": "staging"}, state=state))
+        assert resp.status == 409
+        payload = json.loads(resp.body)
+        assert payload["code"] == "workspace_in_use"
+        assert "open chats: Fix the build." in payload["error"]
+        assert "Other work" not in payload["error"]
+        assert "staging" in _read_doc(tmp_path)["workspaces"]
+
+    @pytest.mark.asyncio
+    async def test_dir_change_refused_and_names_the_chats(self, tmp_path: Path) -> None:
+        cfg = _two_workspaces()
+        _seed_file(tmp_path, cfg)
+        (tmp_path / "moved").mkdir()
+        state = _StateWithSlots(_Slot("chat-1", "Fix the build", "staging"))
+        with (
+            patch(_LOAD, return_value=cfg),
+            patch(_CFGDIR, return_value=tmp_path),
+            patch(_DATAHOME, return_value=tmp_path),
+            patch(_SEL),
+        ):
+            resp = await api_workspaces_update(
+                _req({"dir": "moved"}, match_info={"name": "staging"}, state=state)
+            )
+        assert resp.status == 409
+        payload = json.loads(resp.body)
+        assert payload["code"] == "workspace_in_use"
+        assert "Fix the build" in payload["error"]
+        assert _read_doc(tmp_path)["workspaces"]["staging"]["dir"] == "workspace-staging"
+
+    @pytest.mark.asyncio
+    async def test_unset_slot_workspace_counts_as_default(self, tmp_path: Path) -> None:
+        cfg = _cfg()
+        _seed_file(tmp_path, cfg)
+        (tmp_path / "moved").mkdir()
+        state = _StateWithSlots(_Slot("chat-1", "Draft", ""))
+        with (
+            patch(_LOAD, return_value=cfg),
+            patch(_CFGDIR, return_value=tmp_path),
+            patch(_DATAHOME, return_value=tmp_path),
+            patch(_SEL),
+        ):
+            resp = await api_workspaces_update(
+                _req({"dir": "moved"}, match_info={"name": "default"}, state=state)
+            )
+        assert resp.status == 409
+
+    @pytest.mark.asyncio
+    async def test_an_untitled_chat_is_named_not_shown_by_its_key(self, tmp_path: Path) -> None:
+        cfg = _two_workspaces()
+        _seed_file(tmp_path, cfg)
+        state = _StateWithSlots(_Slot("chat-7", "chat-7", "staging"))
+        with patch(_LOAD, return_value=cfg), patch(_CFGDIR, return_value=tmp_path), patch(_SEL):
+            resp = await api_workspaces_delete(_req(match_info={"name": "staging"}, state=state))
+        error = json.loads(resp.body)["error"]
+        assert "Untitled chat" in error
+        assert "chat-7" not in error
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "slot",
+        [
+            _Slot("app-1", "Worker", "staging", app="spec-builder", origin="app"),
+            _Slot("cron-1", "Nightly", "staging", origin="cron"),
+            _Slot("slack-1", "Thread", "staging", channel=True),
+        ],
+        ids=["app-worker", "cron-run", "channel-thread"],
+    )
+    async def test_a_slot_the_owner_cannot_close_does_not_block(
+        self, tmp_path: Path, slot: _Slot
+    ) -> None:
+        """No sidebar tab to close, so it would make a refusal nobody can clear."""
+        cfg = _two_workspaces()
+        _seed_file(tmp_path, cfg)
+        state = _StateWithSlots(slot)
+        with patch(_LOAD, return_value=cfg), patch(_CFGDIR, return_value=tmp_path), patch(_SEL):
+            resp = await api_workspaces_delete(_req(match_info={"name": "staging"}, state=state))
+        assert resp.status == 200
+
+    @pytest.mark.asyncio
+    async def test_long_list_is_shortened_in_the_message(self, tmp_path: Path) -> None:
+        cfg = _two_workspaces()
+        _seed_file(tmp_path, cfg)
+        state = _StateWithSlots(*(_Slot(f"chat-{i}", f"T{i}", "staging") for i in range(7)))
+        with patch(_LOAD, return_value=cfg), patch(_CFGDIR, return_value=tmp_path), patch(_SEL):
+            resp = await api_workspaces_delete(_req(match_info={"name": "staging"}, state=state))
+        error = json.loads(resp.body)["error"]
+        assert "T0, T1, T2, T3, T4 and 2 more" in error
+        assert "T5" not in error
+
+    @pytest.mark.asyncio
+    async def test_same_dir_or_other_workspace_chats_do_not_block(self, tmp_path: Path) -> None:
+        cfg = _two_workspaces()
+        _seed_file(tmp_path, cfg)
+        (tmp_path / "workspace-staging").mkdir()
+        (tmp_path / "moved").mkdir()
+        holding = _StateWithSlots(_Slot("chat-1", "Fix the build", "staging"))
+        elsewhere = _StateWithSlots(_Slot("chat-2", "Other work", "default"))
+        with (
+            patch(_LOAD, return_value=cfg),
+            patch(_CFGDIR, return_value=tmp_path),
+            patch(_DATAHOME, return_value=tmp_path),
+            patch(_SEL),
+        ):
+            same = await api_workspaces_update(
+                _req({"dir": "workspace-staging"}, match_info={"name": "staging"}, state=holding)
+            )
+            moved = await api_workspaces_update(
+                _req({"dir": "moved"}, match_info={"name": "staging"}, state=elsewhere)
+            )
+        assert same.status == 200
+        assert moved.status == 200
+        assert _read_doc(tmp_path)["workspaces"]["staging"]["dir"] == "moved"
 
 
 # ── In-lock precondition re-check ──

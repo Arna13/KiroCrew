@@ -913,4 +913,16 @@ describe('KiroCrewCfgTab workspace actions', () => {
     expect(await within(form('ws-idle')).findByText(/referenced by agents: bot/)).toBeInTheDocument()
     expect(within(form('ws-idle')).getByRole('textbox')).toHaveValue('ws-idle')
   })
+
+  it('shows which open chats hold the workspace when a directory change is refused', async () => {
+    vi.mocked(api).updateWorkspace = vi.fn().mockRejectedValue(new Error(
+      "Workspace 'ws-idle' is in use by open chats: Fix the build. Close them first, then change its directory.",
+    ))
+    await renderTab()
+    fireEvent.click(within(row('ws-idle')).getByRole('button', { name: 'Change directory' }))
+    fireEvent.change(within(form('ws-idle')).getByRole('textbox'), { target: { value: '/data/idle' } })
+    fireEvent.click(within(form('ws-idle')).getByRole('button', { name: 'Save' }))
+    expect(await within(form('ws-idle')).findByText(/in use by open chats: Fix the build/)).toBeInTheDocument()
+    expect(within(form('ws-idle')).getByRole('textbox')).toHaveValue('/data/idle')
+  })
 })

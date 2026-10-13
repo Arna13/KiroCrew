@@ -17,6 +17,7 @@ if TYPE_CHECKING:
         WorkspaceConfig,
         WorkspaceDirUnusable,
         _sel,
+        chats_using_workspace,
         coerce_dict_section,
         data_home,
         drained_to_thread,
@@ -27,6 +28,7 @@ if TYPE_CHECKING:
         read_bounded_json,
         run_config_write,
         update_config_locked,
+        workspace_in_use_response,
     )
 
 
@@ -431,6 +433,13 @@ async def api_workspaces_update(request: web.Request) -> web.Response:
                 {"error": f"Directory '{new_dir}' is already used by another workspace"},
                 status=409,
             )
+        # The stored string, not a resolve: a resolve here is one more blocking
+        # filesystem call on the event loop, and a respelling of the same
+        # directory being refused while a chat holds it is the safe side.
+        if new_dir != cfg.workspaces[name].dir:
+            chats = chats_using_workspace(request, name)
+            if chats:
+                return workspace_in_use_response(name, chats, "change its directory")
 
     # Persist as ONE delta RMW on the raw document inside the flock hold (see
     # workspace.create): the mutation AND its state-dependent precondition
@@ -515,6 +524,9 @@ async def api_workspaces_delete(request: web.Request) -> web.Response:
             {"error": f"Workspace '{name}' is referenced by agents: {', '.join(referencing)}"},
             status=409,
         )
+    chats = chats_using_workspace(request, name)
+    if chats:
+        return workspace_in_use_response(name, chats, "delete it")
     # Persist as ONE delta RMW on the raw document inside the flock hold (see
     # workspace.create); the referential guards (default workspace, agent
     # references) are re-run against the document as read inside the lock.
