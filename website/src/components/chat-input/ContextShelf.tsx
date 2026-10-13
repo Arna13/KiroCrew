@@ -331,7 +331,7 @@ export function ContextUsageControl({ contextPct, contextUsedTokens, contextWind
 /** The model chip. It names the level in force beside the model; the level is
  *  CHANGED inside the model picker the chip opens (model and effort are one
  *  control, docs/decisions/2026-06-14-chat-composer-model-and-effort-are-one-control.md). */
-export function ModelChip({ modelName, modelIsJevRouted, modelIsInheritedDefault, modelIsAutoChosen, reasoningEffort, effortIsDefault, hasEffort, isRunning, shelfCompact, shelfTiny, composerControl, modelChipPressedFromComposerRef, onModelClick }: {
+export function ModelChip({ modelName, modelIsJevRouted, modelIsInheritedDefault, modelIsAutoChosen, reasoningEffort, effortIsDefault, hasEffort, isRunning, shelfTiny, composerControl, modelChipPressedFromComposerRef, onModelClick }: {
   modelName: string
   modelIsJevRouted?: boolean
   modelIsInheritedDefault?: boolean
@@ -340,7 +340,6 @@ export function ModelChip({ modelName, modelIsJevRouted, modelIsInheritedDefault
   effortIsDefault: boolean
   hasEffort?: boolean
   isRunning: boolean
-  shelfCompact: boolean
   shelfTiny: boolean
   composerControl: () => ComposerControl | null
   /** Owned by the composer, so a press outlives a remount of the chip exactly as it did. */
@@ -419,15 +418,16 @@ export function ModelChip({ modelName, modelIsJevRouted, modelIsInheritedDefault
         <span className="opacity-60 shrink-0">{i18nT('components.jobForm.auto')}</span>
       </>
     )}
-    {/* A default and an override show the same level, and a glance
-        at "High" alone could not tell which one set it. So the chip
-        says so where there is room -- the picker's own "Default ·
-        High" -- and keeps the bare level only in a compact shelf,
-        where the hover / accessible name above still carries it. */}
-    {hasEffort && !shelfTiny && (
+    {/* The chip shows the concrete level in force and never the word
+        "Default": whether a default or an override set it is not
+        something the user needs at a glance, and the hover / accessible
+        name above still says which. With no level known (the model
+        decides), there is nothing concrete to show, so the segment is
+        left out. */}
+    {hasEffort && !shelfTiny && !!reasoningEffort && (
       <>
         <span className="opacity-30 select-none shrink-0" aria-hidden="true">·</span>
-        <span className="opacity-60 shrink-0">{shelfCompact ? effortLabel(reasoningEffort || '') : effortShown}</span>
+        <span className="opacity-60 shrink-0">{effortLabel(reasoningEffort)}</span>
       </>
     )}
   </button>
