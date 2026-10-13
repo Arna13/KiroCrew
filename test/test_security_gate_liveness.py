@@ -262,7 +262,18 @@ def _url_payload_command(n: int) -> str:
 #: MCP server) parses a large hosts file in the call instead of refusing as
 #: pending with no retry coming. One branch, reusing ``atomic_write.on_event_loop``,
 #: and the docstring and comment naming it; the on-loop path is unchanged.
-_PACKAGE_LINE_BUDGET = 28_872
+#:
+#: Raised again, from 28,872, for ``rm_floor``: the argv floor that reads a
+#: recursive-force ``rm`` in any flag or home spelling against the root or home dir
+#: itself, with a word split on the shared quote state machine that drops comments,
+#: heredoc bodies and redirections, per-occurrence reachability that skips printed,
+#: single-quoted, commented and quoted-heredoc substitutions,
+#: and its gated branch at the end of ``is_denied``. No pattern moved.
+#:
+#: Raised again, from 29,268, for the arithmetic-paren stack in ``rm_floor._scan``:
+#: a ``<<`` inside ``((``/``$((`` is a shift, while a heredoc inside ``$(`` or a
+#: subshell is still read as data. No pattern moved.
+_PACKAGE_LINE_BUDGET = 29_274
 
 #: Ceiling on any ONE file in the package. This is what the bound is really for --
 #: a package total says nothing about a single file growing back into a second
