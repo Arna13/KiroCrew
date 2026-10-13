@@ -1868,7 +1868,8 @@ Two preconditions gate the steer, and both matter:
 - `provider.supports_steer` — membership in `ACP_BACKENDS_STEER`, since the
   dormant Claude backend seam has none. On this path `provider` is the
   registry's `AcpProvider`, which reports False for a backend with
-  `steer_needs_loss_recovery` (codex, `ACP_BACKENDS_STEERING_REQUEST`) and
+  `steer_needs_loss_recovery` (codex, `ACP_BACKENDS_STEERING_REQUEST`; opencode,
+  `ACP_BACKENDS_STEER_CONCURRENT_PROMPT`) and
   refuses its steer, so a mid-turn channel message on a codex session always
   queues; codex's `_session/steering` is spoken only for the dashboard composer,
   which steers the inner handle. When false the message falls through to the
