@@ -351,11 +351,15 @@ def _match_trusted_channel_command(cmd: str, agent: "ChannelAgent") -> str | Non
     Compound commands never match a base grant and only match an exact grant
     granted for that identical compound; there is no pattern language and no
     per-segment matching, so a grant can never cover text the user did not
-    read. Returns an audit label or None.
+    read. The base is derived with ``_offerable_base_binary``, the same rule the
+    card offers from: a first token holding a backslash has no base, because
+    POSIX tokenizing drops the backslash and ``n\\pm`` would otherwise match a
+    ``npm`` grant while Windows runs a different file. Returns an audit label
+    or None.
     """
     if cmd in agent._trusted_commands:
         return f"command:{cmd}"
-    base = _shell_base_binary(cmd)
+    base = _offerable_base_binary(cmd)
     if base is not None and base in agent._trusted_bases:
         return f"base:{base}"
     return None

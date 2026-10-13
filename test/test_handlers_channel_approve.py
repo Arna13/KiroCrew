@@ -222,6 +222,17 @@ class TestChannelApproveTrustTiers:
         assert _match_trusted_channel_command(cmd, agent)
 
     @pytest.mark.asyncio
+    async def test_base_grant_never_matches_a_backslash_spelling(self):
+        """``shlex`` drops a backslash, so ``n\\pm`` tokenizes to ``npm``; on
+        Windows it runs a different file. A base grant must not cover it."""
+        agent = _make_agent(pending_command="npm test")
+        agent._trusted_bases.update({"npm", ".deploy.bat"})
+        assert _match_trusted_channel_command("npm install", agent) == "base:npm"
+        assert _match_trusted_channel_command("n\\pm install", agent) is None
+        assert _match_trusted_channel_command(".\\deploy.bat --go", agent) is None
+        assert _match_trusted_channel_command(".deploy.bat --go", agent) == "base:.deploy.bat"
+
+    @pytest.mark.asyncio
     async def test_trust_base_refused_for_quoted_executables(self):
         """Naive first-token slicing turned '"./my tool" --safe' into a
         './my'-prefixed grant covering different executables; shlex-aware
