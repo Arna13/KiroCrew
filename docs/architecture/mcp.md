@@ -4173,6 +4173,22 @@ direct host store the cron tools always had before the transport was required;
 a gateway-minted key with no injected caller is the non-pooled topology and
 reports the outage instead.
 
+The kiro-backend element list carries one population `CONTROL_PLANE_BACKENDS`
+does not: the builtin app servers that run Kiro Crew's own code
+(`session_mcp.builtin_app_identity_launches`). A shipped, builtin-owned manifest
+that declares `command: "kirocrew"` (Mochi's `mochi:mochi`) is pinned by
+`bridges._pin_host_cli_command` to the gateway's interpreter and serves through
+`mcp_shared`, so it reads the same attested tool policy. kiro-cli mounts it
+straight from the spec, and without its own element every call refuses as
+`identity_unattested` for session `mcp`. `kiro_control_plane_servers` therefore
+re-declares a granted one after the managed servers, with the launch re-derived
+from the manifest by `apps.execution.builtin_app_host_cli_mcp_launches` and
+pinned exactly as registration pins it, never read from the spec, and with
+`PYTHONPATH` and `KIROCREW_HOME` set from that pin over anything the spec
+declares. A user app, a shadowed builtin, or a builtin app that ships its own
+binary is not Kiro Crew's code and gets no element. gatewayd's set stays the
+managed servers: a pooled app server is not handed the token.
+
 `register_hook` resolves through `require_strict_session_key`. Member hooks
 capture their originating execution record before provider allocation; Global
 hooks retain their existing no-conversation behavior. Hook context and display
