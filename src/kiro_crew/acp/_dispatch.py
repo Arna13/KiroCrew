@@ -64,7 +64,7 @@ from kiro_crew.acp.types import (
     JsonRpcMessage,
     RefusalInfo,
 )
-from kiro_crew.acp_backends import ACP_BACKENDS_META_IDENTITY
+from kiro_crew.acp_backends import ACP_BACKEND_DEEPSEEK, ACP_BACKENDS_META_IDENTITY
 from kiro_crew.agent_files import kas_wire_agent_id
 from kiro_crew.mcp_gateway.tool_surface import mcp_identity_name, mcp_identity_unreadable
 from kiro_crew.metrics.tool_calls import note_tool_call_started, record_tool_call_finished
@@ -2406,6 +2406,12 @@ def build_permission_event(
         _harness_tool_id = qualified_harness_tool_id(
             harness_backend, harness_tool_name_cache.get(_ck, ""), harness_mcp_servers
         )
+    # dsh's permission frame names only the toolCallId, so which dsh tool a
+    # request is for comes only from the name its preceding tool_call frame
+    # stated. The gate reads it on a READ_ONLY turn alone.
+    _deepseek_tool_name = ""
+    if harness_backend == ACP_BACKEND_DEEPSEEK and harness_tool_name_cache is not None:
+        _deepseek_tool_name = harness_tool_name_cache.get(_ck, "") if tool_call_id else ""
 
     # The agent's stated reason for the call, shown beside the approval. The
     # same agent-authored display text a tool_call frame carries, read the same
@@ -2443,6 +2449,7 @@ def build_permission_event(
         diff_path=_diff_path,
         spawn_target=_spawn_target,
         harness_tool_id=_harness_tool_id,
+        deepseek_tool_name=_deepseek_tool_name,
         tool_purpose=_purpose,
     )
     return event, recorded

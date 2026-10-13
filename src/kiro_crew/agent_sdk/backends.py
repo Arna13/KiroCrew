@@ -2339,9 +2339,9 @@ ACP_BACKENDS_CLIENT_META_SETTINGS = frozenset({ACP_BACKEND_KAS})
 ACP_BACKENDS_MCP_CONFIG_HOT_RELOAD = frozenset({ACP_BACKEND_KIRO})
 
 # Backends on which a Side Chat turn may EXECUTE read-only tools under
-# ``ToolApprovalPolicy.READ_ONLY``. The allowance rests on a kiro-cli agent-spec
-# mechanism: the side session is bound to a derived ``<agent>--readonly`` spec
-# (``dashboard/side_readonly_spec``) whose emptied grants make every tool call
+# ``ToolApprovalPolicy.READ_ONLY``. On kiro-cli and KAS the allowance rests on an
+# agent-spec mechanism: the side session is bound to a derived ``<agent>--readonly``
+# spec (``dashboard/side_readonly_spec``) whose emptied grants make every tool call
 # raise a permission request the host gate judges. Another harness has its own
 # pre-approval surface — claude-agent-acp's ``permissions.allow`` /
 # ``bypassPermissions``, KAS ``permissions`` rules read from its own store — that
@@ -2349,7 +2349,8 @@ ACP_BACKENDS_MCP_CONFIG_HOT_RELOAD = frozenset({ACP_BACKEND_KIRO})
 # run with no READ_ONLY decision and no SEL row. Off this set the side turn runs
 # ``REJECT_ALL``, the pre-allowance posture, and its footer says tools are
 # unavailable there. A harness joins by demonstrating that every tool call it
-# serves reaches ``session/request_permission`` under the derived spec.
+# serves reaches ``session/request_permission`` with no pre-approval of its own in
+# front of it, and that the gate can prove which of those calls are reads.
 #
 # KAS is a member on measurement. It takes the derived spec over the wire
 # (``acp.kas_agents`` projects ``<agent>--readonly`` into ``customAgents``), and
@@ -2375,16 +2376,29 @@ ACP_BACKENDS_MCP_CONFIG_HOT_RELOAD = frozenset({ACP_BACKEND_KIRO})
 # read-only posture is expressed in the harness's own permission vocabulary.
 #
 # pi is NOT a member either. Every one of its tool calls does reach
-# ``session/request_permission``, but through Crew's gate extension rather than the
-# derived spec, and the extension expresses no read-only posture -- it asks about
-# everything and lets the host decide.
-# deepseek is NOT a member, and the tempting part is that its permission vocabulary
-# HAS a read-only posture Crew can select with ``DSH_PERMISSION_MODE``. Selecting it
-# would confine the harness and still not produce a READ_ONLY DECISION anyone can
-# see: that posture is enforced by the harness's own sandbox, which denies rather
-# than asks, so no call reaches the host gate and no SEL row is written. A side turn
-# on it runs ``REJECT_ALL``.
-ACP_BACKENDS_SIDE_READONLY = frozenset({ACP_BACKEND_KIRO, ACP_BACKEND_KAS})
+# ``session/request_permission`` through Crew's gate extension, the route deepseek
+# joins by below, but what its frames let the gate prove about a read has not been
+# measured.
+#
+# deepseek is a member on measurement, and not through its own read-only posture
+# (``DSH_PERMISSION_MODE``): that posture is enforced by the harness's sandbox, which
+# denies rather than asks, so it would produce no READ_ONLY decision and no SEL row.
+# It is a member through Crew's gate plugin, which every deepseek session already
+# runs (``ACP_BACKEND_ROUTING``). The plugin turns every ``tools/pre-execute``
+# ``allow`` into ``ask`` and keeps only the harness's own denies, the per-launch
+# patch pins the approval policy to ``ask``, and the load marker proves the stock ACP
+# bridge is the only answerer, so the harness has no allow rule a call could ride
+# past the gate on. Captured on dsh 0.2.0-rc.2 with the plugin composed
+# (``test/fixtures/acp_frames/deepseek/side-read-only-live.jsonl``): ``read``,
+# ``grep``, ``glob``, ``write``, ``bash`` and an unknown ``mcp__probe__read`` each
+# raised ``session/request_permission``, and the rejected write and bash left no
+# file. What the gate can PROVE there: each tool_call frame names the dispatched tool
+# in ``title`` (``kind: other``, no ``_meta``), every MCP tool is ``mcp__``-prefixed,
+# so ``read``/``grep``/``glob`` fold onto ``fs_read``/``grep``/``glob``
+# (``platform.tool_names.DEEPSEEK_READ_ONLY_TOOLS``) on a READ_ONLY turn, when the
+# call names what it reads as an absolute path, and every other call is refused. Its ``bash`` streams as ``kind: other`` with no shell command recovered,
+# so a read-only command is refused there too.
+ACP_BACKENDS_SIDE_READONLY = frozenset({ACP_BACKEND_KIRO, ACP_BACKEND_KAS, ACP_BACKEND_DEEPSEEK})
 
 # Backends whose process answers ``session/new``, ``session/load`` and
 # ``session/set_mode`` one at a time, so a session start sent while one of those is

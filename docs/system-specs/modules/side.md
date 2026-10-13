@@ -414,7 +414,7 @@ with `base_spec_missing` before a session exists.
 **The allowance is a harness capability, granted by positive membership.**
 Whether a side turn may execute read-only tools at all is
 `ACP_BACKENDS_SIDE_READONLY` (`agent_sdk/backends.py`, harness-parity H6) —
-kiro-cli and KAS. kiro-cli loads the derived spec off disk; KAS takes it over
+kiro-cli, KAS and deepseek. kiro-cli loads the derived spec off disk; KAS takes it over
 the wire (`acp/kas_agents` projects `<agent>--readonly` into `customAgents`),
 and the derivation empties its `permissions` block with the other grants, so
 every KAS tool call raises `session/request_permission` (measured on kiro-cli
@@ -434,7 +434,21 @@ read-only allowlist: `read_file` and `list_directory` (`fs_read`),
 `read_file` is refused: KAS stamps `_meta.kiro.serverName` on its tool_call
 frame, and a call with a server is never a host built-in. The sensitive-path
 deny runs before the proof, so a `read_file` of `~/.aws/credentials` is
-refused (`test_side_readonly_kas.py`). Another harness has its own
+refused (`test_side_readonly_kas.py`). deepseek joins without the derived
+spec doing any work: every deepseek session runs Crew's gate plugin, which
+turns each harness `allow` into `ask` and keeps only the harness's own
+denies, so every call raises `session/request_permission` (captured on dsh
+0.2.0-rc.2, `acp_frames/deepseek/side-read-only-live.jsonl`). Its tool_call
+frame names the dispatched tool in `title` with `kind: other`, and on a
+`READ_ONLY` turn alone `read`, `grep` and `glob` are read under `fs_read`,
+`grep` and `glob` (`acp/_dispatch.build_permission_event`,
+`deepseek_tool_name`), deny rules and ceilings bind both spellings, and the
+call must name what it reads as an absolute path: dsh resolves a missing or
+relative target against the session's work dir, which the sensitive-path and
+`filesystem.read` checks never see, so such a call is refused. Every other name is refused: an MCP tool is always
+`mcp__<server>__<tool>`, two calls under one id in a turn leave the name
+unknown (`AcpClient`), and its `bash` streams no shell command the gate can
+judge (`test_side_readonly_deepseek.py`). Another harness has its own
 pre-approval surface (claude-agent-acp `permissions.allow` /
 `bypassPermissions`) that neither the derived spec nor the host gate can see:
 a call it pre-approves would run with no READ_ONLY decision and no SEL row. Off the set,

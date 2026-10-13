@@ -171,6 +171,7 @@ from kiro_crew.hook_runtime.tool_identity import (  # noqa: F401
     _context_matches,
     _has_global_inline_flags,
     _is_declared_builtin_mcp_server,
+    _is_deepseek_read_only_builtin,
     _is_first_party_app,
     _is_host_read_only_builtin,
     _normalize_tool_name,
@@ -211,6 +212,8 @@ from kiro_crew.platform.governance import (
 # / ``hooks.target_paths`` (and the work caps) stay importable at their historic
 # names; hooks keeps its HARD-DENY reading of ``TargetPaths.truncated``.
 from kiro_crew.platform.tool_names import (  # noqa: F401  (read by hook_runtime owners)
+    DEEPSEEK_READ_ONLY_TOOLS,
+    deepseek_policy_alias,
     policy_alias_split,
     policy_aliases,
 )
@@ -1065,6 +1068,7 @@ class HookManager:
         mcp_identity_trusted: bool = False,
         mcp_identity_unreadable: bool = False,
         kas_builtin_ids: bool = False,
+        deepseek_tool_name: str = "",
         spawn_target: str = "",
         resolved_agent: str = "",
         classifier_only: bool = False,
@@ -1097,6 +1101,7 @@ class HookManager:
                 identity_trusted=mcp_identity_trusted,
                 identity_unreadable=mcp_identity_unreadable,
                 kas_builtin_ids=kas_builtin_ids,
+                deepseek_tool_name=deepseek_tool_name,
                 spawn_target=spawn_target,
                 resolved_agent=resolved_agent,
             ),

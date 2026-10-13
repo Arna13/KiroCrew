@@ -561,6 +561,7 @@ class TestHookGateKwargs:
         "mcp_identity_trusted": "mcp_identity_trusted",
         "mcp_identity_unreadable": "mcp_identity_unreadable",
         "kas_builtin_ids": "kas_builtin_ids",
+        "deepseek_tool_name": "deepseek_tool_name",
         "spawn_target": "spawn_target",
     }
 
@@ -584,6 +585,7 @@ class TestHookGateKwargs:
             mcp_identity_trusted=True,
             mcp_identity_unreadable=True,
             kas_builtin_ids=True,
+            deepseek_tool_name="read",
             spawn_target="helper",
         )
         kwargs = hook_gate_kwargs(event)
@@ -598,6 +600,7 @@ class TestHookGateKwargs:
             "mcp_identity_trusted": True,
             "mcp_identity_unreadable": True,
             "kas_builtin_ids": True,
+            "deepseek_tool_name": "read",
             "spawn_target": "helper",
         }
         assert set(kwargs) == set(self.EVENT_FIELD_BY_KWARG)
@@ -625,6 +628,7 @@ class TestHookGateKwargs:
             "mcp_identity_trusted": False,
             "mcp_identity_unreadable": False,
             "kas_builtin_ids": False,
+            "deepseek_tool_name": "",
             "spawn_target": "",
         }
         noisy = hook_gate_kwargs(

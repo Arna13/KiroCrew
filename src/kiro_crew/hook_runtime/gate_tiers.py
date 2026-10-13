@@ -36,6 +36,7 @@ if TYPE_CHECKING:
         _cu_read_only_auto_approve,
         _governance_denial,
         _is_declared_builtin_mcp_server,
+        _is_deepseek_read_only_builtin,
         _is_first_party_app,
         _is_host_read_only_builtin,
         _normalize_tool_name,
@@ -44,6 +45,7 @@ if TYPE_CHECKING:
         _tool_matches,
         audit_bash_exfiltration,
         current_context,
+        deepseek_policy_alias,
         edit_target_candidates,
         is_edit_call,
         is_read_only_bash,
@@ -317,6 +319,13 @@ class GateFacts:
             )
             if alias and alias not in targets:
                 targets.append(alias)
+            # A deepseek call's own name and its kiro-cli policy name, on the
+            # READ_ONLY turn that may approve it: its permission frame carries no
+            # title, so a rule on ``read`` or ``fs_read`` meets dsh's ``read`` here.
+            deepseek = call.deepseek_tool_name if self.classifier_only else ""
+            for name in (deepseek, deepseek_policy_alias(deepseek)):
+                if name and name not in targets:
+                    targets.append(name)
             if call.command:
                 targets.append(call.command)
             for raw_command in self.raw_shell_commands:
@@ -782,6 +791,16 @@ def _tier_governance(facts: GateFacts, tier: GateTier) -> ToolHookResult | None:
     else:
         alias = "" if call.mcp_server else _HOST_READ_ONLY_BUILTIN_ALIASES.get(call.mcp_tool, "")
         identity = tuple(name for name in (call.mcp_tool, alias) if name and name != call.title)
+        # A deepseek call on the READ_ONLY turn that may approve it: its own name,
+        # and for a read built-in the kiro-cli name beside it as ONE identity, so a
+        # ceiling on either ``read`` or ``fs_read`` binds dsh's ``read`` there.
+        deepseek = call.deepseek_tool_name if facts.classifier_only else ""
+        if deepseek and not call.mcp_server:
+            deepseek_alias = deepseek_policy_alias(deepseek)
+            if deepseek_alias:
+                alias_groups = ((deepseek, deepseek_alias),)
+            elif deepseek != call.title:
+                identity = (*identity, deepseek)
     gov_reason = _governance_denial(
         facts.ctx,
         call.title,
@@ -1070,6 +1089,8 @@ def _tier_read_only(facts: GateFacts, tier: GateTier) -> ToolHookResult | None:
             call.mcp_server,
             mcp_identity_trusted=call.identity_trusted,
             kas_builtin_ids=call.kas_builtin_ids,
+        ) or _is_deepseek_read_only_builtin(
+            call.deepseek_tool_name, call.mcp_server, call.raw_params
         ):
             return ToolHookResult.auto_approve(read_only=True)
         return ToolHookResult.allow()
